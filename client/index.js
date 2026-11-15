@@ -33,7 +33,6 @@ window.__ModuleLoader__.load({
       title: 'Projects',
       chatTab: 'Conversation',
       settingsTab: 'Settings',
-      executors: 'Executors',
       startCoordinator: 'Start coordinator',
       startCoordinatorHint: 'The coordinator plans the goal and dispatches tasks. Its conversation lives in this column.',
       noConversation: 'This task has no executor session yet.',
@@ -109,6 +108,17 @@ window.__ModuleLoader__.load({
       expandList: 'Expand project list',
       resizeColumns: 'Resize columns',
       taskActions: 'Task actions',
+      threads: 'Threads',
+      searchThreads: 'Search threads',
+      collapseAll: 'Collapse all',
+      expandAll: 'Expand all',
+      noMatches: 'No threads match.',
+      groupRunning: 'Running',
+      groupReview: 'Ready for review',
+      groupWaiting: 'Waiting on you',
+      groupIdle: 'Idle',
+      groupResolved: 'Resolved',
+      justNow: 'just now',
     }
 
     const ZH = {
@@ -116,7 +126,6 @@ window.__ModuleLoader__.load({
       title: '项目',
       chatTab: '对话',
       settingsTab: '设置',
-      executors: '执行者',
       startCoordinator: '启动协调者',
       startCoordinatorHint: '协调者负责拆解目标、派发任务；它的对话就在这一栏。',
       noConversation: '这个任务还没有执行者会话。',
@@ -192,6 +201,17 @@ window.__ModuleLoader__.load({
       expandList: '展开项目栏',
       resizeColumns: '调整栏宽',
       taskActions: '任务操作',
+      threads: '线程',
+      searchThreads: '搜索线程',
+      collapseAll: '全部折叠',
+      expandAll: '全部展开',
+      noMatches: '没有匹配的线程。',
+      groupRunning: '执行中',
+      groupReview: '待验收',
+      groupWaiting: '等你处理',
+      groupIdle: '空闲',
+      groupResolved: '已解决',
+      justNow: '刚刚',
     }
 
     // ---------------------------------------------------------------------
@@ -244,8 +264,21 @@ window.__ModuleLoader__.load({
 .pj-exec-info{flex:0 1 auto;min-height:0;overflow:auto;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .pj-exec-detail > .pj-chat-body{flex:1 1 0;min-height:140px}
 .pj-exec-info .pj-task-output{max-height:none}
-.pj-group{margin-bottom:16px}
-.pj-group-title{font-size:12px;font-weight:500;color:var(--dsw-alias-label-tertiary);margin-bottom:6px}
+.pj-exec-tools{display:flex;align-items:center;gap:8px;padding:0 14px 10px}
+.pj-search{flex:1 1 auto;min-width:0;height:28px;padding:0 10px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
+.pj-search:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+.pj-group{margin-bottom:14px}
+.pj-group-title{display:flex;align-items:center;gap:6px;width:100%;padding:3px 2px;margin-bottom:4px;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;font-weight:500;text-align:left;cursor:pointer}
+.pj-group-title:hover{color:var(--dsw-alias-label-primary)}
+.pj-group-chevron{display:inline-block;width:10px;flex:0 0 auto;font-size:11px;line-height:1;color:var(--dsw-alias-label-tertiary)}
+.pj-group-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pj-thread-icon{grid-area:icon;align-self:start;margin-top:3px;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:0 0 auto}
+.pj-thread-review{color:var(--dsw-alias-state-success-primary)}
+.pj-thread-waiting{color:var(--dsw-alias-state-warn-primary)}
+.pj-thread-idle{color:var(--dsw-alias-label-tertiary)}
+.pj-thread-spinner{width:12px;height:12px;box-sizing:border-box;border-radius:999px;border:2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 25%, transparent);border-top-color:var(--dsw-alias-state-business-primary);animation:pj-spin .9s linear infinite}
+.pj-thread-idle-dot{width:10px;height:10px;box-sizing:border-box;border-radius:999px;border:1.5px dashed currentColor}
+@keyframes pj-spin{to{transform:rotate(360deg)}}
 .pj-start{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:100%;padding:24px;text-align:center}
 .pj-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 .pj-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;cursor:pointer;white-space:nowrap}
@@ -280,12 +313,18 @@ window.__ModuleLoader__.load({
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
 .pj-field{display:flex;flex-direction:column;gap:4px;min-width:0}
 .pj-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.pj-task-row{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;margin-bottom:4px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+/* A thread card: icon in the gutter, then a title line, a one-line summary and
+   optional chips. Two rows plus chips, and no controls at all — every action
+   lives in the right-click menu or on the detail page. */
+.pj-task-row{display:grid;grid-template-columns:16px minmax(0,1fr) auto;grid-template-areas:"icon title time" "icon sub sub" "icon chips chips";align-items:center;column-gap:8px;row-gap:1px;width:100%;padding:8px 10px;margin-bottom:2px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
 .pj-task-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .pj-task-row.pj-active{background:var(--dsw-alias-interactive-bg-active)}
 .pj-task-row:disabled{opacity:.6;cursor:default}
-.pj-task-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
-.pj-task-worker{flex:0 0 auto;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.pj-task-name{grid-area:title;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
+.pj-thread-time{grid-area:time;justify-self:end;font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.pj-thread-sub{grid-area:sub;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.pj-thread-chips{grid-area:chips;display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin-top:2px}
+.pj-chip{display:inline-flex;align-items:center;max-width:100%;height:18px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pj-task-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .pj-task-body{font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:6px;white-space:pre-wrap;word-break:break-word}
 .pj-task-foot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
@@ -400,6 +439,112 @@ window.__ModuleLoader__.load({
     function initialOf(name) {
       const value = String(name || '').trim()
       return value ? value.slice(0, 1).toUpperCase() : '·'
+    }
+
+    // ---------------------------------------------------------------------
+    // Threads panel helpers
+    //
+    // The right column is a Threads panel: five fixed groups, one card per task
+    // with a title line, a one-line summary and optional chips. Everything here
+    // is display-only; no helper reads or writes `task.status`.
+
+    /** The five groups, in render order. `resolved` outranks every status. */
+    const THREAD_GROUPS = [
+      { key: 'running', icon: 'spinner', titleKey: 'groupRunning', statuses: ['running'] },
+      { key: 'review', icon: 'review', titleKey: 'groupReview', statuses: ['review'] },
+      { key: 'waiting', icon: 'waiting', titleKey: 'groupWaiting', statuses: ['blocked', 'failed'] },
+      { key: 'idle', icon: 'idle', titleKey: 'groupIdle', statuses: ['queued'] },
+      { key: 'resolved', icon: 'none', titleKey: 'groupResolved', statuses: [] },
+    ]
+
+    /** The first non-empty line of a text, stripped of light markdown noise. */
+    function plainLine(text) {
+      const value = String(text || '')
+      const line = value.split('\n').find((entry) => entry.trim())
+      if (!line) return ''
+      return line
+        .replace(/^\s{0,3}#{1,6}\s*/, '')
+        .replace(/^\s*[-*+]\s+/, '')
+        .replace(/^\s*>\s*/, '')
+        .replace(/\*\*|__|`/g, '')
+        .trim()
+    }
+
+    /** One line under the title: output first, then brief, then the status. */
+    function taskSubtitle(task, t) {
+      return plainLine(task.output) || plainLine(task.brief) || t(task.status)
+    }
+
+    /**
+     * Relative age of a thread. The Host stamps `createdAt`/`updatedAt` on every
+     * task and adds `startedAt`/`finishedAt` around a run, so the freshest stamp
+     * wins. An unstamped task renders no time at all rather than a fake one.
+     */
+    function relativeTime(task, t, locale) {
+      const stamp =
+        Number(task.finishedAt) || Number(task.updatedAt) || Number(task.createdAt) || 0
+      if (!stamp) return ''
+      const delta = Date.now() - stamp
+      if (!Number.isFinite(delta) || delta < 60000) return t('justNow')
+      const hour = 3600000
+      const day = 86400000
+      if (delta < hour) return `${Math.floor(delta / 60000)}m`
+      if (delta < day) return `${Math.floor(delta / hour)}h`
+      if (delta < 7 * day) return `${Math.floor(delta / day)}d`
+      try {
+        return new Date(stamp).toLocaleDateString(locale, { month: 'short', day: 'numeric' })
+      } catch {
+        return ''
+      }
+    }
+
+    /** At most two chips: the model route, then the task id short code. */
+    function taskChips(task) {
+      const chips = []
+      const model = String(task.model || '').trim()
+      if (model) chips.push(model.split('/').pop() || model)
+      if (task.id) chips.push(String(task.id).slice(0, 6))
+      return chips.slice(0, 2)
+    }
+
+    /**
+     * Bucket tasks into the five groups. A resolved task lands in `Resolved`
+     * whatever its status is: the human verdict outranks the system state.
+     */
+    function threadGroups(tasks) {
+      const buckets = new Map(THREAD_GROUPS.map((group) => [group.key, []]))
+      for (const task of tasks) {
+        if (task.resolved) {
+          buckets.get('resolved').push(task)
+          continue
+        }
+        const group = THREAD_GROUPS.find((entry) => entry.statuses.includes(task.status))
+        if (group) buckets.get(group.key).push(task)
+      }
+      return THREAD_GROUPS.map((group) => ({ ...group, tasks: buckets.get(group.key) }))
+    }
+
+    /** The glyph a card shows: the same one its group carries. */
+    function threadIconOf(task) {
+      if (task.resolved) return 'none'
+      const group = THREAD_GROUPS.find((entry) => entry.statuses.includes(task.status))
+      return group ? group.icon : 'none'
+    }
+
+    /** Which groups start folded: only `Resolved`, per the reference panel. */
+    const DEFAULT_COLLAPSED = { resolved: true }
+    function readCollapsedGroups() {
+      const raw = readStored('collapsedGroups', '')
+      if (!raw) return { ...DEFAULT_COLLAPSED }
+      try {
+        const parsed = JSON.parse(raw)
+        if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_COLLAPSED }
+        const next = {}
+        for (const group of THREAD_GROUPS) next[group.key] = parsed[group.key] === true
+        return next
+      } catch {
+        return { ...DEFAULT_COLLAPSED }
+      }
     }
 
     function countsLine(project, t) {
@@ -541,6 +686,64 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** The group glyph: spinner, check ring, warning ring, dashed ring, none. */
+    function ThreadIcon({ kind }) {
+      if (kind === 'spinner') {
+        return h('span', { className: 'pj-thread-icon pj-thread-spinner', 'aria-hidden': true })
+      }
+      if (kind === 'review') {
+        return h(
+          'svg',
+          {
+            className: 'pj-thread-icon pj-thread-review',
+            width: 14,
+            height: 14,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': true,
+          },
+          h('circle', { cx: 8, cy: 8, r: 6.4, stroke: 'currentColor', strokeWidth: 1.6 }),
+          h('path', {
+            d: 'M5.1 8.2l2 2 3.8-4',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        )
+      }
+      if (kind === 'waiting') {
+        return h(
+          'svg',
+          {
+            className: 'pj-thread-icon pj-thread-waiting',
+            width: 14,
+            height: 14,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': true,
+          },
+          h('circle', { cx: 8, cy: 8, r: 6.4, stroke: 'currentColor', strokeWidth: 1.6 }),
+          h('path', {
+            d: 'M8 4.8v4',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+          }),
+          h('circle', { cx: 8, cy: 11.2, r: 0.9, fill: 'currentColor' }),
+        )
+      }
+      if (kind === 'idle') {
+        return h(
+          'span',
+          { className: 'pj-thread-icon pj-thread-idle', 'aria-hidden': true },
+          h('span', { className: 'pj-thread-idle-dot' }),
+        )
+      }
+      // The Resolved group carries no glyph, per the reference panel.
+      return null
+    }
+
     /** Contain a failing embedded conversation so the board stays usable. */
     class EmbeddedBoundary extends React.Component {
       constructor(props) {
@@ -626,6 +829,11 @@ window.__ModuleLoader__.load({
       const [menu, setMenu] = useState(null)
       const menuRef = useRef(null)
 
+      // Threads panel: the live search query and the folded groups. The folded
+      // set is a page-local preference, so it persists like the column widths.
+      const [query, setQuery] = useState('')
+      const [collapsedGroups, setCollapsedGroups] = useState(readCollapsedGroups)
+
       const useWorkspacesSafe = typeof useWorkspaces === 'function' ? useWorkspaces : () => undefined
       const archivedSessionIds = useWorkspacesSafe((state) => state.archivedSessionIds)
       const coordinatorSessionId = detail?.project?.coordinatorSessionId
@@ -670,6 +878,11 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         writeStored('listCollapsed', listCollapsed ? '1' : '0')
       }, [listCollapsed])
+
+      // Folded thread groups survive a reload too.
+      useEffect(() => {
+        writeStored('collapsedGroups', JSON.stringify(collapsedGroups))
+      }, [collapsedGroups])
 
       // The context menu closes on an outside press, Escape, any scroll and a
       // resize, so it can never be left floating over stale content.
@@ -989,6 +1202,30 @@ window.__ModuleLoader__.load({
 
       const toggleListCollapsed = () => setListCollapsed((value) => !value)
 
+      // -------------------------------------------------------------------
+      // Threads panel interactions
+
+      const toggleGroup = (key) =>
+        setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }))
+
+      const allGroupsCollapsed = THREAD_GROUPS.every((group) => collapsedGroups[group.key])
+
+      // One button flips every group at once: collapse all when any is open,
+      // expand all once everything is folded.
+      const toggleAllGroups = () => {
+        const next = {}
+        for (const group of THREAD_GROUPS) next[group.key] = !allGroupsCollapsed
+        setCollapsedGroups(next)
+      }
+
+      const activeLocale = () => {
+        try {
+          return typeof getLocale === 'function' ? String(getLocale() || 'zh') : 'zh'
+        } catch {
+          return 'zh'
+        }
+      }
+
       const selectProject = (entry) => {
         if (
           (goalDirtyRef.current || memoryDirtyRef.current || workspaceDirtyRef.current) &&
@@ -1193,7 +1430,7 @@ window.__ModuleLoader__.load({
                   'aria-label': t('concurrency'),
                   type: 'number',
                   min: 1,
-                  max: 8,
+                  max: 10,
                   defaultValue: project.concurrency,
                   disabled: busy,
                   style: { width: '72px' },
@@ -1373,11 +1610,14 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // One row per task: status pill, title, executor name. Nothing else — the
-      // brief, the output and every control live on the detail page, and the
-      // row's context menu is the only place a task can be resolved or deleted.
-      const renderTask = (task) =>
-        h(
+      // One thread card per task: group glyph, title line with a relative time,
+      // a one-line summary and up to two chips. No controls at all — the brief,
+      // the output and every action live on the detail page, and the card's
+      // context menu is the only place a task can be resolved or deleted.
+      const renderTask = (task) => {
+        const subtitle = taskSubtitle(task, t)
+        const chips = taskChips(task)
+        return h(
           'button',
           {
             key: task.id,
@@ -1386,12 +1626,46 @@ window.__ModuleLoader__.load({
             onClick: () => void openTaskDetail(task),
             onContextMenu: (event) => openTaskMenu(event, task),
             disabled: busy,
-            title: task.resolved ? `${task.title} · ${t('resolvedBadge')}` : task.title,
+            title: subtitle ? `${task.title}\n${subtitle}` : task.title,
           },
-          h(StatusPill, { status: task.status, t }),
+          h(ThreadIcon, { kind: threadIconOf(task) }),
           h('span', { className: 'pj-task-name' }, task.title),
-          task.childName && h('span', { className: 'pj-task-worker' }, task.childName),
+          h('span', { className: 'pj-thread-time' }, relativeTime(task, t, activeLocale())),
+          h('span', { className: 'pj-thread-sub' }, subtitle),
+          chips.length
+            ? h(
+                'span',
+                { className: 'pj-thread-chips' },
+                chips.map((chip) =>
+                  h('span', { key: chip, className: 'pj-chip' }, chip),
+                ),
+              )
+            : null,
         )
+      }
+
+      // A group header is a button: it folds and unfolds its cards, and the
+      // folded set is persisted. `Resolved` starts folded.
+      const renderThreadGroup = (group) => {
+        const folded = Boolean(collapsedGroups[group.key])
+        return h(
+          'div',
+          { key: group.key, className: 'pj-group' },
+          h(
+            'button',
+            {
+              className: 'pj-group-title',
+              type: 'button',
+              'aria-expanded': folded ? 'false' : 'true',
+              onClick: () => toggleGroup(group.key),
+            },
+            h('span', { className: 'pj-group-chevron', 'aria-hidden': true }, folded ? '›' : '⌄'),
+            h(ThreadIcon, { kind: group.icon }),
+            h('span', { className: 'pj-group-label' }, `${t(group.titleKey)} · ${group.tasks.length}`),
+          ),
+          folded ? null : group.tasks.map(renderTask),
+        )
+      }
 
       // The detail page: read-only task state plus the human-only controls, with
       // the executor conversation below. Resolve is the icon button in the
@@ -1464,10 +1738,16 @@ window.__ModuleLoader__.load({
             : h('div', { className: 'pj-empty' }, t('noConversation')),
         )
 
-      // System states only: `done` is gone, completion is `resolved`.
-      const groups = ['review', 'running', 'queued', 'failed', 'blocked']
-        .map((status) => ({ status, tasks: taskList.filter((task) => task.status === status) }))
-        .filter((group) => group.tasks.length > 0)
+      // Five fixed groups, in reference order. A resolved task always lands in
+      // `Resolved`, whatever its system state is. The search box filters on the
+      // title and the one-line summary before the bucketing happens.
+      const needle = query.trim().toLowerCase()
+      const visibleTasks = needle
+        ? taskList.filter((task) =>
+            `${task.title || ''} ${taskSubtitle(task, t)}`.toLowerCase().includes(needle),
+          )
+        : taskList
+      const groups = threadGroups(visibleTasks)
 
       return h(
         'div',
@@ -1746,9 +2026,9 @@ window.__ModuleLoader__.load({
               ? h(
                   'button',
                   { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: () => setExecTarget(null) },
-                  `← ${t('executors')}`,
+                  `← ${t('threads')}`,
                 )
-              : h('h2', { className: 'pj-exec-title' }, t('executors')),
+              : h('h2', { className: 'pj-exec-title' }, t('threads')),
             execTarget
               ? h(
                   'div',
@@ -1782,6 +2062,26 @@ window.__ModuleLoader__.load({
                   ),
                 ),
           ),
+          // Search and the fold-all toggle belong to the list view only.
+          !execTarget && project
+            ? h(
+                'div',
+                { className: 'pj-exec-tools' },
+                h('input', {
+                  className: 'pj-search',
+                  type: 'search',
+                  value: query,
+                  placeholder: t('searchThreads'),
+                  'aria-label': t('searchThreads'),
+                  onChange: (event) => setQuery(event.target.value),
+                }),
+                h(
+                  'button',
+                  { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: toggleAllGroups },
+                  allGroupsCollapsed ? t('expandAll') : t('collapseAll'),
+                ),
+              )
+            : null,
           !project
             ? null
             : execTarget
@@ -1791,20 +2091,13 @@ window.__ModuleLoader__.load({
               : h(
                   'div',
                   { className: 'pj-exec-scroll' },
-                  groups.length === 0
+                  taskList.length === 0
                     ? h('div', { className: 'pj-empty' }, t('emptyTasks'))
-                    : groups.map((group) =>
-                        h(
-                          'div',
-                          { key: group.status, className: 'pj-group' },
-                          h(
-                            'div',
-                            { className: 'pj-group-title' },
-                            `${t(group.status)} · ${group.tasks.length}`,
-                          ),
-                          group.tasks.map(renderTask),
-                        ),
-                      ),
+                    : visibleTasks.length === 0
+                      ? h('div', { className: 'pj-empty' }, t('noMatches'))
+                      : groups
+                          .filter((group) => group.tasks.length > 0)
+                          .map(renderThreadGroup),
                 ),
         ),
         renderTaskMenu(),

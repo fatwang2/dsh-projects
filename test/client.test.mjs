@@ -143,6 +143,27 @@ test('both dictionaries carry the same keys and no add-task surface', () => {
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
   }
 
+  // The Threads panel labels exist in both languages, and the old column title
+  // is retired along with it.
+  for (const key of [
+    'threads',
+    'searchThreads',
+    'collapseAll',
+    'expandAll',
+    'noMatches',
+    'groupRunning',
+    'groupReview',
+    'groupWaiting',
+    'groupIdle',
+    'groupResolved',
+    'justNow',
+  ]) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+  assert.equal('executors' in en, false, 'the old column title is retired')
+  assert.equal('executors' in zh, false, 'the old column title is retired')
+
   // The registered translate() falls through to the key for retired labels,
   // which proves the page can no longer render an add-task button.
   const main = registrations.find((entry) => entry.options.name === 'main')
@@ -190,16 +211,25 @@ test('the task list is a read-only row and status is never written', () => {
   assert.doesNotMatch(source, /pj-pill-done/)
   assert.doesNotMatch(source, /pj-task-title/)
 
-  // One row = status pill + title + executor name, and nothing else.
+  // One thread card = group glyph + title line (with a relative time) + a
+  // one-line summary + optional chips, and no controls at all.
   const rowStart = source.indexOf('const renderTask = (task) =>')
-  const rowEnd = source.indexOf('const renderTaskDetail', rowStart)
-  assert.ok(rowStart > 0 && rowEnd > rowStart, 'renderTask is defined before the detail renderer')
+  const rowEnd = source.indexOf('const renderThreadGroup', rowStart)
+  assert.ok(rowStart > 0 && rowEnd > rowStart, 'renderTask is defined before the group renderer')
   const row = source.slice(rowStart, rowEnd).split('\n\n')[0]
-  assert.match(row, /StatusPill/)
+  assert.match(row, /ThreadIcon/)
   assert.match(row, /pj-task-name/)
-  assert.match(row, /pj-task-worker/)
+  assert.match(row, /pj-thread-time/)
+  assert.match(row, /pj-thread-sub/)
+  assert.doesNotMatch(row, /StatusPill/)
   assert.doesNotMatch(row, /task\.brief|task\.output|task\.stopReason|'select'|'option'/)
-  assert.ok(row.trimEnd().split('\n').length <= 20, 'the row stays short')
+  assert.ok(row.trimEnd().split('\n').length <= 32, 'the card stays short')
+  // The card root is the only button: every action lives in the context menu.
+  assert.equal(
+    [...row.matchAll(/h\(\s*'button'/g)].length,
+    1,
+    'the card nests no control',
+  )
 
   // The detail page never offers a status picker, and it no longer carries the
   // resolve/delete controls at the bottom: resolve moved to the top-right icon
@@ -344,4 +374,114 @@ test('the coordinator prompt keeps the main conversation short', () => {
   assert.match(prompt, /projects_dispatch/)
   assert.match(prompt, /projects_memory/)
   assert.match(prompt, /taskLines/)
+})
+
+test('the panel groups threads into five fixed sections in reference order', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('const THREAD_GROUPS')
+  const end = source.indexOf('function plainLine', start)
+  assert.ok(start > 0 && end > start, 'THREAD_GROUPS is declared before the helpers')
+  const block = source.slice(start, end)
+
+  const order = [...block.matchAll(/key: '([a-z]+)'/g)].map((match) => match[1])
+  assert.deepEqual(order, ['running', 'review', 'waiting', 'idle', 'resolved'])
+  assert.match(block, /statuses: \['running'\]/)
+  assert.match(block, /statuses: \['review'\]/)
+  assert.match(block, /statuses: \['blocked', 'failed'\]/, 'failed waits on the human too')
+  assert.match(block, /statuses: \['queued'\]/)
+  assert.match(block, /key: 'resolved', icon: 'none'/, 'Resolved carries no glyph')
+
+  // The human verdict outranks the system state.
+  const bucket = source.slice(
+    source.indexOf('function threadGroups'),
+    source.indexOf('function threadIconOf'),
+  )
+  assert.match(bucket, /if \(task\.resolved\) \{[\s\S]{0,120}buckets\.get\('resolved'\)\.push\(task\)/)
+
+  // Only Resolved starts folded, and the folded set persists.
+  assert.match(source, /const DEFAULT_COLLAPSED = \{ resolved: true \}/)
+  assert.match(source, /writeStored\('collapsedGroups'/)
+  assert.match(source, /readStored\('collapsedGroups'/)
+  assert.match(source, /useState\(readCollapsedGroups\)/)
+
+  // A group header is a button that folds its cards and shows the count.
+  assert.match(source, /className: 'pj-group-title'[\s\S]{0,200}'aria-expanded'/)
+  assert.match(source, /`\$\{t\(group\.titleKey\)\} · \$\{group\.tasks\.length\}`/)
+  assert.match(source, /folded \? null : group\.tasks\.map\(renderTask\)/)
+})
+
+test('the subtitle is one plain line from output, then brief, then the status', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function plainLine')
+  const end = source.indexOf('function relativeTime', start)
+  assert.ok(start > 0 && end > start)
+  const block = source.slice(start, end)
+
+  // Only the first non-empty line, with the lightest markdown noise removed.
+  assert.ok(block.includes("value.split('\\n').find((entry) => entry.trim())"))
+  assert.ok(block.includes('.replace(/^\\s{0,3}#{1,6}\\s*/, \'\')'))
+  assert.ok(block.includes('.replace(/^\\s*[-*+]\\s+/, \'\')'))
+  assert.ok(block.includes('.replace(/\\*\\*|__|`/g, \'\')'))
+
+  const subtitle = source.slice(
+    source.indexOf('function taskSubtitle'),
+    source.indexOf('function relativeTime'),
+  )
+  assert.ok(
+    subtitle.includes('return plainLine(task.output) || plainLine(task.brief) || t(task.status)'),
+    'output wins, then brief, then the status label',
+  )
+})
+
+test('relative times come from the Host stamps and degrade to a date', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function relativeTime')
+  const end = source.indexOf('function taskChips', start)
+  assert.ok(start > 0 && end > start)
+  const block = source.slice(start, end)
+
+  // The Host stamps createdAt/updatedAt on every task and adds
+  // startedAt/finishedAt around a run; the freshest stamp wins.
+  assert.ok(
+    block.includes(
+      'Number(task.finishedAt) || Number(task.updatedAt) || Number(task.createdAt) || 0',
+    ),
+  )
+  assert.match(block, /if \(!stamp\) return ''/, 'an unstamped task shows no time at all')
+  assert.match(block, /return t\('justNow'\)/)
+  assert.match(block, /\}m`/)
+  assert.match(block, /\}h`/)
+  assert.match(block, /\}d`/)
+  assert.match(block, /toLocaleDateString\(locale, \{ month: 'short', day: 'numeric' \}\)/)
+  assert.match(block, /delta < 7 \* day/)
+})
+
+test('the threads head carries a live search and a fold-all toggle', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The column is titled Threads, and the detail page returns to it.
+  assert.match(source, /t\('threads'\)/)
+  assert.doesNotMatch(source, /t\('executors'\)/)
+
+  // Search filters title + summary before the bucketing happens.
+  assert.match(source, /className: 'pj-search'/)
+  assert.match(source, /placeholder: t\('searchThreads'\)/)
+  assert.match(source, /onChange: \(event\) => setQuery\(event\.target\.value\)/)
+  assert.match(source, /const needle = query\.trim\(\)\.toLowerCase\(\)/)
+  assert.match(source, /`\$\{task\.title \|\| ''\} \$\{taskSubtitle\(task, t\)\}`\.toLowerCase\(\)/)
+
+  // One button flips every group; the label reflects the current state.
+  assert.match(source, /allGroupsCollapsed \? t\('expandAll'\) : t\('collapseAll'\)/)
+  assert.match(source, /const allGroupsCollapsed = THREAD_GROUPS\.every/)
+
+  // The reference panel's filter/expand/close icons are deliberately absent.
+  assert.doesNotMatch(source, /t\('filterThreads'\)/)
+  assert.doesNotMatch(source, /t\('closePanel'\)/)
+})
+
+test('the concurrency input accepts the Host ceiling of ten', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const input = source.slice(source.indexOf("t('concurrency')"), source.indexOf("t('workspace')"))
+  assert.match(input, /max: 10,/)
+  assert.doesNotMatch(source, /max: 8,/)
 })

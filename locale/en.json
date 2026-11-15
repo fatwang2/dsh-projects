@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Projects",
+    "description": "Adds a Projects board: one goal per project, standing instructions, a shared memory file every worker reads, and a task board. The coordinator agent splits the goal with the projects_* tools and dispatches tasks to parallel worker subagents that run in the project workspace and report their final message back onto the task. A human approves dispatches when autonomy is manual, edits instructions and memory, and reviews each result. Data stays on this machine under $DSH_HOME/projects; workers run in-process and stop when the plugin is disabled."
+  }
+}

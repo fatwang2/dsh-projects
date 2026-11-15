@@ -1,0 +1,40 @@
+{
+  "name": "@local/dsh-projects",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Project board for DeepSeek Harness: one goal, shared memory, and parallel worker agents.",
+  "license": "MIT",
+  "exports": {
+    ".": "./host/index.js",
+    "./client": "./client/index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "host/index.js",
+    "client/index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check host/index.js && node --check client/index.js",
+    "test": "node --test test/host.test.mjs test/client.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

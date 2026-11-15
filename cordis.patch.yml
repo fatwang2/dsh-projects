@@ -1,0 +1,6 @@
+# Projects: one Host plugin row (project store, /projects-api routes, projects_*
+# tools) and one Client module (the board page). The Client half is discovered
+# from the same package through `dsh.client` in package.json.
+- insert:
+    - id: projects
+      name: '@local/dsh-projects'

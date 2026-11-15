@@ -33,7 +33,27 @@ const MAX_BRIEF = 8_000
 const MAX_OUTPUT = 4_000
 const MAX_MEMORY = 200_000
 const MAX_TASKS = 200
-const STATUSES = ['queued', 'running', 'review', 'done', 'failed', 'blocked']
+const MAX_MODEL = 200
+const MAX_PRESET = 120
+/**
+ * Upper bound on `project.concurrency`, the number of workers this plugin will
+ * admit at once for one project. Kept as one constant so the clamp, the update
+ * path and the tool schema cannot drift apart.
+ *
+ * Note this is *our* ceiling only: the host's subagent runtime has a separate
+ * `maxActiveSubagents` pool (default 8) that can still refuse the 9th+ live
+ * child in a tree. Raising this constant does not raise that pool.
+ */
+const MAX_CONCURRENCY = 10
+/**
+ * System statuses only. `status` is written by the host itself (add → queued,
+ * dispatch → running, settle → review|failed) and by the coordinator tool
+ * (blocked, retry). The human verdict — "this task counts as finished" — lives
+ * in `task.resolved`, and the page may write nothing else.
+ */
+const STATUSES = ['queued', 'running', 'review', 'failed', 'blocked']
+/** The single task field the browser is allowed to write. */
+const HUMAN_TASK_FIELDS = ['resolved']
 const AUTONOMY = ['manual', 'auto']
 /** Live dispatch controllers, so unloading the plugin stops its workers. */
 const controllers = new Map()
@@ -86,6 +106,41 @@ function httpError(status, message) {
   return error
 }
 
+/**
+ * A stored model selection: `provider/model` when the provider is known (exactly
+ * the `id` `GET /projects-api/models` advertises), or a bare model id that
+ * inherits the parent Agent's provider. Empty means "use the host default", so a
+ * non-string or blank value normalizes to '' rather than to a bogus route.
+ */
+function modelValue(value) {
+  return text(value, MAX_MODEL).trim()
+}
+
+/** A stored agent-preset id; empty means "inherit the parent's composition". */
+function presetValue(value) {
+  return text(value, MAX_PRESET).trim()
+}
+
+/**
+ * Translate a stored selection into the `agentOptions` route the subagent
+ * service expects. The first `/` separates provider from model, so a model id
+ * that itself contains a slash (`siliconflow/deepseek-ai/DeepSeek-V3`) survives
+ * intact. A bare id yields no provider, which makes the child inherit the
+ * parent's route for that half.
+ *
+ * @returns the route, or undefined when nothing is selected (callers must then
+ * omit `agentOptions` entirely instead of sending an empty object).
+ */
+function modelRoute(value) {
+  const raw = modelValue(value)
+  if (!raw) return undefined
+  const slash = raw.indexOf('/')
+  if (slash > 0 && slash < raw.length - 1) {
+    return { provider: raw.slice(0, slash), model: raw.slice(slash + 1) }
+  }
+  return { model: raw }
+}
+
 async function isDirectory(path) {
   try {
     return (await stat(path)).isDirectory()
@@ -104,13 +159,21 @@ async function writeFileAtomic(file, contents) {
 // Store
 
 function normalizeTask(raw) {
+  // Legacy rows used `status: 'done'` for "the human accepted this task". Status
+  // is now system-only, so a stored `done` migrates to review + resolved on read.
+  const legacyDone = raw.status === 'done'
   const task = {
     id: typeof raw.id === 'string' && raw.id ? raw.id : newId('t'),
     title: text(raw.title, 200) || 'Untitled task',
     brief: text(raw.brief, MAX_BRIEF),
-    status: STATUSES.includes(raw.status) ? raw.status : 'queued',
+    status: legacyDone ? 'review' : STATUSES.includes(raw.status) ? raw.status : 'queued',
+    resolved: legacyDone || raw.resolved === true,
     approved: raw.approved === true,
     output: text(raw.output, MAX_OUTPUT),
+    // Empty means "inherit the project default", which in turn may be empty and
+    // mean "use the host default"; dispatch resolves the chain.
+    model: modelValue(raw.model),
+    agentPreset: presetValue(raw.agentPreset),
     createdAt: Number(raw.createdAt) || Date.now(),
     updatedAt: Number(raw.updatedAt) || Date.now(),
   }
@@ -130,8 +193,12 @@ function normalizeProject(raw) {
     goal: text(raw.goal, MAX_GOAL),
     workspace: text(raw.workspace, 1024),
     autonomy: AUTONOMY.includes(raw.autonomy) ? raw.autonomy : 'manual',
-    concurrency: intIn(raw.concurrency, 1, 8, 2),
+    concurrency: intIn(raw.concurrency, 1, MAX_CONCURRENCY, 2),
     archived: raw.archived === true,
+    // The default route every worker of this project starts on. Empty means the
+    // host default; a task may override it.
+    model: modelValue(raw.model),
+    agentPreset: presetValue(raw.agentPreset),
     ...(typeof raw.coordinatorSessionId === 'string' && raw.coordinatorSessionId
       ? { coordinatorSessionId: raw.coordinatorSessionId }
       : {}),
@@ -195,7 +262,7 @@ async function writeMemory(id, contents) {
 }
 
 function counts(tasks) {
-  const result = { queued: 0, running: 0, review: 0, done: 0, failed: 0, blocked: 0 }
+  const result = { queued: 0, running: 0, review: 0, failed: 0, blocked: 0 }
   for (const task of tasks) result[task.status] = (result[task.status] || 0) + 1
   return result
 }
@@ -224,6 +291,8 @@ async function createProject(input) {
     workspace: input?.workspace,
     autonomy: input?.autonomy,
     concurrency: input?.concurrency,
+    model: input?.model,
+    agentPreset: input?.agentPreset,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     tasks: [],
@@ -238,8 +307,12 @@ async function updateProject(id, patch) {
   if (patch?.goal !== undefined) project.goal = text(patch.goal, MAX_GOAL)
   if (patch?.workspace !== undefined) project.workspace = text(patch.workspace, 1024)
   if (patch?.autonomy !== undefined && AUTONOMY.includes(patch.autonomy)) project.autonomy = patch.autonomy
-  if (patch?.concurrency !== undefined) project.concurrency = intIn(patch.concurrency, 1, 8, project.concurrency)
+  if (patch?.concurrency !== undefined) project.concurrency = intIn(patch.concurrency, 1, MAX_CONCURRENCY, project.concurrency)
   if (patch?.archived !== undefined) project.archived = patch.archived === true
+  // The page may retune the project's default route: this is a project setting,
+  // not a task status, so it does not touch the read-only status contract.
+  if (patch?.model !== undefined) project.model = modelValue(patch.model)
+  if (patch?.agentPreset !== undefined) project.agentPreset = presetValue(patch.agentPreset)
   if (patch?.coordinatorSessionId !== undefined) {
     const value = text(patch.coordinatorSessionId, 128)
     if (value) project.coordinatorSessionId = value
@@ -259,6 +332,8 @@ async function addTask(id, input) {
     brief: input?.brief,
     status: 'queued',
     approved: input?.approved === true,
+    model: input?.model,
+    agentPreset: input?.agentPreset,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   })
@@ -268,6 +343,12 @@ async function addTask(id, input) {
   return { project, task }
 }
 
+/**
+ * Internal writer shared by the coordinator tool and the host itself. It can
+ * write every field, including `resolved` — but the browser never reaches it
+ * directly: the page goes through `resolveTask` below, which narrows the patch
+ * to `resolved` before calling in here.
+ */
 async function updateTask(projectId, taskId, patch) {
   const project = await readProject(projectId)
   const task = project.tasks.find((candidate) => candidate.id === taskId)
@@ -277,10 +358,54 @@ async function updateTask(projectId, taskId, patch) {
   if (patch?.status !== undefined && STATUSES.includes(patch.status)) task.status = patch.status
   if (patch?.approved !== undefined) task.approved = patch.approved === true
   if (patch?.output !== undefined) task.output = text(patch.output, MAX_OUTPUT)
+  if (patch?.resolved !== undefined) task.resolved = patch.resolved === true
+  if (patch?.model !== undefined) task.model = modelValue(patch.model)
+  if (patch?.agentPreset !== undefined) task.agentPreset = presetValue(patch.agentPreset)
   task.updatedAt = Date.now()
   project.updatedAt = Date.now()
   await writeProject(project)
   return { project, task }
+}
+
+/**
+ * The human write face: the page may only flip `resolved`. Anything else in the
+ * body is rejected with 400 instead of being ignored, so a stale browser bundle
+ * that still tries to PATCH `status` fails loudly rather than silently believing
+ * it changed the board.
+ */
+async function resolveTask(projectId, taskId, patch) {
+  const body = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {}
+  const foreign = Object.keys(body).filter((key) => !HUMAN_TASK_FIELDS.includes(key))
+  if (foreign.length > 0) {
+    throw httpError(
+      400,
+      `only "resolved" is writable from the page (rejected: ${foreign.join(', ')})`,
+    )
+  }
+  if (body.resolved === undefined) throw httpError(400, 'resolved_required')
+  if (typeof body.resolved !== 'boolean') throw httpError(400, 'resolved_must_be_boolean')
+  return updateTask(projectId, taskId, { resolved: body.resolved })
+}
+
+/**
+ * The manual-mode gate, and its own narrow write face. `approved` is not a
+ * status — it is the switch that lets a `manual` project dispatch at all — so it
+ * gets a dedicated route instead of widening the PATCH whitelist. This endpoint
+ * writes exactly one field, and the only value it can write is `true`; the
+ * request body is ignored on purpose, so a stale bundle cannot smuggle `status`
+ * through this door either.
+ */
+async function approveTask(projectId, taskId) {
+  const project = await readProject(projectId)
+  const task = project.tasks.find((candidate) => candidate.id === taskId)
+  if (!task) throw httpError(404, 'task_not_found')
+  // Approving an already-approved task is a no-op, not an error: the caller is
+  // asking for a state the task is already in.
+  if (task.approved) return { project, task }
+  // A running worker already passed the gate; flipping the flag now would only
+  // rewrite the audit trail. Reject instead of pretending something changed.
+  if (task.status === 'running') throw httpError(400, 'task_already_running')
+  return updateTask(projectId, taskId, { approved: true })
 }
 
 async function removeTask(projectId, taskId) {
@@ -351,6 +476,12 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   const memory = await readMemory(project.id)
   const controller = new AbortController()
   const cwd = project.workspace && (await isDirectory(project.workspace)) ? project.workspace : undefined
+  // Route precedence: the task override wins over the project default, and an
+  // empty result means "let the child inherit the parent Agent's route" — in
+  // which case `agentOptions` is omitted entirely rather than sent as `{}` or
+  // with an undefined model, both of which the service would reject or misread.
+  const route = modelRoute(task.model || project.model)
+  const agentPreset = presetValue(task.agentPreset || project.agentPreset)
   let started
   try {
     started = await subagents.startActivation({
@@ -359,6 +490,8 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
       prompt: [{ type: 'text', text: workerPrompt(project, task, memory) }],
       parent: exec.agent,
       ...(cwd === undefined ? {} : { cwd }),
+      ...(agentPreset ? { agentPreset } : {}),
+      ...(route === undefined ? {} : { agentOptions: route }),
       signal: controller.signal,
       delivery: 'parent',
     })
@@ -376,7 +509,9 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   task.updatedAt = Date.now()
   project.updatedAt = Date.now()
   await writeProject(project)
-  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId}). It runs in the background; its final message lands on the task when it settles.`
+  const routeNote = route === undefined ? '' : ` model=${route.provider ? `${route.provider}/` : ''}${route.model}`
+  const presetNote = agentPreset ? ` preset=${agentPreset}` : ''
+  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${presetNote}. It runs in the background; its final message lands on the task when it settles.`
 }
 
 async function settleWorker(info) {
@@ -396,6 +531,93 @@ async function settleWorker(info) {
     controllers.delete(task.id)
     return
   }
+}
+
+// ---------------------------------------------------------------------------
+// Model catalog
+
+/** Successful enumerations, keyed by the provider set they were built from. */
+const modelCache = new Map()
+const MODEL_CACHE_MS = 60_000
+
+/**
+ * Enumerate the LLM routes a worker may be pinned to, for the page's model
+ * picker.
+ *
+ * The `llm` service is the only source of truth: `listProviders()` is sync,
+ * `listModels(provider)` is async and may reach the network, so each provider is
+ * isolated — one unreachable catalog must not blank the whole picker. When the
+ * service is absent (a profile without an LLM adapter) or advertises nothing,
+ * the answer is `enumerable: false` so the page falls back to free text instead
+ * of offering an empty list.
+ *
+ * Each entry's `id` is the `provider/model` route string that `project.model` and
+ * `task.model` store, so the picker can round-trip a choice without guessing.
+ */
+async function listModelChoices(ctx) {
+  const llm = ctx.get('llm')
+  if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    return { models: [], enumerable: false }
+  }
+  let providers
+  try {
+    providers = llm.listProviders()
+  } catch {
+    return { models: [], enumerable: false }
+  }
+  if (!Array.isArray(providers)) return { models: [], enumerable: false }
+  const ids = providers
+    .map((provider) => (provider && typeof provider.id === 'string' ? provider.id : ''))
+    .filter(Boolean)
+  if (ids.length === 0) return { models: [], enumerable: false }
+
+  const cacheKey = ids.join('\n')
+  const cached = modelCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < MODEL_CACHE_MS) return { models: cached.models, enumerable: true }
+
+  const models = []
+  for (const providerId of ids) {
+    let advertised
+    try {
+      advertised = await llm.listModels(providerId)
+    } catch {
+      continue
+    }
+    for (const model of Array.isArray(advertised) ? advertised : []) {
+      if (!model || typeof model.id !== 'string' || !model.id) continue
+      models.push({
+        id: `${providerId}/${model.id}`,
+        provider: providerId,
+        model: model.id,
+        label: typeof model.name === 'string' && model.name ? model.name : model.id,
+        ...(typeof model.description === 'string' && model.description ? { description: model.description } : {}),
+      })
+    }
+  }
+  if (models.length === 0) return { models: [], enumerable: false }
+  modelCache.set(cacheKey, { at: Date.now(), models })
+  return { models, enumerable: true }
+}
+
+/** Enumerate agent presets a worker may be pinned to; same degrade strategy. */
+async function listPresetChoices(ctx) {
+  const registry = ctx.get('agentPresets')
+  if (!registry || typeof registry.list !== 'function') return { presets: [], enumerable: false }
+  let rows
+  try {
+    rows = await registry.list()
+  } catch {
+    return { presets: [], enumerable: false }
+  }
+  const presets = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row.id === 'string' && row.id)
+    .map((row) => ({
+      id: row.id,
+      label: typeof row.name === 'string' && row.name ? row.name : row.id,
+      ...(typeof row.description === 'string' && row.description ? { description: row.description } : {}),
+      ...(typeof row.broken === 'string' && row.broken ? { broken: row.broken } : {}),
+    }))
+  return { presets, enumerable: presets.length > 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +678,16 @@ async function routeRequest(ctx, method, path, req) {
     return { status: 200, body: { restored: true } }
   }
 
+  // /models — the worker model catalog the page's picker needs. Read-only, so a
+  // GET is the only method; `enumerable: false` tells the page to fall back to a
+  // free-text field instead of an empty dropdown.
+  if (parts.length === 1 && parts[0] === 'models') {
+    if (method !== 'GET') throw httpError(405, 'method_not_allowed')
+    const models = await listModelChoices(ctx)
+    const presets = await listPresetChoices(ctx)
+    return { status: 200, body: { ...models, presets: presets.presets, presetsEnumerable: presets.enumerable } }
+  }
+
   if (parts[0] !== 'projects') throw httpError(404, 'not_found')
 
   // /projects
@@ -504,20 +736,17 @@ async function routeRequest(ctx, method, path, req) {
     throw httpError(405, 'method_not_allowed')
   }
 
-  // /projects/:id/tasks
-  if (parts.length === 3 && parts[2] === 'tasks') {
-    if (method !== 'POST') throw httpError(405, 'method_not_allowed')
-    const body = await readJson(req)
-    const { task } = await addTask(projectId, body)
-    return { status: 201, body: { task } }
-  }
+  // Tasks are created only by the coordinator (`projects_add_task`): there is
+  // deliberately no `POST /projects/:id/tasks` route, so the page cannot invent
+  // work. A POST here falls through to the 404 below. The only POST the page may
+  // make under /tasks is the narrow `.../approve` gate right after this block.
 
   // /projects/:id/tasks/:taskId
   if (parts.length === 4 && parts[2] === 'tasks') {
     const taskId = parts[3]
     if (method === 'PATCH') {
       const body = await readJson(req)
-      const { task } = await updateTask(projectId, taskId, body)
+      const { task } = await resolveTask(projectId, taskId, body)
       return { status: 200, body: { task } }
     }
     if (method === 'DELETE') {
@@ -525,6 +754,15 @@ async function routeRequest(ctx, method, path, req) {
       return { status: 200, body: { deleted: true } }
     }
     throw httpError(405, 'method_not_allowed')
+  }
+
+  // /projects/:id/tasks/:taskId/approve — the manual-mode gate. One field, one
+  // value, its own entry point: PATCH stays `resolved`-only and this stays
+  // `approved: true`-only, so neither door can be used to write the other field.
+  if (parts.length === 5 && parts[2] === 'tasks' && parts[4] === 'approve') {
+    if (method !== 'POST') throw httpError(405, 'method_not_allowed')
+    const { task } = await approveTask(projectId, parts[3])
+    return { status: 200, body: { task } }
   }
 
   throw httpError(404, 'not_found')
@@ -566,6 +804,7 @@ function formatProject(project, memory) {
     `Project ${project.id} — ${project.name}`,
     `workspace: ${project.workspace || '(inherited)'}`,
     `autonomy: ${project.autonomy}, concurrency: ${project.concurrency}${project.archived ? ', ARCHIVED' : ''}`,
+    `worker model: ${project.model || '(host default)'}${project.agentPreset ? `, preset: ${project.agentPreset}` : ''}`,
     '',
     '## Instructions',
     project.goal.trim() || '(none)',
@@ -575,7 +814,11 @@ function formatProject(project, memory) {
   if (project.tasks.length === 0) lines.push('(none)')
   for (const task of project.tasks) {
     const worker = task.childName ? ` worker=${task.childName}` : ''
-    lines.push(`- ${task.id} [${task.status}]${task.approved ? ' approved' : ''}${worker} ${task.title}`)
+    const model = task.model ? ` model=${task.model}` : ''
+    const preset = task.agentPreset ? ` preset=${task.agentPreset}` : ''
+    lines.push(
+      `- ${task.id} [${task.status}]${task.resolved ? ' resolved' : ''}${task.approved ? ' approved' : ''}${worker}${model}${preset} ${task.title}`,
+    )
     if (task.output) lines.push(`    output: ${task.output.replace(/\n+/g, ' ').slice(0, 300)}`)
   }
   lines.push('', '## Shared memory', memory.trim() ? memory.trim().slice(0, MAX_OUTPUT) : '(empty)')
@@ -602,7 +845,9 @@ function registerTools(ctx) {
           const parts = Object.entries(tally)
             .filter(([, value]) => value > 0)
             .map(([status, value]) => `${value} ${status}`)
-          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.archived ? ' archived' : ''}  tasks: ${parts.join(', ') || 'none'}`
+          const resolved = project.tasks.filter((task) => task.resolved).length
+          if (resolved > 0) parts.push(`${resolved} resolved`)
+          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.model ? ` model=${project.model}` : ''}${project.archived ? ' archived' : ''}  tasks: ${parts.join(', ') || 'none'}`
         })
         .join('\n')
     },
@@ -611,7 +856,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_create',
     description:
-      'Create a project: one goal, its standing instructions, the workspace its workers run in, an autonomy mode and a worker concurrency limit. Returns the new project_id.',
+      'Create a project: one goal, its standing instructions, the workspace its workers run in, an autonomy mode, a worker concurrency limit and an optional default worker model. Returns the new project_id.',
     parameters: {
       type: 'object',
       properties: {
@@ -630,7 +875,16 @@ function registerTools(ctx) {
           description:
             'manual (default): a task needs human approval on the Projects page before dispatch. auto: the coordinator may dispatch without waiting.',
         },
-        concurrency: { type: 'integer', description: 'Maximum workers running at once, 1-8; defaults to 2.' },
+        concurrency: { type: 'integer', description: 'Maximum workers running at once, 1-10; defaults to 2.' },
+        model: {
+          type: 'string',
+          description:
+            'Default worker model as a "provider/model" route (the id GET /projects-api/models advertises), or a bare model id to keep the parent provider. Omit or leave empty for the host default.',
+        },
+        agentPreset: {
+          type: 'string',
+          description: 'Default worker agent preset id. Omit or leave empty to inherit the parent composition.',
+        },
       },
       required: ['name'],
       additionalProperties: false,
@@ -676,6 +930,15 @@ function registerTools(ctx) {
           type: 'boolean',
           description: 'Only for autonomy=manual: mark it approved when the user already approved it in this conversation.',
         },
+        model: {
+          type: 'string',
+          description:
+            'Optional per-task model override, as a "provider/model" route or a bare model id. Empty means inherit the project default.',
+        },
+        agentPreset: {
+          type: 'string',
+          description: 'Optional per-task agent preset override. Empty means inherit the project default.',
+        },
       },
       required: ['project_id', 'title'],
       additionalProperties: false,
@@ -690,7 +953,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_update_task',
     description:
-      'Update one task: its status, its recorded output, or its approval flag. Use status "done" after the user accepts a reviewed task, "blocked" when a human decision is needed, and "queued" to retry.',
+      'Update one task: its system status, its recorded output, its approval flag, or its model override. The human resolves a task on the Projects page — you cannot set "resolved". Use "blocked" when a human decision is needed and "queued" to retry.',
     parameters: {
       type: 'object',
       properties: {
@@ -698,19 +961,38 @@ function registerTools(ctx) {
         task_id: { type: 'string', description: 'Task id from projects_get.' },
         status: {
           type: 'string',
-          enum: ['queued', 'running', 'review', 'done', 'failed', 'blocked'],
-          description: 'New status.',
+          enum: ['queued', 'running', 'review', 'failed', 'blocked'],
+          description: 'New system status. "resolved" is the human verdict and is not writable here.',
         },
         output: { type: 'string', description: 'Summary to record on the task (kept to 4000 characters).' },
         approved: { type: 'boolean', description: 'Approval flag for autonomy=manual projects.' },
+        model: {
+          type: 'string',
+          description:
+            'Per-task model override for the next dispatch, as a "provider/model" route or a bare model id. Empty clears it back to the project default.',
+        },
+        agentPreset: {
+          type: 'string',
+          description: 'Per-task agent preset override for the next dispatch. Empty clears it back to the project default.',
+        },
       },
       required: ['project_id', 'task_id'],
       additionalProperties: false,
     },
     output: TEXT_OUTPUT,
     execute: async (args) => {
-      const { task } = await updateTask(String(args?.project_id || ''), String(args?.task_id || ''), args)
-      return `Task ${task.id} is now ${task.status}${task.approved ? ' (approved)' : ''}.`
+      // Pick the coordinator-writable fields explicitly: `resolved` is the
+      // human's call, so it must not ride along even if a caller sends it.
+      const patch = {
+        ...(args?.status === undefined ? {} : { status: args.status }),
+        ...(args?.output === undefined ? {} : { output: args.output }),
+        ...(args?.approved === undefined ? {} : { approved: args.approved }),
+        ...(args?.model === undefined ? {} : { model: args.model }),
+        ...(args?.agentPreset === undefined ? {} : { agentPreset: args.agentPreset }),
+      }
+      const { task } = await updateTask(String(args?.project_id || ''), String(args?.task_id || ''), patch)
+      const route = task.model ? ` model=${task.model}` : ''
+      return `Task ${task.id} is now ${task.status}${task.resolved ? ' (resolved)' : ''}${task.approved ? ' (approved)' : ''}${route}.`
     },
   })
 

@@ -7,10 +7,12 @@
  *     shared memory, task board) that glyph selects.
  *
  * All data comes from the Host half's same-origin `/projects-api/*` routes.
- * The page is a viewer and a human control surface: it creates projects and
- * tasks, approves tasks for dispatch, edits the shared memory and reviews
- * worker output. Dispatching itself belongs to the coordinator agent through
- * the `projects_dispatch` tool.
+ * The page is a viewer and a human control surface: it creates projects,
+ * approves tasks for dispatch, resolves finished work, edits the shared memory
+ * and reads worker output. Tasks themselves are derived by the coordinator
+ * through the `projects_add_task` tool, and `task.status` is system-owned: the
+ * page renders it and never writes it. The only task field a human writes is
+ * `resolved`.
  */
 
 window.__ModuleLoader__.load({
@@ -34,7 +36,6 @@ window.__ModuleLoader__.load({
       executors: 'Executors',
       startCoordinator: 'Start coordinator',
       startCoordinatorHint: 'The coordinator plans the goal and dispatches tasks. Its conversation lives in this column.',
-      openConversation: 'Open conversation',
       noConversation: 'This task has no executor session yet.',
       workerChatFailed: 'The executor conversation could not start. Open it in the workspace instead.',
       projects: 'Projects',
@@ -50,10 +51,8 @@ window.__ModuleLoader__.load({
       noProjects: 'No projects yet. Create one to give the coordinator a goal.',
       noSelection: 'Select a project, or create one.',
       nameRequired: 'A project needs a name.',
-      titleRequired: 'A task needs a title.',
       projectCreated: 'Project created.',
       saved: 'Saved.',
-      taskAdded: 'Task added.',
       deleted: 'Deleted.',
       archived: 'Archived.',
       unarchived: 'Unarchived.',
@@ -67,17 +66,20 @@ window.__ModuleLoader__.load({
       save: 'Save',
       policy: 'Dispatch policy',
       autonomy: 'Autonomy',
-      autonomyManual: 'Manual — a human approves each dispatch',
+      autonomyManual: 'Manual — the user approves each dispatch in the conversation',
       autonomyAuto: 'Auto — the coordinator dispatches freely',
       concurrency: 'Parallel workers',
       workspace: 'Workspace',
-      addTask: 'Add task',
-      taskTitle: 'Task title',
-      taskBrief: 'What the worker must do, where, and how to verify it…',
-      add: 'Add',
-      emptyTasks: 'No tasks yet. Ask the coordinator to split the goal, or add one here.',
+      emptyTasks: 'No tasks yet. Ask the coordinator in the conversation to split the goal.',
       approve: 'Approve',
       approvedBadge: 'Approved',
+      brief: 'Brief',
+      output: 'Output',
+      noBrief: 'No brief recorded.',
+      noTask: 'This task is no longer on the board.',
+      resolve: 'Mark resolved',
+      unresolve: 'Mark unresolved',
+      resolvedBadge: 'Resolved',
       deleteConfirm: 'Confirm delete',
       switchDiscard: 'Discard unsaved changes and switch projects?',
       archivedHint: 'This project is archived. Unarchive it to dispatch tasks.',
@@ -90,7 +92,6 @@ window.__ModuleLoader__.load({
       queued: 'Queued',
       running: 'Running',
       review: 'Ready for review',
-      done: 'Done',
       failed: 'Failed',
       blocked: 'Blocked',
       status: 'Status',
@@ -104,6 +105,10 @@ window.__ModuleLoader__.load({
       coordinatorArchived: 'This conversation is archived, so new messages do not run. Restore it to continue.',
       restore: 'Restore',
       coordinatorRestored: 'Conversation restored.',
+      collapseList: 'Collapse project list',
+      expandList: 'Expand project list',
+      resizeColumns: 'Resize columns',
+      taskActions: 'Task actions',
     }
 
     const ZH = {
@@ -114,7 +119,6 @@ window.__ModuleLoader__.load({
       executors: '执行者',
       startCoordinator: '启动协调者',
       startCoordinatorHint: '协调者负责拆解目标、派发任务；它的对话就在这一栏。',
-      openConversation: '打开对话',
       noConversation: '这个任务还没有执行者会话。',
       workerChatFailed: '执行者对话启动失败，请在会话中打开。',
       projects: '项目',
@@ -130,10 +134,8 @@ window.__ModuleLoader__.load({
       noProjects: '还没有项目。新建一个，给协调者一个目标。',
       noSelection: '选择一个项目，或新建一个。',
       nameRequired: '项目需要名称。',
-      titleRequired: '任务需要标题。',
       projectCreated: '项目已创建。',
       saved: '已保存。',
-      taskAdded: '任务已添加。',
       deleted: '已删除。',
       archived: '已归档。',
       unarchived: '已取消归档。',
@@ -147,17 +149,20 @@ window.__ModuleLoader__.load({
       save: '保存',
       policy: '派发策略',
       autonomy: '自主程度',
-      autonomyManual: '手动 —— 每次派发都需要人批准',
+      autonomyManual: '手动 —— 每次派发都需要用户在对话里同意',
       autonomyAuto: '自动 —— 协调者可直接派发',
       concurrency: '并行执行者',
       workspace: '工作区',
-      addTask: '添加任务',
-      taskTitle: '任务标题',
-      taskBrief: '执行者要做什么、在哪里做、如何验收……',
-      add: '添加',
-      emptyTasks: '还没有任务。让协调者拆解目标，或在这里手动添加。',
+      emptyTasks: '还没有任务。在对话里让协调者拆解目标，任务由它派生。',
       approve: '批准',
       approvedBadge: '已批准',
+      brief: '任务说明',
+      output: '产出',
+      noBrief: '没有任务说明。',
+      noTask: '这个任务已不在看板上了。',
+      resolve: '标记为已解决',
+      unresolve: '标记为未解决',
+      resolvedBadge: '已解决',
       deleteConfirm: '确认删除',
       switchDiscard: '放弃未保存的修改并切换项目？',
       archivedHint: '项目已归档，取消归档后才能派发任务。',
@@ -170,7 +175,6 @@ window.__ModuleLoader__.load({
       queued: '排队中',
       running: '执行中',
       review: '待验收',
-      done: '已完成',
       failed: '失败',
       blocked: '受阻',
       status: '状态',
@@ -184,6 +188,10 @@ window.__ModuleLoader__.load({
       coordinatorArchived: '这个会话已归档，新消息不会运行。恢复后才能继续。',
       restore: '恢复',
       coordinatorRestored: '会话已恢复。',
+      collapseList: '收起项目栏',
+      expandList: '展开项目栏',
+      resizeColumns: '调整栏宽',
+      taskActions: '任务操作',
     }
 
     // ---------------------------------------------------------------------
@@ -201,10 +209,20 @@ window.__ModuleLoader__.load({
 .pj-list-item.pj-active{background:var(--dsw-alias-interactive-bg-active)}
 .pj-list-name{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pj-list-meta{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.pj-list.pj-collapsed{flex:0 0 44px;width:44px;overflow:hidden}
+.pj-rail{display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 0;min-height:0;overflow:auto}
+.pj-rail-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.pj-rail-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pj-rail-btn.pj-active{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}
+.pj-resizer{position:relative;flex:0 0 5px;width:5px;padding:0;border:0;background:transparent;cursor:col-resize;touch-action:none}
+.pj-resizer::after{content:'';position:absolute;inset:0 -3px}
+.pj-resizer:hover,.pj-resizer:focus-visible{background:var(--dsw-alias-border-l2)}
+.pj-page.pj-resizing{cursor:col-resize;user-select:none}
 .pj-new-project{display:flex;flex-direction:column;gap:8px;padding:4px 14px 14px}
 .pj-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;border-right:1px solid var(--dsw-alias-border-l2)}
 .pj-main-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);min-height:56px;box-sizing:border-box}
 [data-platform='darwin'] .pj-list-head{padding-top:calc(16px + var(--dsh-frame-top-clearance, 0px))}
+[data-platform='darwin'] .pj-rail{padding-top:calc(10px + var(--dsh-frame-top-clearance, 0px))}
 [data-platform='darwin'] .pj-main-head{padding-top:calc(14px + var(--dsh-frame-top-clearance, 0px))}
 [data-platform='darwin'] .pj-exec-head{padding-top:calc(12px + var(--dsh-frame-top-clearance, 0px))}
 .pj-main-title{display:flex;align-items:center;gap:8px;min-width:0}
@@ -212,12 +230,20 @@ window.__ModuleLoader__.load({
 .pj-main-body{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .pj-main-scroll{flex:1;min-height:0;overflow:auto;padding:16px clamp(16px,3vw,32px) 40px}
 .pj-settings{max-width:760px;margin:0 auto}
-.pj-chat-body{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
-.pj-exec{display:flex;flex-direction:column;flex:0 0 380px;width:380px;min-width:320px;max-width:520px;min-height:0;background:var(--dsw-alias-bg-layer-1)}
+.pj-chat-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.pj-exec{display:flex;flex-direction:column;flex:0 0 380px;width:380px;min-width:0;min-height:0;background:var(--dsw-alias-bg-layer-1)}
 .pj-exec-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);min-height:56px;box-sizing:border-box}
 .pj-exec-title{margin:0;font-size:14px;font-weight:600}
-.pj-exec-task{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary)}
+.pj-exec-task{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .pj-exec-scroll{flex:1;min-height:0;overflow:auto;padding:12px 14px 32px}
+/* The detail column is a plain vertical flex box: the info pane shrinks and
+   scrolls, the executor conversation keeps a floor and takes the rest. No
+   percentage caps and no absolutely positioned layers, so the two halves can
+   never paint over each other. */
+.pj-exec-detail{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.pj-exec-info{flex:0 1 auto;min-height:0;overflow:auto;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.pj-exec-detail > .pj-chat-body{flex:1 1 0;min-height:140px}
+.pj-exec-info .pj-task-output{max-height:none}
 .pj-group{margin-bottom:16px}
 .pj-group-title{font-size:12px;font-weight:500;color:var(--dsw-alias-label-tertiary);margin-bottom:6px}
 .pj-start{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:100%;padding:24px;text-align:center}
@@ -229,7 +255,16 @@ window.__ModuleLoader__.load({
 .pj-btn-primary:hover{background:var(--dsw-alias-button-primary-hover)}
 .pj-btn-ghost{background:transparent;border-color:transparent;color:var(--dsw-alias-label-secondary)}
 .pj-btn-ghost:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.pj-btn-danger{color:var(--dsw-alias-state-error-primary)}
+.pj-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid transparent;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
+.pj-icon-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pj-icon-btn:disabled{opacity:.5;cursor:default}
+.pj-icon-btn.pj-on{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent)}
+.pj-spacer{flex:1 1 auto;min-width:0}
+.pj-menu{position:fixed;z-index:60;display:flex;flex-direction:column;gap:2px;min-width:168px;max-width:280px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-panel)}
+.pj-menu-item{display:flex;align-items:center;width:100%;padding:7px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pj-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-menu-item:disabled{opacity:.5;cursor:default}
+.pj-menu-item.pj-danger{color:var(--dsw-alias-state-error-primary)}
 .pj-badge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .pj-section{margin-top:22px}
 .pj-section:first-child{margin-top:0}
@@ -245,10 +280,13 @@ window.__ModuleLoader__.load({
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
 .pj-field{display:flex;flex-direction:column;gap:4px;min-width:0}
 .pj-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
-.pj-form{display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base)}
-.pj-task{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-base);padding:10px 12px;margin-bottom:8px}
+.pj-task-row{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;margin-bottom:4px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.pj-task-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-task-row.pj-active{background:var(--dsw-alias-interactive-bg-active)}
+.pj-task-row:disabled{opacity:.6;cursor:default}
+.pj-task-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
+.pj-task-worker{flex:0 0 auto;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .pj-task-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pj-task-title{font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 140px}
 .pj-task-body{font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:6px;white-space:pre-wrap;word-break:break-word}
 .pj-task-foot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
 .pj-task-output{margin-top:8px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);font-size:12px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
@@ -257,7 +295,6 @@ window.__ModuleLoader__.load({
 .pj-pill-queued{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .pj-pill-running{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);color:var(--dsw-alias-state-business-primary)}
 .pj-pill-review{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, transparent);color:var(--dsw-alias-state-warn-primary)}
-.pj-pill-done{background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent);color:var(--dsw-alias-state-success-primary)}
 .pj-pill-failed{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);color:var(--dsw-alias-state-error-primary)}
 .pj-pill-blocked{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);color:var(--dsw-alias-state-warn-primary);border:1px dashed color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)}
 .pj-warn{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 16px 0;padding:8px 12px;border-radius:var(--dsw-radius-sm);font-size:13px;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, var(--dsw-alias-bg-base));color:var(--dsw-alias-state-warn-primary)}
@@ -266,8 +303,6 @@ window.__ModuleLoader__.load({
 .pj-error{margin:8px 16px 0;padding:8px 12px;border-radius:var(--dsw-radius-sm);font-size:13px;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-base));color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}
 .pj-empty{padding:24px 16px;color:var(--dsw-alias-label-tertiary);font-size:13px;text-align:center}
 .pj-empty-action{margin-top:12px}
-@media (max-width: 1200px){.pj-exec{flex-basis:320px;width:320px}}
-@media (max-width: 1000px){.pj-list{flex-basis:220px;width:220px}}
 `
 
     // ---------------------------------------------------------------------
@@ -293,20 +328,105 @@ window.__ModuleLoader__.load({
       return payload
     }
 
+    // ---------------------------------------------------------------------
+    // Layout helpers
+    //
+    // Column widths and the collapsed state are page-local preferences, so they
+    // live in localStorage under a `projects.` prefix instead of the Host.
+
+    const LIST_WIDTH = 264
+    const EXEC_WIDTH = 380
+    const LIST_MIN = 180
+    const EXEC_MIN = 280
+    const MENU_MARGIN = 8
+
+    function readStored(key, fallback) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return fallback
+        const value = window.localStorage.getItem(`projects.${key}`)
+        return value === null ? fallback : value
+      } catch {
+        // Storage can be disabled: preferences are best-effort.
+        return fallback
+      }
+    }
+
+    function writeStored(key, value) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return
+        window.localStorage.setItem(`projects.${key}`, String(value))
+      } catch {
+        // Storage can be disabled: preferences are best-effort.
+      }
+    }
+
+    function readStoredNumber(key, fallback) {
+      const value = Number(readStored(key, ''))
+      return Number.isFinite(value) && value > 0 ? value : fallback
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), Math.max(min, max))
+    }
+
+    function viewportWidth() {
+      try {
+        return Number(window.innerWidth) || 0
+      } catch {
+        return 0
+      }
+    }
+
+    function viewportHeight() {
+      try {
+        return Number(window.innerHeight) || 0
+      } catch {
+        return 0
+      }
+    }
+
+    /** Half the viewport, so one column can never eat the other two. */
+    function maxColumnWidth() {
+      const width = viewportWidth()
+      return width > 0 ? Math.round(width * 0.5) : 720
+    }
+
+    /** A display-only title: the stored task title is never rewritten. */
+    function shortTitle(text, max = 40) {
+      const value = String(text || '')
+      return value.length > max ? `${value.slice(0, Math.max(1, max - 1))}…` : value
+    }
+
+    function initialOf(name) {
+      const value = String(name || '').trim()
+      return value ? value.slice(0, 1).toUpperCase() : '·'
+    }
+
     function countsLine(project, t) {
       const counts = project.counts || {}
-      const parts = ['running', 'review', 'queued', 'done', 'failed']
+      const parts = ['running', 'review', 'queued', 'failed', 'blocked']
         .filter((status) => (counts[status] || 0) > 0)
         .map((status) => `${counts[status]} ${t(status)}`)
-      return parts.length ? parts.join(' · ') : `${counts.total || 0} ${t('counts')}`
+      if (parts.length) return parts.join(' · ')
+      // The Host's counts object is per-status only; sum it rather than
+      // reading a `total` field that is never sent.
+      const total = Object.values(counts).reduce((sum, value) => sum + (Number(value) || 0), 0)
+      return `${total} ${t('counts')}`
     }
 
     function coordinatorPrompt(project, locale) {
       const zh = String(locale || '').toLowerCase().startsWith('zh')
       const tasks = project.tasks || []
       const taskLines = tasks.length
-        ? tasks.map((task) => `- ${task.id} [${task.status}] ${task.title}`).join('\n')
-        : '(还没有任务)'
+        ? tasks
+            .map(
+              (task) =>
+                `- ${task.id} [${task.status}${task.resolved ? ', resolved' : ''}] ${task.title}`,
+            )
+            .join('\n')
+        : zh
+          ? '(还没有任务)'
+          : '(none yet)'
       if (zh) {
         return [
           `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`,
@@ -318,14 +438,24 @@ window.__ModuleLoader__.load({
           taskLines,
           '',
           '## 你的职责',
-          '1. 只做规划和分派，自己不要执行任务、不要改代码。',
-          '2. 用 projects_add_task 把目标拆成可并行的任务，每个任务要能独立完成。',
+          '你只负责四件事：拆解、分派、验收、汇报。',
+          '',
+          '1. 需要读文件、改代码、跑命令、多步排查的工作，一律用 projects_add_task 派生任务交给执行者，不要在对话里自己动手，也不要把命令输出、文件内容、排查过程贴进对话。',
+          '2. 用 projects_add_task 把目标拆成可并行的任务，每个任务要能独立完成；任务说明里写清做什么、在哪里做、如何验收。',
           '3. 用 projects_dispatch 派发任务；派发后继续响应用户，不要等待。',
-          '4. 执行者交回结果后，用 projects_get 查看产出，向用户汇报并请用户验收。',
+          '4. 执行者交回结果后，用 projects_get 查看产出，用一两句话向用户汇报结论，并请用户在项目页验收。',
           '5. 用 projects_memory 维护共享记忆，让所有执行者共享结论。',
+          '6. 任务是否完成由人 resolve，你不要改 task.status，也不要替用户宣布任务已完成。',
           project.autonomy === 'manual'
-            ? '6. 当前自主程度是手动：派发前需要用户在项目页批准任务。'
-            : '6. 当前自主程度是自动：你可以直接派发任务。',
+            ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
+            : '7. 当前自主程度是自动：你可以直接派发任务。',
+          '',
+          '## 回答方式（硬约束）',
+          '- 回答尽量短：一般不超过 3-5 句。',
+          '- 不要复述任务产出：执行者的 output 已经在任务里，不要抄进对话。',
+          '- 不要罗列已完成任务清单。',
+          '- 不要解释你打算怎么做，直接做（拆任务、派发）或直接回答。',
+          '- 一次只问必要的问题，不要一次抛多个。',
         ].join('\n')
       }
       return [
@@ -338,14 +468,24 @@ window.__ModuleLoader__.load({
         taskLines,
         '',
         '## Your job',
-        '1. Plan and dispatch only; do not execute tasks or edit code yourself.',
-        '2. Use projects_add_task to split the goal into parallel, independently finishable tasks.',
+        'You do four things only: split the goal, dispatch, review, report.',
+        '',
+        '1. Anything that needs reading files, editing code, running commands, or multi-step investigation must be derived into a task with projects_add_task. Do not do that work in the conversation, and do not paste command output, file contents, or investigation steps into it.',
+        '2. Use projects_add_task to split the goal into parallel, independently finishable tasks; each brief says what to do, where, and how to verify it.',
         '3. Use projects_dispatch to start tasks; stay responsive instead of waiting.',
-        '4. When a worker reports back, use projects_get to review its output and report to the user.',
+        '4. When a worker reports back, use projects_get to read its output, report the conclusion to the user in a sentence or two, and ask the user to review it on the Projects page.',
         '5. Keep shared knowledge in projects_memory so every worker starts informed.',
+        '6. The human resolves tasks; never write task.status and never declare a task complete on the user\'s behalf.',
         project.autonomy === 'manual'
-          ? '6. Autonomy is manual: the user approves each task on the Projects page before dispatch.'
-          : '6. Autonomy is auto: you may dispatch without waiting for approval.',
+          ? '7. Autonomy is manual: get the user\'s explicit go-ahead in this conversation, mark the task approved with projects_update_task, then dispatch.'
+          : '7. Autonomy is auto: you may dispatch without waiting for approval.',
+        '',
+        '## Reply style (hard rules)',
+        '- Keep answers short: usually 3-5 sentences at most.',
+        '- Do not restate task output. The worker output already lives in the task; never copy it into the conversation.',
+        '- Do not list completed tasks.',
+        '- Do not explain what you are about to do. Just do it (split, dispatch) or answer.',
+        '- Ask one necessary question at a time, never several at once.',
       ].join('\n')
     }
 
@@ -375,6 +515,30 @@ window.__ModuleLoader__.load({
 
     function StatusPill({ status, t }) {
       return h('span', { className: `pj-pill pj-pill-${status}` }, t(status))
+    }
+
+    /** The resolve toggle glyph: a check ring, filled once resolved. */
+    function ResolveIcon({ done }) {
+      return h(
+        'svg',
+        { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('circle', {
+          cx: 8,
+          cy: 8,
+          r: 6.4,
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          fill: 'currentColor',
+          fillOpacity: done ? 0.16 : 0,
+        }),
+        h('path', {
+          d: 'M5.1 8.2l2 2 3.8-4',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
     }
 
     /** Contain a failing embedded conversation so the board stays usable. */
@@ -447,13 +611,20 @@ window.__ModuleLoader__.load({
       const [memoryDirty, setMemoryDirty] = useState(false)
       const [showNewProject, setShowNewProject] = useState(false)
       const [newProject, setNewProject] = useState({ name: '', goal: '', workspace: '' })
-      const [newTask, setNewTask] = useState({ title: '', brief: '' })
-      const [showNewTask, setShowNewTask] = useState(false)
       const [confirmDeleteId, setConfirmDeleteId] = useState(null)
       const confirmDeleteAt = useRef(0)
       const [centerView, setCenterView] = useState('chat')
       const [thread, setThread] = useState(null)
       const [execTarget, setExecTarget] = useState(null)
+
+      // Layout preferences (page-local, persisted in localStorage).
+      const [listCollapsed, setListCollapsed] = useState(() => readStored('listCollapsed', '0') === '1')
+      const [listWidth, setListWidth] = useState(() => readStoredNumber('listWidth', LIST_WIDTH))
+      const [execWidth, setExecWidth] = useState(() => readStoredNumber('execWidth', EXEC_WIDTH))
+      const [resizing, setResizing] = useState(null)
+      // The task context menu: `{ taskId, x, y }` in viewport coordinates.
+      const [menu, setMenu] = useState(null)
+      const menuRef = useRef(null)
 
       const useWorkspacesSafe = typeof useWorkspaces === 'function' ? useWorkspaces : () => undefined
       const archivedSessionIds = useWorkspacesSafe((state) => state.archivedSessionIds)
@@ -493,6 +664,50 @@ window.__ModuleLoader__.load({
           }
         }
       }, [execTarget])
+
+      // Column preferences survive a reload; a bad stored value falls back to
+      // the default above.
+      useEffect(() => {
+        writeStored('listCollapsed', listCollapsed ? '1' : '0')
+      }, [listCollapsed])
+
+      // The context menu closes on an outside press, Escape, any scroll and a
+      // resize, so it can never be left floating over stale content.
+      useEffect(() => {
+        if (!menu || typeof window === 'undefined') return undefined
+        const onPointerDown = (event) => {
+          const node = menuRef.current
+          if (node && typeof node.contains === 'function' && node.contains(event.target)) return
+          setMenu(null)
+        }
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setMenu(null)
+        }
+        const onScroll = () => setMenu(null)
+        window.addEventListener('pointerdown', onPointerDown, true)
+        window.addEventListener('keydown', onKeyDown, true)
+        window.addEventListener('scroll', onScroll, true)
+        window.addEventListener('resize', onScroll)
+        return () => {
+          window.removeEventListener('pointerdown', onPointerDown, true)
+          window.removeEventListener('keydown', onKeyDown, true)
+          window.removeEventListener('scroll', onScroll, true)
+          window.removeEventListener('resize', onScroll)
+        }
+      }, [menu])
+
+      // Measure the painted menu once and pull it back inside the viewport, so a
+      // right-click near an edge still shows the whole menu.
+      useEffect(() => {
+        const node = menuRef.current
+        if (!menu || !node || typeof node.getBoundingClientRect !== 'function') return
+        const rect = node.getBoundingClientRect()
+        const width = viewportWidth()
+        const height = viewportHeight()
+        const x = clamp(menu.x, MENU_MARGIN, width - rect.width - MENU_MARGIN)
+        const y = clamp(menu.y, MENU_MARGIN, height - rect.height - MENU_MARGIN)
+        if (x !== menu.x || y !== menu.y) setMenu({ ...menu, x, y })
+      }, [menu])
 
       const loadProjects = useCallback(async () => {
         const data = await api('/projects')
@@ -608,6 +823,7 @@ window.__ModuleLoader__.load({
         setMemoryDirty(false)
         setCenterView('chat')
         setExecTarget((current) => (current ? null : current))
+        setMenu(null)
       }, [detail?.project?.id])
 
       useEffect(() => {
@@ -641,6 +857,10 @@ window.__ModuleLoader__.load({
       const project = detail?.project || null
       const projectId = project?.id || null
       const taskList = project?.tasks || []
+      // The open detail pane follows the polled board, so a status change or a
+      // late output shows up without reopening the task.
+      const execTask = execTarget ? taskList.find((task) => task.id === execTarget.taskId) || null : null
+      const execTitle = execTask?.title || execTarget?.title || ''
 
       const createProject = () =>
         run(async () => {
@@ -727,24 +947,32 @@ window.__ModuleLoader__.load({
           return archived ? t('archived') : t('unarchived')
         })
 
-      const addTask = () =>
-        run(async () => {
-          if (!projectId) return ''
-          if (!newTask.title.trim()) throw new Error(t('titleRequired'))
-          await api(`/projects/${projectId}/tasks`, {
-            method: 'POST',
-            body: JSON.stringify({ title: newTask.title.trim(), brief: newTask.brief.trim() }),
-          })
-          setNewTask({ title: '', brief: '' })
-          setShowNewTask(false)
-          await refresh(projectId)
-          return t('taskAdded')
-        })
-
       const patchTask = (taskId, patch) =>
         run(async () => {
           await api(`/projects/${projectId}/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(patch) })
           await refresh(projectId)
+          return ''
+        })
+
+      // `resolved` is the only task field the task PATCH accepts; status is
+      // system-owned and approval has its own narrow route below.
+      const toggleResolved = (task) => patchTask(task.id, { resolved: !task.resolved })
+
+      // Fold one authoritative task returned by the Host back into the board so
+      // the badge flips without waiting for the next poll.
+      const applyTask = (next) =>
+        setDetail((current) => {
+          if (!current || !current.project) return current
+          const tasks = (current.project.tasks || []).map((task) => (task.id === next.id ? next : task))
+          return { ...current, project: { ...current.project, tasks } }
+        })
+
+      // Approval is its own Host route (`POST .../tasks/:taskId/approve`, no
+      // body, idempotent): the task PATCH rejects every field but `resolved`.
+      const approveTask = (task) =>
+        run(async () => {
+          const data = await api(`/projects/${projectId}/tasks/${task.id}/approve`, { method: 'POST' })
+          if (data && data.task) applyTask(data.task)
           return ''
         })
 
@@ -755,6 +983,90 @@ window.__ModuleLoader__.load({
           await refresh(projectId)
           return t('deleted')
         })
+
+      // -------------------------------------------------------------------
+      // Layout interactions
+
+      const toggleListCollapsed = () => setListCollapsed((value) => !value)
+
+      const selectProject = (entry) => {
+        if (
+          (goalDirtyRef.current || memoryDirtyRef.current || workspaceDirtyRef.current) &&
+          typeof window.confirm === 'function' &&
+          !window.confirm(t('switchDiscard'))
+        ) {
+          return
+        }
+        selectedRef.current = entry.id
+        setSelectedId(entry.id)
+        void loadDetail(entry.id).catch((failure) => setError(messageOf(failure)))
+      }
+
+      // Native pointer events, no dependency: the drag listens on the window so
+      // the pointer may leave the 5px handle. Text selection is suppressed for
+      // the duration of the drag.
+      const startResize = (which, event) => {
+        if (!event || (typeof event.button === 'number' && event.button !== 0)) return
+        if (typeof event.preventDefault === 'function') event.preventDefault()
+        if (typeof window === 'undefined') return
+        const startX = Number(event.clientX) || 0
+        const from = which === 'list' ? listWidth : execWidth
+        const min = which === 'list' ? LIST_MIN : EXEC_MIN
+        let latest = from
+        const body = typeof document !== 'undefined' ? document.body : null
+        const previousSelect = body ? body.style.userSelect : ''
+        if (body) body.style.userSelect = 'none'
+        setResizing(which)
+        const onMove = (moveEvent) => {
+          const delta = (Number(moveEvent.clientX) || 0) - startX
+          // The executor column sits on the right, so dragging right narrows it.
+          const raw = which === 'list' ? from + delta : from - delta
+          latest = Math.round(clamp(raw, min, maxColumnWidth()))
+          if (which === 'list') setListWidth(latest)
+          else setExecWidth(latest)
+        }
+        const onEnd = () => {
+          window.removeEventListener('pointermove', onMove)
+          window.removeEventListener('pointerup', onEnd)
+          window.removeEventListener('pointercancel', onEnd)
+          if (body) body.style.userSelect = previousSelect
+          setResizing(null)
+          writeStored(which === 'list' ? 'listWidth' : 'execWidth', latest)
+        }
+        window.addEventListener('pointermove', onMove)
+        window.addEventListener('pointerup', onEnd)
+        window.addEventListener('pointercancel', onEnd)
+      }
+
+      // The separator is focusable: arrow keys move it 16px, Shift 48px.
+      const nudgeWidth = (which, event) => {
+        const step = event && event.shiftKey ? 48 : 16
+        const delta = event && event.key === 'ArrowLeft' ? -step : event && event.key === 'ArrowRight' ? step : 0
+        if (!delta) return
+        if (typeof event.preventDefault === 'function') event.preventDefault()
+        if (which === 'list') {
+          const next = Math.round(clamp(listWidth + delta, LIST_MIN, maxColumnWidth()))
+          setListWidth(next)
+          writeStored('listWidth', next)
+          return
+        }
+        const next = Math.round(clamp(execWidth - delta, EXEC_MIN, maxColumnWidth()))
+        setExecWidth(next)
+        writeStored('execWidth', next)
+      }
+
+      // A right-click on a task row opens its menu at the pointer; the position
+      // is clamped to the viewport after the menu has been measured.
+      const openTaskMenu = (event, task) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+        setConfirmDeleteId(null)
+        setMenu({
+          taskId: task.id,
+          x: Number(event && event.clientX) || 0,
+          y: Number(event && event.clientY) || 0,
+        })
+      }
 
       const startCoordinator = () =>
         run(async () => {
@@ -781,9 +1093,14 @@ window.__ModuleLoader__.load({
           return t('coordinatorResumed')
         })
 
-      const openWorker = (task) =>
+      // A task row opens its detail pane. The executor conversation is embedded
+      // underneath when the task already has a child Session.
+      const openTaskDetail = (task) =>
         run(async () => {
-          if (!task.childSessionId) return t('noConversation')
+          if (!task.childSessionId) {
+            setExecTarget({ taskId: task.id, title: task.title, sessionId: '', reference: null })
+            return ''
+          }
           if (!threadApi || typeof threadApi.retainWorker !== 'function') {
             throw new Error('The session service is unavailable on this page.')
           }
@@ -958,220 +1275,356 @@ window.__ModuleLoader__.load({
           ),
         )
 
-      const renderTask = (task) =>
+      // The collapsed project column: a 44px rail that still shows every
+      // project by its first letter, with the selected one highlighted.
+      const renderListRail = () =>
         h(
           'div',
-          { key: task.id, className: 'pj-task' },
+          { className: 'pj-rail' },
           h(
-            'div',
-            { className: 'pj-task-head' },
-            h(StatusPill, { status: task.status, t }),
-            h('span', { className: 'pj-task-title' }, task.title),
-            task.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
+            'button',
+            {
+              className: 'pj-rail-btn',
+              type: 'button',
+              title: t('expandList'),
+              'aria-label': t('expandList'),
+              'aria-expanded': 'false',
+              onClick: toggleListCollapsed,
+            },
+            '»',
           ),
-          task.brief && h('div', { className: 'pj-task-body' }, task.brief),
-          task.output
-            ? h('div', { className: 'pj-task-output' }, task.output)
-            : (task.status === 'review' || task.status === 'done' || task.status === 'failed') &&
-              h('div', { className: 'pj-task-output pj-task-meta' }, t('noOutput')),
-          task.stopReason && h('div', { className: 'pj-task-meta' }, `${t('stopReason')}: ${task.stopReason}`),
-          task.childName && h('div', { className: 'pj-task-meta' }, `${t('worker')}: ${task.childName}`),
+          projects.map((entry) =>
+            h(
+              'button',
+              {
+                key: entry.id,
+                type: 'button',
+                className: `pj-rail-btn${entry.id === selectedId ? ' pj-active' : ''}`,
+                title: entry.name,
+                'aria-label': entry.name,
+                'aria-current': entry.id === selectedId ? 'true' : undefined,
+                onClick: () => selectProject(entry),
+              },
+              initialOf(entry.name),
+            ),
+          ),
+        )
+
+      // The row context menu. It is `position:fixed` (see `.pj-menu`) so the
+      // list's `overflow:auto` cannot clip it; the open handler stores the
+      // pointer position and the effect above clamps it into the viewport.
+      const renderTaskMenu = () => {
+        if (!menu) return null
+        const task = taskList.find((entry) => entry.id === menu.taskId)
+        if (!task) return null
+        const confirming = confirmDeleteId === task.id
+        return h(
+          'div',
+          {
+            className: 'pj-menu',
+            role: 'menu',
+            'aria-label': t('taskActions'),
+            ref: menuRef,
+            style: { left: `${menu.x}px`, top: `${menu.y}px` },
+            onContextMenu: (event) => {
+              if (event && typeof event.preventDefault === 'function') event.preventDefault()
+            },
+          },
+          h(
+            'button',
+            {
+              className: 'pj-menu-item',
+              type: 'button',
+              role: 'menuitem',
+              disabled: busy,
+              onClick: () => {
+                setMenu(null)
+                void toggleResolved(task)
+              },
+            },
+            task.resolved ? t('unresolve') : t('resolve'),
+          ),
+          h(
+            'button',
+            {
+              className: 'pj-menu-item pj-danger',
+              type: 'button',
+              role: 'menuitem',
+              disabled: busy,
+              onClick: () => {
+                // Two-stage delete, moved here from the detail page: the second
+                // click only counts once the arm has settled, so a double-click
+                // cannot confirm itself.
+                if (confirming && Date.now() - confirmDeleteAt.current > 600) {
+                  setConfirmDeleteId(null)
+                  setMenu(null)
+                  void deleteTask(task.id)
+                  return
+                }
+                setConfirmDeleteId(task.id)
+                confirmDeleteAt.current = Date.now()
+                setTimeout(() => {
+                  setConfirmDeleteId((current) => (current === task.id ? null : current))
+                }, 3000)
+              },
+            },
+            confirming ? t('deleteConfirm') : t('delete'),
+          ),
+        )
+      }
+
+      // One row per task: status pill, title, executor name. Nothing else — the
+      // brief, the output and every control live on the detail page, and the
+      // row's context menu is the only place a task can be resolved or deleted.
+      const renderTask = (task) =>
+        h(
+          'button',
+          {
+            key: task.id,
+            type: 'button',
+            className: `pj-task-row${execTarget && execTarget.taskId === task.id ? ' pj-active' : ''}`,
+            onClick: () => void openTaskDetail(task),
+            onContextMenu: (event) => openTaskMenu(event, task),
+            disabled: busy,
+            title: task.resolved ? `${task.title} · ${t('resolvedBadge')}` : task.title,
+          },
+          h(StatusPill, { status: task.status, t }),
+          h('span', { className: 'pj-task-name' }, task.title),
+          task.childName && h('span', { className: 'pj-task-worker' }, task.childName),
+        )
+
+      // The detail page: read-only task state plus the human-only controls, with
+      // the executor conversation below. Resolve is the icon button in the
+      // top-right corner; approval stays here; deletion lives in the row menu.
+      const renderTaskDetail = (task) =>
+        h(
+          'div',
+          { className: 'pj-exec-detail' },
           h(
             'div',
-            { className: 'pj-task-foot' },
-            task.childSessionId &&
+            { className: 'pj-exec-info' },
+            h(
+              'div',
+              { className: 'pj-task-head' },
+              h('span', { className: 'pj-label' }, t('status')),
+              h(StatusPill, { status: task.status, t }),
+              task.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
+              task.resolved && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
+              h('span', { className: 'pj-spacer' }),
               h(
                 'button',
-                { className: 'pj-btn', type: 'button', disabled: busy, onClick: () => openWorker(task) },
-                t('openConversation'),
+                {
+                  className: `pj-icon-btn${task.resolved ? ' pj-on' : ''}`,
+                  type: 'button',
+                  disabled: busy,
+                  title: task.resolved ? t('unresolve') : t('resolve'),
+                  'aria-label': task.resolved ? t('unresolve') : t('resolve'),
+                  'aria-pressed': task.resolved ? 'true' : 'false',
+                  onClick: () => void toggleResolved(task),
+                },
+                h(ResolveIcon, { done: Boolean(task.resolved) }),
               ),
+            ),
+            task.childName && h('div', { className: 'pj-task-meta' }, `${t('worker')}: ${task.childName}`),
+            h('div', { className: 'pj-task-meta' }, t('brief')),
+            h('div', { className: 'pj-task-body' }, task.brief || t('noBrief')),
+            h('div', { className: 'pj-task-meta' }, t('output')),
+            h('div', { className: 'pj-task-output' }, task.output || t('noOutput')),
+            task.stopReason && h('div', { className: 'pj-task-meta' }, `${t('stopReason')}: ${task.stopReason}`),
             project.autonomy === 'manual' &&
               !task.approved &&
               task.status !== 'running' &&
               h(
-                'button',
-                {
-                  className: 'pj-btn pj-btn-primary',
-                  onClick: () => patchTask(task.id, { approved: true }),
-                  disabled: busy || project.archived,
-                  type: 'button',
-                },
-                t('approve'),
-              ),
-            h(
-              'select',
-              {
-                className: 'pj-select',
-                style: { width: 'auto' },
-                value: task.status,
-                disabled: busy || task.status === 'running',
-                'aria-label': t('status'),
-                onChange: (event) => void patchTask(task.id, { status: event.target.value }),
-              },
-              ['queued', 'running', 'review', 'done', 'failed', 'blocked'].map((status) =>
-                h('option', { key: status, value: status }, t(status)),
-              ),
-            ),
-            task.status !== 'running' &&
-              h(
-                'button',
-                {
-                  className: 'pj-btn pj-btn-ghost pj-btn-danger',
-                  onClick: () => {
-                    // A double-click on "Delete" must not confirm itself: the
-                    // second click only counts after the arm has settled.
-                    if (confirmDeleteId === task.id && Date.now() - confirmDeleteAt.current > 600) {
-                      setConfirmDeleteId(null)
-                      void deleteTask(task.id)
-                      return
-                    }
-                    setConfirmDeleteId(task.id)
-                    confirmDeleteAt.current = Date.now()
-                    setTimeout(() => {
-                      setConfirmDeleteId((current) => (current === task.id ? null : current))
-                    }, 3000)
+                'div',
+                { className: 'pj-task-foot' },
+                h(
+                  'button',
+                  {
+                    className: 'pj-btn',
+                    type: 'button',
+                    disabled: busy || project.archived,
+                    onClick: () => void approveTask(task),
                   },
-                  disabled: busy,
-                  type: 'button',
-                },
-                confirmDeleteId === task.id ? t('deleteConfirm') : t('delete'),
+                  t('approve'),
+                ),
               ),
           ),
+          execTarget && execTarget.reference
+            ? h(
+                'div',
+                { className: 'pj-chat-body' },
+                h(
+                  EmbeddedBoundary,
+                  { fallback: h('div', { className: 'pj-empty' }, t('workerChatFailed')) },
+                  typeof SessionProvider === 'function' && typeof renderSlot === 'function'
+                    ? h(SessionProvider, { session: execTarget.reference }, renderSlot('projects.conversation', {}))
+                    : h('div', { className: 'pj-empty' }, t('workerChatFailed')),
+                ),
+              )
+            : h('div', { className: 'pj-empty' }, t('noConversation')),
         )
 
-      const groups = ['review', 'running', 'queued', 'done', 'failed', 'blocked']
+      // System states only: `done` is gone, completion is `resolved`.
+      const groups = ['review', 'running', 'queued', 'failed', 'blocked']
         .map((status) => ({ status, tasks: taskList.filter((task) => task.status === status) }))
         .filter((group) => group.tasks.length > 0)
 
       return h(
         'div',
-        { className: 'pj-page' },
+        { className: `pj-page${resizing ? ' pj-resizing' : ''}` },
         h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
         h(
           'aside',
-          { className: 'pj-list' },
-          h(
-            'div',
-            { className: 'pj-list-head' },
-            h('span', { className: 'pj-list-title' }, t('projects')),
-            h(
-              'button',
-              {
-                className: 'pj-btn pj-btn-ghost',
-                onClick: () => setShowNewProject((value) => !value),
-                disabled: busy,
-                type: 'button',
-              },
-              t('newProject'),
-            ),
-          ),
-          showNewProject &&
-            h(
-              'div',
-              { className: 'pj-new-project' },
-              h('input', {
-                className: 'pj-input',
-                'aria-label': t('projectName'),
-                placeholder: t('projectName'),
-                value: newProject.name,
-                onChange: (event) => setNewProject({ ...newProject, name: event.target.value }),
-              }),
-              h('textarea', {
-                className: 'pj-textarea',
-                style: { minHeight: '64px' },
-                'aria-label': t('instructions'),
-                placeholder: t('instructionsPlaceholder'),
-                value: newProject.goal,
-                onChange: (event) => setNewProject({ ...newProject, goal: event.target.value }),
-              }),
-              h(
-                'div',
-                { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
-                h('input', {
-                  className: 'pj-input pj-grow',
-                  'aria-label': t('workspace'),
-                  placeholder: t('workspacePlaceholder'),
-                  value: newProject.workspace,
-                  onChange: (event) => setNewProject({ ...newProject, workspace: event.target.value }),
-                }),
+          {
+            className: `pj-list${listCollapsed ? ' pj-collapsed' : ''}`,
+            style: listCollapsed ? undefined : { flexBasis: `${listWidth}px`, width: `${listWidth}px` },
+          },
+          listCollapsed
+            ? renderListRail()
+            : [
                 h(
-                  'button',
-                  { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseNewProjectFolder },
-                  t('chooseFolderShort'),
-                ),
-              ),
-              h(
-                'div',
-                { className: 'pj-row' },
-                h(
-                  'button',
-                  { className: 'pj-btn pj-btn-primary', onClick: createProject, disabled: busy, type: 'button' },
-                  t('create'),
-                ),
-                h(
-                  'button',
-                  {
-                    className: 'pj-btn pj-btn-ghost',
-                    onClick: () => setShowNewProject(false),
-                    disabled: busy,
-                    type: 'button',
-                  },
-                  t('cancel'),
-                ),
-              ),
-            ),
-          h(
-            'div',
-            { className: 'pj-list-scroll' },
-            projects.length === 0
-              ? h(
                   'div',
-                  { className: 'pj-empty' },
-                  h('div', null, t('noProjects')),
+                  { className: 'pj-list-head' },
+                  h('span', { className: 'pj-list-title' }, t('projects')),
                   h(
                     'div',
-                    { className: 'pj-empty-action' },
+                    { className: 'pj-actions' },
                     h(
                       'button',
                       {
-                        className: 'pj-btn pj-btn-primary',
+                        className: 'pj-btn pj-btn-ghost',
+                        onClick: () => setShowNewProject((value) => !value),
+                        disabled: busy,
                         type: 'button',
-                        onClick: () => setShowNewProject(true),
                       },
                       t('newProject'),
                     ),
-                  ),
-                )
-              : projects.map((entry) =>
-                  h(
-                    'button',
-                    {
-                      key: entry.id,
-                      type: 'button',
-                      className: `pj-list-item${entry.id === selectedId ? ' pj-active' : ''}`,
-                      onClick: () => {
-                        if (
-                          (goalDirtyRef.current || memoryDirtyRef.current || workspaceDirtyRef.current) &&
-                          typeof window.confirm === 'function' &&
-                          !window.confirm(t('switchDiscard'))
-                        ) {
-                          return
-                        }
-                        selectedRef.current = entry.id
-                        setSelectedId(entry.id)
-                        void loadDetail(entry.id).catch((failure) => setError(messageOf(failure)))
-                      },
-                    },
-                    h('span', { className: 'pj-list-name' }, entry.name),
                     h(
-                      'span',
-                      { className: 'pj-list-meta' },
-                      `${countsLine(entry, t)}${entry.archived ? ` · ${t('archivedBadge')}` : ''}`,
+                      'button',
+                      {
+                        className: 'pj-icon-btn',
+                        type: 'button',
+                        title: t('collapseList'),
+                        'aria-label': t('collapseList'),
+                        'aria-expanded': 'true',
+                        onClick: toggleListCollapsed,
+                      },
+                      '«',
                     ),
                   ),
                 ),
-          ),
+                showNewProject &&
+                  h(
+                    'div',
+                    { className: 'pj-new-project' },
+                    h('input', {
+                      className: 'pj-input',
+                      'aria-label': t('projectName'),
+                      placeholder: t('projectName'),
+                      value: newProject.name,
+                      onChange: (event) => setNewProject({ ...newProject, name: event.target.value }),
+                    }),
+                    h('textarea', {
+                      className: 'pj-textarea',
+                      style: { minHeight: '64px' },
+                      'aria-label': t('instructions'),
+                      placeholder: t('instructionsPlaceholder'),
+                      value: newProject.goal,
+                      onChange: (event) => setNewProject({ ...newProject, goal: event.target.value }),
+                    }),
+                    h(
+                      'div',
+                      { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
+                      h('input', {
+                        className: 'pj-input pj-grow',
+                        'aria-label': t('workspace'),
+                        placeholder: t('workspacePlaceholder'),
+                        value: newProject.workspace,
+                        onChange: (event) => setNewProject({ ...newProject, workspace: event.target.value }),
+                      }),
+                      h(
+                        'button',
+                        { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseNewProjectFolder },
+                        t('chooseFolderShort'),
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'pj-row' },
+                      h(
+                        'button',
+                        { className: 'pj-btn pj-btn-primary', onClick: createProject, disabled: busy, type: 'button' },
+                        t('create'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          className: 'pj-btn pj-btn-ghost',
+                          onClick: () => setShowNewProject(false),
+                          disabled: busy,
+                          type: 'button',
+                        },
+                        t('cancel'),
+                      ),
+                    ),
+                  ),
+                h(
+                  'div',
+                  { className: 'pj-list-scroll' },
+                  projects.length === 0
+                    ? h(
+                        'div',
+                        { className: 'pj-empty' },
+                        h('div', null, t('noProjects')),
+                        h(
+                          'div',
+                          { className: 'pj-empty-action' },
+                          h(
+                            'button',
+                            {
+                              className: 'pj-btn pj-btn-primary',
+                              type: 'button',
+                              onClick: () => setShowNewProject(true),
+                            },
+                            t('newProject'),
+                          ),
+                        ),
+                      )
+                    : projects.map((entry) =>
+                        h(
+                          'button',
+                          {
+                            key: entry.id,
+                            type: 'button',
+                            className: `pj-list-item${entry.id === selectedId ? ' pj-active' : ''}`,
+                            onClick: () => selectProject(entry),
+                          },
+                          h('span', { className: 'pj-list-name' }, entry.name),
+                          h(
+                            'span',
+                            { className: 'pj-list-meta' },
+                            `${countsLine(entry, t)}${entry.archived ? ` · ${t('archivedBadge')}` : ''}`,
+                          ),
+                        ),
+                      ),
+                ),
+              ],
         ),
+        listCollapsed
+          ? null
+          : h('div', {
+              className: 'pj-resizer',
+              role: 'separator',
+              'aria-orientation': 'vertical',
+              'aria-label': t('resizeColumns'),
+              'aria-valuenow': listWidth,
+              'aria-valuemin': LIST_MIN,
+              'aria-valuemax': maxColumnWidth(),
+              tabIndex: 0,
+              title: t('resizeColumns'),
+              onPointerDown: (event) => startResize('list', event),
+              onKeyDown: (event) => nudgeWidth('list', event),
+            }),
         h(
           'section',
           { className: 'pj-main' },
@@ -1267,9 +1720,25 @@ window.__ModuleLoader__.load({
                   ),
           ),
         ),
+        h('div', {
+          className: 'pj-resizer',
+          role: 'separator',
+          'aria-orientation': 'vertical',
+          'aria-label': t('resizeColumns'),
+          'aria-valuenow': execWidth,
+          'aria-valuemin': EXEC_MIN,
+          'aria-valuemax': maxColumnWidth(),
+          tabIndex: 0,
+          title: t('resizeColumns'),
+          onPointerDown: (event) => startResize('exec', event),
+          onKeyDown: (event) => nudgeWidth('exec', event),
+        }),
         h(
           'aside',
-          { className: 'pj-exec' },
+          {
+            className: 'pj-exec',
+            style: { flexBasis: `${execWidth}px`, width: `${execWidth}px` },
+          },
           h(
             'header',
             { className: 'pj-exec-head' },
@@ -1284,30 +1753,21 @@ window.__ModuleLoader__.load({
               ? h(
                   'div',
                   { className: 'pj-actions' },
-                  h('span', { className: 'pj-exec-task', title: execTarget.title }, execTarget.title),
-                  h(
-                    'button',
-                    {
-                      className: 'pj-btn pj-btn-ghost',
-                      type: 'button',
-                      onClick: () => openInWorkspace(execTarget.sessionId),
-                    },
-                    t('openInWorkspace'),
-                  ),
+                  h('span', { className: 'pj-exec-task', title: execTitle }, shortTitle(execTitle)),
+                  execTarget.sessionId &&
+                    h(
+                      'button',
+                      {
+                        className: 'pj-btn pj-btn-ghost',
+                        type: 'button',
+                        onClick: () => openInWorkspace(execTarget.sessionId),
+                      },
+                      t('openInWorkspace'),
+                    ),
                 )
               : h(
                   'div',
                   { className: 'pj-actions' },
-                  h(
-                    'button',
-                    {
-                      className: 'pj-btn',
-                      type: 'button',
-                      disabled: busy || !project,
-                      onClick: () => setShowNewTask((value) => !value),
-                    },
-                    t('addTask'),
-                  ),
                   h(
                     'button',
                     {
@@ -1325,59 +1785,12 @@ window.__ModuleLoader__.load({
           !project
             ? null
             : execTarget
-              ? h(
-                  'div',
-                  { className: 'pj-chat-body' },
-                  h(
-                    EmbeddedBoundary,
-                    { fallback: h('div', { className: 'pj-empty' }, t('workerChatFailed')) },
-                    typeof SessionProvider === 'function' && typeof renderSlot === 'function'
-                      ? h(SessionProvider, { session: execTarget.reference }, renderSlot('projects.conversation', {}))
-                      : h('div', { className: 'pj-empty' }, t('workerChatFailed')),
-                  ),
-                )
+              ? execTask
+                ? renderTaskDetail(execTask)
+                : h('div', { className: 'pj-empty' }, t('noTask'))
               : h(
                   'div',
                   { className: 'pj-exec-scroll' },
-                  showNewTask &&
-                    h(
-                      'div',
-                      { className: 'pj-form', style: { marginBottom: '10px' } },
-                      h('input', {
-                        className: 'pj-input',
-                        'aria-label': t('taskTitle'),
-                        placeholder: t('taskTitle'),
-                        value: newTask.title,
-                        onChange: (event) => setNewTask({ ...newTask, title: event.target.value }),
-                      }),
-                      h('textarea', {
-                        className: 'pj-textarea',
-                        style: { minHeight: '64px' },
-                        'aria-label': t('taskBrief'),
-                        placeholder: t('taskBrief'),
-                        value: newTask.brief,
-                        onChange: (event) => setNewTask({ ...newTask, brief: event.target.value }),
-                      }),
-                      h(
-                        'div',
-                        { className: 'pj-row' },
-                        h(
-                          'button',
-                          { className: 'pj-btn pj-btn-primary', onClick: addTask, disabled: busy, type: 'button' },
-                          t('add'),
-                        ),
-                        h(
-                          'button',
-                          {
-                            className: 'pj-btn pj-btn-ghost',
-                            onClick: () => setShowNewTask(false),
-                            disabled: busy,
-                            type: 'button',
-                          },
-                          t('cancel'),
-                        ),
-                      ),
-                    ),
                   groups.length === 0
                     ? h('div', { className: 'pj-empty' }, t('emptyTasks'))
                     : groups.map((group) =>
@@ -1394,6 +1807,7 @@ window.__ModuleLoader__.load({
                       ),
                 ),
         ),
+        renderTaskMenu(),
       )
     }
 

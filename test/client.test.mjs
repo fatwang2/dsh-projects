@@ -235,7 +235,12 @@ test('the task list is a read-only row and status is never written', () => {
   // resolve/delete controls at the bottom: resolve moved to the top-right icon
   // button and deletion lives only in the row context menu.
   const detail = source.slice(rowEnd, source.indexOf('const groups =', rowEnd))
-  assert.doesNotMatch(detail, /h\(\s*'select'/)
+  // The only select in the detail pane is the read-only task-model picker.
+  // There is no status picker: status stays system-owned.
+  const selects = [...detail.matchAll(/h\(\s*'select'/g)]
+  assert.equal(selects.length, 1, 'the detail pane has exactly one select')
+  assert.match(detail, /value: task\.model \|\| ''[\s\S]{0,400}disabled: true/)
+  assert.doesNotMatch(detail, /patchTask\([^)]*model/)
   assert.match(detail, /task\.brief/)
   assert.match(detail, /task\.output/)
   assert.match(detail, /toggleResolved/)
@@ -484,4 +489,81 @@ test('the concurrency input accepts the Host ceiling of ten', () => {
   const input = source.slice(source.indexOf("t('concurrency')"), source.indexOf("t('workspace')"))
   assert.match(input, /max: 10,/)
   assert.doesNotMatch(source, /max: 8,/)
+})
+
+test('the model pickers read the Host catalog and degrade to free text', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The catalog comes from the Host's read-only route, fetched once. A failed
+  // call leaves both controls in their free-text fallback.
+  assert.match(source, /api\('\/models'\)/)
+  assert.match(source, /enumerable: data\.enumerable === true/)
+  assert.match(source, /presetsEnumerable: data\.presetsEnumerable === true/)
+  assert.match(source, /Array\.isArray\(data\.models\)/)
+  assert.match(source, /Array\.isArray\(data\.presets\)/)
+
+  // Project settings: one select per catalog, each with the empty default
+  // option, saving through the existing project PATCH route.
+  const settingsStart = source.indexOf('const renderSettings')
+  const settingsEnd = source.indexOf('const renderListRail', settingsStart)
+  assert.ok(settingsStart > 0 && settingsEnd > settingsStart)
+  const settings = source.slice(settingsStart, settingsEnd)
+  assert.match(settings, /t\('execution'\)/)
+  assert.match(settings, /catalog\.enumerable[\s\S]{0,60}\? h\([\s\S]{0,40}'select'/)
+  assert.match(settings, /catalog\.presetsEnumerable[\s\S]{0,60}\? h\([\s\S]{0,40}'select'/)
+  assert.match(settings, /patchProject\(\{ model: event\.target\.value \}\)/)
+  assert.match(settings, /patchProject\(\{ agentPreset: event\.target\.value \}\)/)
+  assert.match(settings, /t\('modelDefault'\)/)
+
+  // Fallback: a free-text field plus a one-line hint.
+  assert.match(settings, /defaultValue: project\.model \|\| ''/)
+  assert.match(settings, /t\('modelFreeTextHint'\)/)
+  assert.match(settings, /defaultValue: project\.agentPreset \|\| ''/)
+  assert.match(settings, /t\('presetFreeTextHint'\)/)
+
+  // Detail page: the effective route and its source, plus a read-only override.
+  const detailStart = source.indexOf('const renderTaskDetail')
+  const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
+  assert.match(detail, /effectiveModel\(project, task\)/)
+  assert.match(detail, /t\('effectiveModel'\)/)
+  assert.match(detail, /effective\.source === 'task'[\s\S]{0,80}'fromTask'/)
+  assert.match(detail, /'fromProject'/)
+  assert.match(detail, /t\('fromHost'\)/)
+  assert.match(detail, /t\('taskModelReadonly'\)/)
+  assert.match(detail, /h\('option', \{ value: '' \}, t\('modelInheritProject'\)\)/)
+
+  // Precedence is task > project > host, and an unknown stored route is kept
+  // visible instead of silently dropped by the picker.
+  const helper = source.slice(
+    source.indexOf('function modelRouteOf'),
+    source.indexOf('function threadGroups'),
+  )
+  assert.match(helper, /if \(fromTask\) return \{ value: fromTask, source: 'task' \}/)
+  assert.match(helper, /if \(fromProject\) return \{ value: fromProject, source: 'project' \}/)
+  assert.match(helper, /return \{ value: '', source: 'host' \}/)
+  assert.match(helper, /options\.push\(h\('option', \{ key: value, value \}, value\)\)/)
+
+  // Both dictionaries carry the new labels.
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  for (const key of [
+    'execution',
+    'executionHint',
+    'model',
+    'agentPreset',
+    'modelDefault',
+    'modelInheritProject',
+    'modelRoutePlaceholder',
+    'modelFreeTextHint',
+    'presetFreeTextHint',
+    'effectiveModel',
+    'fromTask',
+    'fromProject',
+    'fromHost',
+    'taskModel',
+    'taskModelReadonly',
+  ]) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
 })

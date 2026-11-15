@@ -119,6 +119,24 @@ window.__ModuleLoader__.load({
       groupIdle: 'Idle',
       groupResolved: 'Resolved',
       justNow: 'just now',
+      execution: 'Execution',
+      executionHint:
+        'Default model and agent preset for every worker in this project. A task may override them.',
+      model: 'Model',
+      agentPreset: 'Agent preset',
+      modelDefault: 'Default (inherits host)',
+      modelInheritProject: 'Inherit project default',
+      modelRoutePlaceholder: 'provider/model',
+      modelFreeTextHint:
+        'The model list could not be enumerated — type a route such as provider/model.',
+      presetFreeTextHint: 'The preset list could not be enumerated — type a preset id.',
+      effectiveModel: 'Effective model',
+      fromTask: 'from task',
+      fromProject: 'from project',
+      fromHost: 'host default',
+      taskModel: 'Task model',
+      taskModelReadonly:
+        'Task-level model is set by the coordinator (projects_update_task); this page is read-only.',
     }
 
     const ZH = {
@@ -212,6 +230,21 @@ window.__ModuleLoader__.load({
       groupIdle: '空闲',
       groupResolved: '已解决',
       justNow: '刚刚',
+      execution: '执行',
+      executionHint: '本项目所有执行者的默认模型与 Agent 预设；单个任务可以覆盖。',
+      model: '模型',
+      agentPreset: 'Agent 预设',
+      modelDefault: '默认（继承宿主）',
+      modelInheritProject: '继承项目默认',
+      modelRoutePlaceholder: 'provider/model',
+      modelFreeTextHint: '无法枚举模型列表，请手填路由，例如 provider/model。',
+      presetFreeTextHint: '无法枚举预设列表，请手填预设 id。',
+      effectiveModel: '生效模型',
+      fromTask: '来自任务',
+      fromProject: '来自项目',
+      fromHost: '宿主默认',
+      taskModel: '任务模型',
+      taskModelReadonly: '任务级模型由协调者设置（projects_update_task），页面只读。',
     }
 
     // ---------------------------------------------------------------------
@@ -312,6 +345,8 @@ window.__ModuleLoader__.load({
 .pj-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
 .pj-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pj-exec-info .pj-field{margin-top:4px;max-width:320px}
+.pj-model-line{font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:2px;word-break:break-word}
 .pj-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
 /* A thread card: icon in the gutter, then a title line, a one-line summary and
    optional chips. Two rows plus chips, and no controls at all — every action
@@ -505,6 +540,52 @@ window.__ModuleLoader__.load({
       if (model) chips.push(model.split('/').pop() || model)
       if (task.id) chips.push(String(task.id).slice(0, 6))
       return chips.slice(0, 2)
+    }
+
+    /**
+     * The Host stores a model as a route string (`provider/model`, or a bare
+     * model id whose provider is inherited from the parent agent). An empty
+     * string means "not set", so every reader normalizes through here.
+     */
+    function modelRouteOf(value) {
+      return String(value || '').trim()
+    }
+
+    /** A picker label for a stored route; an unknown route stays visible. */
+    function modelLabel(catalog, value) {
+      const route = modelRouteOf(value)
+      if (!route) return ''
+      const found = (catalog.models || []).find((entry) => entry && entry.id === route)
+      return found && found.label ? found.label : route
+    }
+
+    /**
+     * Which layer supplies the route a dispatch would use: the task override,
+     * the project default, or (when both are empty) the host's own route.
+     */
+    function effectiveModel(project, task) {
+      const fromTask = modelRouteOf(task && task.model)
+      if (fromTask) return { value: fromTask, source: 'task' }
+      const fromProject = modelRouteOf(project && project.model)
+      if (fromProject) return { value: fromProject, source: 'project' }
+      return { value: '', source: 'host' }
+    }
+
+    /**
+     * Options for a catalog-backed picker. A stored value the catalog does not
+     * advertise (set by the coordinator, or a stale catalog) is appended, so
+     * the control never silently drops the current setting.
+     */
+    function catalogOptions(catalog, list, current) {
+      const entries = (catalog[list] || []).filter((entry) => entry && entry.id)
+      const options = entries.map((entry) =>
+        h('option', { key: entry.id, value: entry.id }, entry.label || entry.id),
+      )
+      const value = modelRouteOf(current)
+      if (value && !entries.some((entry) => entry.id === value)) {
+        options.push(h('option', { key: value, value }, value))
+      }
+      return options
     }
 
     /**
@@ -819,6 +900,15 @@ window.__ModuleLoader__.load({
       const [centerView, setCenterView] = useState('chat')
       const [thread, setThread] = useState(null)
       const [execTarget, setExecTarget] = useState(null)
+      // The worker model catalog from `GET /projects-api/models`. The Host
+      // caches it for 60s, so one fetch per page load is enough; a failure or
+      // `enumerable: false` degrades both pickers to free text.
+      const [catalog, setCatalog] = useState({
+        models: [],
+        enumerable: false,
+        presets: [],
+        presetsEnumerable: false,
+      })
 
       // Layout preferences (page-local, persisted in localStorage).
       const [listCollapsed, setListCollapsed] = useState(() => readStored('listCollapsed', '0') === '1')
@@ -979,6 +1069,32 @@ window.__ModuleLoader__.load({
           clearInterval(timer)
         }
       }, [loadDetail, loadProjects])
+
+      // The model catalog is read-only and cached by the Host, so it is fetched
+      // once per page load rather than on the 4s poll. Any failure leaves both
+      // pickers in their free-text fallback instead of hiding the setting.
+      useEffect(() => {
+        let stopped = false
+        const load = async () => {
+          try {
+            const data = await api('/models')
+            if (stopped) return
+            setCatalog({
+              models: Array.isArray(data.models) ? data.models : [],
+              enumerable: data.enumerable === true,
+              presets: Array.isArray(data.presets) ? data.presets : [],
+              presetsEnumerable: data.presetsEnumerable === true,
+            })
+          } catch {
+            if (stopped) return
+            setCatalog({ models: [], enumerable: false, presets: [], presetsEnumerable: false })
+          }
+        }
+        void load()
+        return () => {
+          stopped = true
+        }
+      }, [])
 
       // A project that already has a coordinator Session reopens its
       // conversation when the project is selected.
@@ -1490,6 +1606,90 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'pj-section-head' },
+              h('h2', { className: 'pj-section-title' }, t('execution')),
+            ),
+            h('div', { className: 'pj-hint' }, t('executionHint')),
+            h(
+              'div',
+              { className: 'pj-row' },
+              h(
+                'label',
+                { className: 'pj-field pj-grow' },
+                h('span', { className: 'pj-label' }, t('model')),
+                catalog.enumerable
+                  ? h(
+                      'select',
+                      {
+                        className: 'pj-select',
+                        'aria-label': t('model'),
+                        value: project.model || '',
+                        disabled: busy,
+                        onChange: (event) => void patchProject({ model: event.target.value }),
+                      },
+                      h('option', { value: '' }, t('modelDefault')),
+                      ...catalogOptions(catalog, 'models', project.model),
+                    )
+                  : h('input', {
+                      className: 'pj-input',
+                      type: 'text',
+                      'aria-label': t('model'),
+                      placeholder: t('modelRoutePlaceholder'),
+                      defaultValue: project.model || '',
+                      // Re-key on the stored value so a refresh (or a project
+                      // switch) re-seeds the uncontrolled field without
+                      // clobbering what the user is typing.
+                      key: `${project.id}:${project.model || ''}`,
+                      disabled: busy,
+                      onBlur: (event) => {
+                        const value = event.target.value.trim()
+                        if (value !== (project.model || '')) void patchProject({ model: value })
+                      },
+                    }),
+                !catalog.enumerable && h('span', { className: 'pj-hint' }, t('modelFreeTextHint')),
+              ),
+              h(
+                'label',
+                { className: 'pj-field pj-grow' },
+                h('span', { className: 'pj-label' }, t('agentPreset')),
+                catalog.presetsEnumerable
+                  ? h(
+                      'select',
+                      {
+                        className: 'pj-select',
+                        'aria-label': t('agentPreset'),
+                        value: project.agentPreset || '',
+                        disabled: busy,
+                        onChange: (event) => void patchProject({ agentPreset: event.target.value }),
+                      },
+                      h('option', { value: '' }, t('modelDefault')),
+                      ...catalogOptions(catalog, 'presets', project.agentPreset),
+                    )
+                  : h('input', {
+                      className: 'pj-input',
+                      type: 'text',
+                      'aria-label': t('agentPreset'),
+                      placeholder: t('agentPreset'),
+                      defaultValue: project.agentPreset || '',
+                      key: `${project.id}:${project.agentPreset || ''}`,
+                      disabled: busy,
+                      onBlur: (event) => {
+                        const value = event.target.value.trim()
+                        if (value !== (project.agentPreset || '')) {
+                          void patchProject({ agentPreset: value })
+                        }
+                      },
+                    }),
+                !catalog.presetsEnumerable &&
+                  h('span', { className: 'pj-hint' }, t('presetFreeTextHint')),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'pj-section' },
+            h(
+              'div',
+              { className: 'pj-section-head' },
               h('h2', { className: 'pj-section-title' }, t('memory')),
               h(
                 'button',
@@ -1670,8 +1870,15 @@ window.__ModuleLoader__.load({
       // The detail page: read-only task state plus the human-only controls, with
       // the executor conversation below. Resolve is the icon button in the
       // top-right corner; approval stays here; deletion lives in the row menu.
-      const renderTaskDetail = (task) =>
-        h(
+      const renderTaskDetail = (task) => {
+        const effective = effectiveModel(project, task)
+        const sourceKey =
+          effective.source === 'task'
+            ? 'fromTask'
+            : effective.source === 'project'
+              ? 'fromProject'
+              : 'fromHost'
+        return h(
           'div',
           { className: 'pj-exec-detail' },
           h(
@@ -1700,6 +1907,35 @@ window.__ModuleLoader__.load({
               ),
             ),
             task.childName && h('div', { className: 'pj-task-meta' }, `${t('worker')}: ${task.childName}`),
+            h('div', { className: 'pj-task-meta' }, t('effectiveModel')),
+            h(
+              'div',
+              { className: 'pj-model-line' },
+              effective.value
+                ? `${modelLabel(catalog, effective.value)} · ${t(sourceKey)}`
+                : t('fromHost'),
+            ),
+            h('div', { className: 'pj-task-meta' }, t('taskModel')),
+            h(
+              'div',
+              { className: 'pj-field' },
+              h(
+                'select',
+                {
+                  className: 'pj-select',
+                  'aria-label': t('taskModel'),
+                  value: task.model || '',
+                  // The page's task PATCH only accepts `resolved`, so a
+                  // task-level route is the coordinator's to set. The control
+                  // stays visible and read-only rather than pretending to save.
+                  disabled: true,
+                  title: t('taskModelReadonly'),
+                },
+                h('option', { value: '' }, t('modelInheritProject')),
+                ...catalogOptions(catalog, 'models', task.model),
+              ),
+              h('span', { className: 'pj-hint' }, t('taskModelReadonly')),
+            ),
             h('div', { className: 'pj-task-meta' }, t('brief')),
             h('div', { className: 'pj-task-body' }, task.brief || t('noBrief')),
             h('div', { className: 'pj-task-meta' }, t('output')),
@@ -1737,6 +1973,7 @@ window.__ModuleLoader__.load({
               )
             : h('div', { className: 'pj-empty' }, t('noConversation')),
         )
+      }
 
       // Five fixed groups, in reference order. A resolved task always lands in
       // `Resolved`, whatever its system state is. The search box filters on the

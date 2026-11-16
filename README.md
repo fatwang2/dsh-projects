@@ -200,10 +200,23 @@ install, an upgrade or a removal: they live in `$DSH_HOME/projects/<projectId>/`
   never split and the newest one always stays. It backs up first, verifies the
   write, and rolls back on any mismatch, so nothing is silently dropped. Turn it
   off per project with `autoCompact: false` to keep the memory append-only.
+- **Per-task git worktree isolation** (opt-in, off by default): the project
+  setting `worktreeIsolation` — a boolean, settable with `projects_update` —
+  gives every task its own checkout at `<workspace>/.worktrees/<taskId>` on
+  branch `task/<taskId>`, and the worker's `cwd` points there, so two workers of
+  the same project cannot overwrite each other's files. The workspace must be a
+  git repository that **already ignores `.worktrees/`**: dispatch refuses with an
+  actionable error instead of leaving an untracked directory in `git status`, and
+  a start that fails after creation removes the checkout it just made. The
+  worktree is **kept after the worker settles** — the human reviews it and merges
+  it, nothing is merged automatically — and is removed together with its branch
+  when the task is deleted or the project is archived. When the workspace is not
+  a git repository (or is missing), isolation degrades instead of failing: the
+  worker runs in the shared workspace and the task records why in
+  `worktreeDegraded` / `worktreeNote`.
 - Workers are in-process subagents: they stop when the plugin is disabled or
-  the process exits. There is no cloud execution in this version, and four
-  planned features are still missing: **per-task git worktree isolation** (each
-  task gets its own branch/worktree), **scheduled or event-triggered runs**, a
+  the process exits. There is no cloud execution in this version, and three
+  planned features are still missing: **scheduled or event-triggered runs**, a
   **global pause / reporting policy**, and an **output library** (task outputs
   and workspace files collected on the page).
 - Project instructions are capped at 16000 characters; each task output keeps

@@ -35,7 +35,7 @@ to end on the Host side:
 | # | Projects capability | How Claude / Cursor does it | The DSH mechanism it maps to | Plugin-feasible | Prototype status |
 |---|---|---|---|---|---|
 | 1 | Coordinator: the single conversation entry point, which only splits, dispatches and accepts | coordinator agent / coordinator conversation | a real Session embedded in the project page (`main` declares a session sub-slot + a `conversation.content` factory) + the `projects_*` tools | ✅ | ✅ Done (the coordinator conversation sits in the right column of the project page; no navigation away) |
-| 2 | Parallel workers: own context, own environment, delivers PRs/docs | cloud thread (own branch + repo copy) / isolated VM + branch | `ctx.subagents.startActivation({provider:'spawn', parent, delivery:'parent'})`: each worker is its own Session with its own context; `cwd` sets the working directory | ✅ (branch isolation needs a worktree on top) | ✅ Done (parallel + concurrency cap + result write-back); ⚠️ branch isolation not done |
+| 2 | Parallel workers: own context, own environment, delivers PRs/docs | cloud thread (own branch + repo copy) / isolated VM + branch | `ctx.subagents.startActivation({provider:'spawn', parent, delivery:'parent'})`: each worker is its own Session with its own context; `cwd` sets the working directory | ✅ (branch isolation via an opt-in worktree) | ✅ Done (parallel + concurrency cap + result write-back + opt-in per-task worktree/branch isolation) |
 | 3 | Long-lived shared memory: every worker reads and writes it, and humans can view and edit it | `MEMORY.md` index / Agent Store synced files | a per-project `memory.md`: dispatch injects a **section index** (titles + character counts, not the full text); workers read and append one section at a time with `projects_memory`; the page edits it directly; over-budget content is archived automatically | ✅ | ✅ Done |
 | 4 | Task status and visibility: overview panel + outputs | Overview (Threads/Library) / List+Board | a three-column page: column 3 is the Threads panel, which groups task cards by status; click a card to open its detail page (the worker session, whose output is its final message); a 4s poll | ✅ | ✅ Done (grouping, output, worker session, search, group show/hide and folding) |
 | 5 | Continuous running and autonomous progress: cloud, watching PRs/CI, scheduled or event triggers | an always-on Cloud VM / Slack, schedule, PR subscriptions | an always-on local process; `ctx.schedule` (cron) plus goal/ralph loops can do "scheduled + autonomous rounds"; no cloud, no built-in Slack/PR subscription | ⚠️ Partial | ❌ Not in v1 (see §5, next steps) |
@@ -105,13 +105,14 @@ compaction.
 
 Project: `id / name / goal(instructions) / workspace / autonomy / concurrency /
 model / reasoningEffort / agentPreset / autoCompact / memoryBudget /
-lastCompaction / archived / tasks[]`
+worktreeIsolation / lastCompaction / archived / tasks[]`
 (`workspace` is optional: the page opens the Host's own native directory picker
 through `ctx.uiWorkspace.pickDirectory()`, and a project without a directory
 inherits the coordinator session's directory)
 Task: `id / title / brief / status(queued|running|review|failed|blocked|resolved) /
 approved / model / reasoningEffort / agentPreset / childSessionId / childName /
-output / stopReason / timestamps`
+branch / worktreePath / worktreeDegraded / worktreeNote / output / stopReason /
+timestamps`
 (`model` / `reasoningEffort` / `agentPreset` are defaults at project level and
 are overridden by the same-named task field; an empty value means inherit, and
 the final fallback is the Host default)
@@ -197,8 +198,23 @@ added by forking. They need a server.**
 
 1. **Per-task git worktree isolation**: create a worktree for the task before
    dispatch, point `cwd` at it, record the branch on the task; merge or discard
-   it after acceptance. Reuse `dsh-experimental-tool-worktree` directly.
-   **Status: not done.**
+   it after acceptance.
+   **Status: done**, as an opt-in project setting (`worktreeIsolation`, a
+   boolean, off by default) rather than always-on. Dispatch creates
+   `<workspace>/.worktrees/<taskId>` on branch `task/<taskId>` with
+   `git worktree add` (built in the plugin, not by reusing
+   `dsh-experimental-tool-worktree`) and points the worker's `cwd` there; the
+   task records `branch` and `worktreePath`. The workspace must be a git
+   repository that **already ignores `.worktrees/`**: dispatch refuses with an
+   actionable error rather than leaving an untracked directory in `git status`,
+   and a start that fails after creation removes the checkout it just made. A
+   workspace that is not a git repository (or is missing) degrades instead of
+   failing: the worker runs in the shared workspace and the task records
+   `worktreeDegraded` (`not_a_git_repository` / `workspace_missing`) plus a
+   readable `worktreeNote`. The worktree **survives acceptance** — the human
+   reviews and merges it, nothing is merged automatically — and is removed with
+   its branch when the task is deleted or the project is archived (archiving
+   collects per-task failures instead of refusing).
 2. **Scheduled / event-triggered runs**: use `ctx.schedule` to create a task that
    "checks queued tasks every N minutes and dispatches them", or hook the `goal`
    / ralph loop for autonomous rounds.
@@ -235,6 +251,7 @@ added by forking. They need a server.**
 | HTTP route list | everything hangs under the `/projects-api` prefix, in 7 path groups: `GET\|POST /projects`, `GET\|PATCH /projects/:id` (PATCH = project settings), `GET\|POST /projects/:id/memory`, `PATCH\|DELETE /projects/:id/tasks/:taskId` (DELETE may carry `?session=archive`, see the next row), `POST /projects/:id/tasks/:taskId/approve`, `GET /models` (the model/preset catalog, read-only) and `POST /sessions/restore` (restore an archived coordinator session) |
 | Session archiving | deleting a task can archive the worker session: `DELETE /projects-api/projects/:id/tasks/:taskId?session=archive` responds `{deleted:true, session:{id, archived:true}}`; without the parameter only the task is deleted (`session:null`). The session id always comes from the task's own `childSessionId`, so a request cannot name another session; the coordinator session is 409; a worker that is still running is 409 (it is never killed implicitly); when the session is already gone the task is still deleted and `archived:false` is returned. **DSH has no way to delete a session** (the product itself says "sessions can be archived but are never deleted"), so `?session=1/true/delete/remove/yes` is rejected with 400 instead of being silently downgraded to an archive. Archiving frees **no disk space**: it hides the session from the default sidebar and refuses it further model steps, while not one byte leaves `$DSH_HOME/sessions/`. After the page's right-click **Delete**, the second stage offers **two actions**: **Delete task only** (primary, danger colour) and **Delete and archive session** (secondary, **only when the task has a `childSessionId`**); a successful archive reports "Task deleted, session archived." (a Host `archived:false` reports only "Deleted."), a 409 for a worker that is still running keeps the task and asks you to wait for it to finish, and the coordinator-session 409 keeps the Host's own wording |
 | Concurrency cap | 1-8 in the plugin layer (`MAX_CONCURRENCY = 8`; out-of-range values are clamped, not rejected). The 8 is **deliberately** aligned with the Host's `maxActiveSubagents` default: the plugin never admits a worker the Host would refuse. The ninth task is stopped in the plugin layer with `Concurrency limit reached (8/8 workers running)` instead of first being rejected by the Host pool and wrapped as `Could not start the worker: …`. No profile patch is needed |
+| Worktree isolation | opt-in per project (`worktreeIsolation`, off by default), covered against a **real temporary git repository** (no git mock): switch off creates nothing; a non-git workspace and a missing workspace degrade with a `worktreeDegraded`/`worktreeNote` instead of failing; with the switch on, dispatch creates `<workspace>/.worktrees/<taskId>` on branch `task/<taskId>` and the worker's `cwd` and prompt point there; dispatch refuses when `.worktrees/` is not ignored; a failed start leaves no checkout behind; deleting a task removes the worktree and its branch (including a dirty worktree); archiving the project removes every task's worktree (including a dirty one) and a refused archive keeps it; the setting round-trips through `projects_update` |
 | Worker sidebar | column 3 takes the Threads panel shape: five fixed, collapsible groups (`running` / `review` / `waiting`=`blocked`+`failed` / `idle`=`queued` / `resolved`, with Resolved folded by default); a card is a status icon + title (single line, ellipsised) + relative time + a one-line summary + optional chips (model / task id), with no body and no controls; clicking opens the detail view (a master-detail column replacement, with a back button), and **the detail view is the conversation view**: its body is only the worker's own session (the brief was already its first message at dispatch, so it is not echoed again) and the output is that conversation's final message; **Resolve** sits at the top right of the detail view, and delete lives only in the row's right-click menu (two-step confirm; closes on outside click / Esc / scroll, follows the mouse and is clamped into the viewport). The panel head carries two glyphs at the top right: **search** (unfolds a field only when clicked, filters on the title and the one-line summary, clears when folded) and **filter** (a menu that shows or hides each of the five groups plus fold-all/expand-all, with an extra "show all groups" row when something is hidden); there is **no refresh control** — the 4s poll keeps the cards current |
 | Three-column layout | column 1's header holds `+` (the create dialog) and the fold glyph (`PanelLeftIcon`, the same icon as the DSH sidebar), which collapses the column to a 44px icon rail (`listCollapsed`); column 2's header holds only a gear glyph (the settings dialog), and the middle column has no tabs any more; a resizer sits between columns 1 and 2 and between columns 2 and 3 (draggable, and the arrow keys work too); column widths and the collapsed state are page-local preferences that survive a reload |
 | In-conversation subtask cards | every `projects_dispatch` call from the coordinator renders a clickable task card in the conversation (the `tool.call.toolview` slot, key `projects_dispatch`): title, a read-only status pill, relative time, a resolved chip; clicking opens that task's detail view (a different project is switched first; with the page unmounted it silently does nothing). The card is display-only and issues no request of its own — its data comes from the board snapshot the page publishes |

@@ -1312,11 +1312,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
           '8. 派发前先看上面的任务列表：如果这次要做的是某条未完成任务（同一件事）的后续阶段，用 projects_dispatch 的 note 参数继续那条任务，不要新建；只有不同的事才用 projects_add_task 新建任务。任务说明要补充时用 projects_update_task 的 append_brief，不要另起一条任务。',
           '',
           '## 回答方式（硬约束）',
-          '- 回答尽量短：一般不超过 3-5 句。',
-          '- 不要复述任务产出：执行者的 output 已经在任务里，不要抄进对话。',
-          '- 不要罗列已完成任务清单。',
-          '- 不要解释你打算怎么做，直接做（拆任务、派发）或直接回答。',
-          '- 一次只问必要的问题，不要一次抛多个。',
+          '1. 先判断再展开：简单问题（是什么、能不能、怎么做）直接给答案，不要先分析再回答。',
+          '2. 不要无谓的结构化：不要在回复里用表格、编号清单、分节标题，除非用户明确要求，或内容确实并列。',
+          '3. 不要过程叙述：不写「我先看看」「让我分析一下」「有几种可能」，直接给结论；不要解释你打算怎么做，直接做（拆任务、派发）或直接回答。',
+          '4. 不要重复：同一件事只说一次，不要开头说一遍、结尾再说一遍。',
+          '5. 长度硬上限：一般 ≤ 3 句；需要解释时 ≤ 6 句；超过 6 句必须说明理由（例如用户问了复杂问题）。这是上限，不是目标。',
+          '6. 派任务时只说三件事：派了什么、为什么、等什么；不要复述任务 brief，不要复述任务产出（执行者的 output 已经在任务里）。',
+          '7. 不确定时问一句：一次只问必要的问题，不要列举所有可能性，也不要一次抛多个。',
+          '8. 不要罗列已完成任务清单。',
         ].join('\n')
       }
       return [
@@ -1345,11 +1348,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
         '8. Before dispatching, read the task list above: when the next step is a later stage of an unfinished task (the same piece of work), continue that task with the projects_dispatch note parameter instead of creating a new one; create a task only for different work. To add to a brief, use projects_update_task append_brief rather than opening another task.',
         '',
         '## Reply style (hard rules)',
-        '- Keep answers short: usually 3-5 sentences at most.',
-        '- Do not restate task output. The worker output already lives in the task; never copy it into the conversation.',
-        '- Do not list completed tasks.',
-        '- Do not explain what you are about to do. Just do it (split, dispatch) or answer.',
-        '- Ask one necessary question at a time, never several at once.',
+        '1. Decide first, then expand: for a simple question (what / can it / how), answer directly. Do not analyse before answering.',
+        '2. No needless structure: in your replies, no tables, numbered lists, or section headings unless the user asks for them or the content is genuinely parallel.',
+        '3. No process narration: never write "Let me take a look", "Let me analyse", or "There are several possibilities" — give the conclusion. Do not explain what you are about to do; just do it (split, dispatch) or answer.',
+        '4. No repetition: say each thing once; do not say it at the start and again at the end.',
+        '5. Hard length cap: usually ≤ 3 sentences; ≤ 6 when an explanation is genuinely needed; more than 6 requires a stated reason (e.g. the user asked a complex question). The cap is a ceiling, not a target.',
+        '6. When dispatching, say three things only: what you dispatched, why, and what you are waiting for. Do not restate the task brief. Do not restate task output — the worker output already lives in the task.',
+        '7. When unsure, ask one question instead of listing every possibility. Ask one necessary question at a time, never several at once.',
+        '8. Do not list completed tasks.',
       ].join('\n')
     }
 

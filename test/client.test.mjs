@@ -1115,33 +1115,115 @@ test('displayed titles are shortened without touching the stored title', () => {
   assert.match(source, /\.pj-exec-task\{[^}]*max-width:220px/)
 })
 
-test('the coordinator prompt keeps the main conversation short', () => {
+test('the coordinator prompt enforces brevity as hard rules, not suggestions', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   const start = source.indexOf('function coordinatorPrompt')
   const end = source.indexOf('function ProjectsIcon', start)
   assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
-  const prompt = source.slice(start, end)
+  const coordinatorPrompt = new Function(`${source.slice(start, end)}; return coordinatorPrompt;`)()
+  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks: [], autonomy: 'manual' }
+  const zh = coordinatorPrompt(project, 'zh')
+  const en = coordinatorPrompt(project, 'en')
 
+  // The seven new hard rules, each checked by its operative clause rather than
+  // a paraphrase, in the language the human reads. The eighth line is the
+  // pre-existing "do not list completed tasks" rule, kept in place.
   for (const line of [
-    '3-5 句',
+    '先判断再展开',
+    '简单问题（是什么、能不能、怎么做）直接给答案',
+    '不要无谓的结构化',
+    '不要在回复里用表格、编号清单、分节标题',
+    '不要过程叙述',
+    '我先看看',
+    '让我分析一下',
+    '有几种可能',
+    '不要重复',
+    '同一件事只说一次',
+    '长度硬上限',
+    '一般 ≤ 3 句',
+    '需要解释时 ≤ 6 句',
+    '超过 6 句必须说明理由',
+    '派任务时只说三件事',
+    '派了什么、为什么、等什么',
+    '不确定时问一句',
+    '不要列举所有可能性',
+  ]) {
+    assert.ok(zh.includes(line), `the zh prompt is missing: ${line}`)
+  }
+  for (const line of [
+    'Decide first, then expand',
+    'for a simple question (what / can it / how), answer directly',
+    'No needless structure',
+    'no tables, numbered lists, or section headings',
+    'No process narration',
+    'Let me take a look',
+    'Let me analyse',
+    'There are several possibilities',
+    'No repetition',
+    'say each thing once',
+    'Hard length cap',
+    'usually ≤ 3 sentences',
+    '≤ 6 when an explanation is genuinely needed',
+    'more than 6 requires a stated reason',
+    'say three things only',
+    'what you dispatched, why, and what you are waiting for',
+    'When unsure, ask one question',
+    'instead of listing every possibility',
+  ]) {
+    assert.ok(en.includes(line), `the en prompt is missing: ${line}`)
+  }
+
+  // The brevity rules that predate this change survive; the weak "3-5 sentences"
+  // suggestion is the only one that was replaced by the hard cap.
+  for (const line of [
     '不要复述任务产出',
     '不要罗列已完成任务清单',
     '不要解释你打算怎么做',
     '一次只问必要的问题',
-    '3-5 sentences',
+  ]) {
+    assert.ok(zh.includes(line), `the zh prompt lost: ${line}`)
+  }
+  for (const line of [
     'Do not restate task output',
     'Do not list completed tasks',
     'Do not explain what you are about to do',
     'Ask one necessary question at a time',
   ]) {
-    assert.ok(prompt.includes(line), `the prompt is missing: ${line}`)
+    assert.ok(en.includes(line), `the en prompt lost: ${line}`)
   }
 
-  // Tool guidance and the task list are still spliced in.
-  assert.match(prompt, /projects_add_task/)
-  assert.match(prompt, /projects_dispatch/)
-  assert.match(prompt, /projects_memory/)
-  assert.match(prompt, /taskLines/)
+  // The eight job rules and the tools they name are untouched by the style block.
+  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 回答方式'))
+  const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## Reply style'))
+  for (const job of [zhJob, enJob]) {
+    assert.equal([...job.matchAll(/^\d+\. /gm)].length, 8, 'the eight job rules are all present')
+    for (const tool of [
+      'projects_add_task',
+      'projects_dispatch',
+      'projects_get',
+      'projects_update_task',
+      'projects_memory',
+    ]) {
+      assert.ok(job.includes(tool), `the job rules still name ${tool}`)
+    }
+  }
+
+  // The task list and the counts line are still spliced into both branches.
+  assert.match(zh, /## 当前任务\ncounts: 无\n\(还没有任务\)/)
+  assert.match(en, /## Current tasks\ncounts: none\n\(none yet\)/)
+
+  // Both languages carry the same number of hard rules, so a rule added to one
+  // branch cannot silently go missing from the other.
+  const zhRules = zh.slice(zh.indexOf('## 回答方式'))
+  const enRules = en.slice(en.indexOf('## Reply style'))
+  assert.equal([...zhRules.matchAll(/^\d+\. /gm)].length, 8)
+  assert.equal([...enRules.matchAll(/^\d+\. /gm)].length, 8)
+
+  // The brevity block must not turn the prompt into an essay. Measured before
+  // this change: zh 886 chars, en 2001; after: zh 1147, en 2820. The caps leave
+  // ~10% headroom, so adding another rule stays a deliberate decision.
+  assert.ok(zh.length < 1300, `the zh prompt ballooned to ${zh.length} chars`)
+  assert.ok(en.length < 3100, `the en prompt ballooned to ${en.length} chars`)
 })
 
 test('the coordinator prompt lists open tasks and counts the resolved ones', () => {

@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Projects",
-    "description": "Adds a Projects board to the left sidebar: one goal per project, project instructions, a shared memory and a task board. The coordinator splits the goal into tasks with the projects_* tools and dispatches them to parallel worker subagents, which run in the project workspace and report back for review. Data stays on this machine under $DSH_HOME/projects; workers run in-process and stop when the plugin is disabled.",
+    "description": "Adds a Projects board to the left sidebar. One goal, many parallel tasks: a coordinator splits the work, workers run each task in the project folder, and you review the results.",
     "detail": "docs/DETAIL.md"
   }
 }

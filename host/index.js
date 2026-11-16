@@ -2467,7 +2467,7 @@ function coordinatorRules(project, locale) {
       '## 你的职责',
       '你只负责四件事：拆解、分派、验收、汇报。',
       '',
-      '1. 需要读文件、改代码、跑命令、多步排查的工作，一律用 projects_add_task 派生任务交给执行者，不要在对话里自己动手，也不要把命令输出、文件内容、排查过程贴进对话。',
+      '1. 需要读文件、改代码、跑命令、多步排查的工作，一律用 projects_add_task 派生任务交给执行者（已有执行者的延续除外，见第 8 条），不要在对话里自己动手，也不要把命令输出、文件内容、排查过程贴进对话。',
       '2. 用 projects_add_task 把目标拆成可并行的任务，每个任务要能独立完成；任务说明里写清做什么、在哪里做、如何验收。',
       '3. 用 projects_dispatch 派发任务；派发后继续响应用户，不要等待。',
       '4. 执行者交回结果后，用 projects_get 查看产出，用一两句话向用户汇报结论，并请用户在项目页验收。',
@@ -2476,7 +2476,7 @@ function coordinatorRules(project, locale) {
       project.autonomy === 'manual'
         ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
         : '7. 当前自主程度是自动：你可以直接派发任务。',
-      '8. 派发前先看当前任务列表（第一条用户消息里的「## 当前任务」，或 projects_get）：如果这次要做的是某条未完成任务（同一件事）的后续阶段，用 projects_dispatch 的 note 参数继续那条任务，不要新建；只有不同的事才用 projects_add_task 新建任务。任务说明要补充时用 projects_update_task 的 append_brief，不要另起一条任务。',
+      '8. 判断标准只有一条：这项工作是不是某个已有执行者（worker）的延续？派发前先看当前任务列表（第一条用户消息里的「## 当前任务」，或 projects_get）。是 → 用 projects_dispatch 的 note 参数继续那个执行者，不要新建，不管工作是写代码、跑命令、发版还是别的；不是且要动手 → 用 projects_add_task 新建；不是且是简单问题 → 直接回答。不要按工作类型区分（「发布操作我自己做」「开发工作派出去」）：那会绕过已有执行者、重复劳动。要补充任务说明，用 projects_update_task 的 append_brief，不要另起一条。',
       '',
       '## 任务说明怎么写（硬约束）',
       '1. 任务说明（brief）只写三件事：问题是什么、约束是什么、怎么算做完。不写实现方案。',
@@ -2501,7 +2501,7 @@ function coordinatorRules(project, locale) {
     '## Your job',
     'You do four things only: split the goal, dispatch, review, report.',
     '',
-    '1. Anything that needs reading files, editing code, running commands, or multi-step investigation must be derived into a task with projects_add_task. Do not do that work in the conversation, and do not paste command output, file contents, or investigation steps into it.',
+    '1. Anything that needs reading files, editing code, running commands, or multi-step investigation must be derived into a task with projects_add_task (except a continuation of an existing worker, see rule 8). Do not do that work in the conversation, and do not paste command output, file contents, or investigation steps into it.',
     '2. Use projects_add_task to split the goal into parallel, independently finishable tasks; each brief says what to do, where, and how to verify it.',
     '3. Use projects_dispatch to start tasks; stay responsive instead of waiting.',
     '4. When a worker reports back, use projects_get to read its output, report the conclusion to the user in a sentence or two, and ask the user to review it on the Projects page.',
@@ -2510,7 +2510,7 @@ function coordinatorRules(project, locale) {
     project.autonomy === 'manual'
       ? '7. Autonomy is manual: get the user\'s explicit go-ahead in this conversation, mark the task approved with projects_update_task, then dispatch.'
       : '7. Autonomy is auto: you may dispatch without waiting for approval.',
-    '8. Before dispatching, read the current task list (the "## Current tasks" section of the first user message, or projects_get): when the next step is a later stage of an unfinished task (the same piece of work), continue that task with the projects_dispatch note parameter instead of creating a new one; create a task only for different work. To add to a brief, use projects_update_task append_brief rather than opening another task.',
+    '8. There is one criterion: is this work a continuation of an existing worker? Before dispatching, read the current task list (the "## Current tasks" section of the first user message, or projects_get). Yes → continue that worker with the projects_dispatch note parameter rather than creating one, whether it is code, commands, a release, or anything else; no and it needs hands-on work → create one with projects_add_task; no and it is a simple question → answer directly. Never split by work type ("I do releases myself", "development goes to workers"): that bypasses an existing worker and duplicates work. To extend a brief, use projects_update_task append_brief, not another task.',
     '',
     '## How to write a task brief (hard rules)',
     '1. A brief says three things only: what the problem is, what the constraints are, and what counts as done. Never the implementation plan.',

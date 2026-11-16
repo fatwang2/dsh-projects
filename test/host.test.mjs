@@ -3222,14 +3222,70 @@ test('the coordinator rules state the job, brief and reply rules as hard rules i
   assert.match(en, /read the current task list/)
 })
 
+test('the coordinator decides continuation by existing worker, not by kind of work', () => {
+  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', autonomy: 'manual' }
+  const zh = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'zh' })
+  const en = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'en' })
+
+  // The dispatch decision used to be framed as "a later stage of the same
+  // unfinished task", which let a coordinator split by kind of work instead:
+  // releases done in the conversation, development handed to a worker. The one
+  // criterion is now whether the work continues an existing worker, and the
+  // three outcomes are spelled out in both languages.
+  for (const line of [
+    '判断标准只有一条',
+    '这项工作是不是某个已有执行者（worker）的延续',
+    '是 → 用 projects_dispatch 的 note 参数继续那个执行者',
+    '不要新建',
+    '不管工作是写代码、跑命令、发版还是别的',
+    '不是且要动手 → 用 projects_add_task 新建',
+    '不是且是简单问题 → 直接回答',
+    '不要按工作类型区分',
+    '「发布操作我自己做」「开发工作派出去」',
+    '绕过已有执行者、重复劳动',
+  ]) {
+    assert.ok(zh.includes(line), `the zh continuation rule is missing: ${line}`)
+  }
+  for (const line of [
+    'There is one criterion',
+    'is this work a continuation of an existing worker',
+    'Yes → continue that worker with the projects_dispatch note parameter',
+    'rather than creating one',
+    'whether it is code, commands, a release, or anything else',
+    'no and it needs hands-on work → create one with projects_add_task',
+    'no and it is a simple question → answer directly',
+    'Never split by work type',
+    '"I do releases myself", "development goes to workers"',
+    'bypasses an existing worker and duplicates work',
+  ]) {
+    assert.ok(en.includes(line), `the en continuation rule is missing: ${line}`)
+  }
+
+  // The criterion lives in rule 8, so the job block still has exactly eight
+  // rules and the dispatch rule keeps its pointer to the task list.
+  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 任务说明'))
+  const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## How to write a task brief'))
+  assert.equal([...zhJob.matchAll(/^\d+\. /gm)].length, 8)
+  assert.equal([...enJob.matchAll(/^\d+\. /gm)].length, 8)
+  assert.ok(zhJob.includes('判断标准只有一条'))
+  assert.ok(enJob.includes('There is one criterion'))
+  assert.ok(zhJob.includes('projects_dispatch 的 note 参数'))
+  assert.ok(enJob.includes('projects_dispatch note parameter'))
+
+  // Rule 1 sends hands-on work to a task, but it must not send a continuation
+  // to a brand-new task: it points at rule 8 for that exception.
+  assert.ok(zhJob.includes('已有执行者的延续除外，见第 8 条'))
+  assert.ok(enJob.includes('except a continuation of an existing worker, see rule 8'))
+})
+
 test('the coordinator rules stay within their per-step length budget', () => {
   const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', autonomy: 'manual' }
   const zh = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'zh' })
   const en = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'en' })
 
   // The section is repeated on every model step, so its size is a per-step
-  // cost, not a one-off. The caps leave ~14% headroom over the measured text
-  // (zh 1400, en 3571), so adding another rule stays a deliberate decision.
+  // cost, not a one-off. The caps leave ~5% headroom over the measured text
+  // (zh 1512, en 3881), so adding another rule stays a deliberate decision.
   assert.ok(zh.length < 1600, `the zh rules ballooned to ${zh.length} chars`)
   assert.ok(en.length < 4000, `the en rules ballooned to ${en.length} chars`)
 })

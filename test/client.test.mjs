@@ -138,7 +138,7 @@ test('both dictionaries carry the same keys and no add-task surface', () => {
   assert.match(zh.emptyTasks, /协调者/)
 
   // The resolve control and the detail labels exist in both languages.
-  for (const key of ['resolve', 'unresolve', 'resolvedBadge', 'brief', 'noBrief', 'noTask']) {
+  for (const key of ['resolve', 'unresolve', 'resolvedBadge', 'noTask']) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
   }
@@ -246,8 +246,10 @@ test('the task list is a read-only row and status is never written', () => {
   assert.doesNotMatch(detail, /h\(\s*'select'/, 'the detail pane has no picker at all')
   assert.doesNotMatch(detail, /task\.output|task\.stopReason/, 'no field dump of the result')
   assert.doesNotMatch(detail, /t\('output'\)|t\('stopReason'\)|t\('taskModel'\)/)
-  assert.match(detail, /className: 'pj-msg'/)
-  assert.match(detail, /task\.brief \|\| t\('noBrief'\)/)
+  // The brief is not repeated above the conversation: the coordinator already
+  // pasted it into the worker's prompt, so the Session's first message is it.
+  assert.doesNotMatch(detail, /task\.brief/)
+  assert.doesNotMatch(detail, /pj-msg/)
   assert.match(detail, /className: 'pj-chat-body'/)
   assert.match(detail, /renderSlot\('projects\.conversation'/)
   assert.doesNotMatch(detail, /deleteTask/)
@@ -346,24 +348,36 @@ test('the detail column is a plain flex stack with no overlap', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
 
   // The percentage cap that let the info pane and the conversation collide is
-  // gone; the info pane shrinks and scrolls, the conversation keeps a floor.
+  // gone; the brief gives height back and the conversation keeps a floor.
   assert.doesNotMatch(source, /max-height:52%/)
   assert.match(source, /\.pj-exec-detail\{[^}]*display:flex[^}]*flex-direction:column[^}]*overflow:hidden/)
   assert.match(source, /\.pj-exec-detail > \.pj-chat-body\{flex:1 1 0;min-height:140px\}/)
   // The conversation gets a positioned ancestor, so its own layers stay inside.
   assert.match(source, /\.pj-chat-body\{position:relative/)
 
-  // The brief strip is a shrinking flex row capped by a share of the column, so
-  // the conversation keeps its floor and neither half can paint over the other.
-  assert.match(source, /\.pj-msg\{display:flex[^}]*flex:0 0 auto[^}]*max-height:38%[^}]*overflow:auto/)
+  // The brief bubble is gone, so the column has exactly one scroll source: the
+  // embedded Chat view. The detail column clips instead of scrolling, and it
+  // carries no height cap of its own.
+  assert.doesNotMatch(source, /\.pj-msg/, 'the brief bubble is retired')
+  assert.doesNotMatch(source, /pj-msg-bubble|pj-clamped|pj-msg-toggle/)
+  assert.doesNotMatch(source, /\.pj-exec-detail\{[^}]*overflow:auto/)
+  assert.doesNotMatch(source, /\.pj-exec-detail\{[^}]*max-height/)
+  assert.doesNotMatch(source, /\.pj-exec-detail > \.pj-chat-body\{[^}]*overflow:auto/)
+  assert.doesNotMatch(source, /\.pj-exec-detail > \.pj-chat-body\{[^}]*max-height/)
   assert.doesNotMatch(source, /\.pj-exec-info\{/, 'the field pane is gone')
 
-  // Both halves are direct children of the detail column: no absolute layer.
+  // The conversation is the detail column's only child: no brief, no absolute
+  // layer, nothing that could paint over it.
   const detailStart = source.indexOf('const renderTaskDetail')
   const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
   assert.doesNotMatch(detail, /position: 'absolute'/)
-  assert.match(detail, /className: 'pj-msg'/)
+  assert.doesNotMatch(detail, /task\.brief/)
   assert.match(detail, /className: 'pj-chat-body'/)
+  assert.equal(
+    [...detail.matchAll(/className: 'pj-chat-body'/g)].length,
+    1,
+    'the conversation is the only body block',
+  )
 })
 
 test('displayed titles are shortened without touching the stored title', () => {
@@ -703,17 +717,12 @@ test('the detail page is a conversation that reuses the Host Chat view', () => {
     /function FixedChatView\(props\) \{[\s\S]{0,200}renderSlot\('conversation\.session', \{ view: 'chat' \}\)/,
   )
 
-  // The detail body is the brief message followed by the conversation, and
-  // nothing else: no labelled output / stopReason block and no picker.
+  // The detail body is the conversation and nothing else: no brief echo, no
+  // labelled output / stopReason block and no picker.
   const detailStart = source.indexOf('const renderTaskDetail')
   const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
   assert.match(detail, /className: 'pj-exec-detail'/)
-  assert.ok(
-    detail.indexOf("className: 'pj-msg'") < detail.indexOf("className: 'pj-chat-body'"),
-    'the brief message comes before the conversation',
-  )
-  assert.match(detail, /'aria-label': t\('brief'\)/)
-  assert.match(detail, /task\.brief \|\| t\('noBrief'\)/)
+  assert.doesNotMatch(detail, /pj-msg|task\.brief|t\('brief'\)|t\('noBrief'\)/)
   assert.match(detail, /renderSlot\('projects\.conversation'/)
   assert.doesNotMatch(detail, /pj-task-output|pj-task-meta|pj-task-head|pj-task-foot/)
   assert.doesNotMatch(detail, /h\(\s*'select'/)
@@ -732,4 +741,47 @@ test('the detail page is a conversation that reuses the Host Chat view', () => {
   assert.match(header, /t\('openInWorkspace'\)/)
   assert.match(header, /toggleResolved\(execTask\)/)
   assert.match(header, /approveTask\(execTask\)/)
+})
+
+test('the detail page never repeats the brief and has one scroll source', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The coordinator already pastes the brief into the worker's prompt, so the
+  // Session's first message *is* the brief. Rendering it again above the
+  // conversation would show the same text twice, in a worse format.
+  const detailStart = source.indexOf('const renderTaskDetail')
+  const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
+  assert.doesNotMatch(detail, /task\.brief/)
+  assert.doesNotMatch(detail, /t\('brief'\)|t\('noBrief'\)/)
+  assert.doesNotMatch(detail, /pj-msg/)
+  // The conversation is the only body block and the only child of the column.
+  assert.equal([...detail.matchAll(/className: 'pj-chat-body'/g)].length, 1)
+  assert.doesNotMatch(detail, /h\(\s*'button'/, 'the body carries no control')
+
+  // The fold machinery that existed only for the brief bubble is gone, not
+  // orphaned: no helper, no state slot, no CSS, no dictionary keys.
+  assert.doesNotMatch(source, /briefNeedsToggle|briefOpenFor|pj-msg-bubble|pj-clamped/)
+  assert.doesNotMatch(source, /\.pj-msg\{/)
+  for (const retired of ['brief', 'noBrief', 'expandBrief', 'collapseBrief']) {
+    const { dictionaries } = applyWithFakes()
+    const { en, zh } = dictionaries[0].dicts
+    assert.equal(retired in en, false, `EN still has ${retired}`)
+    assert.equal(retired in zh, false, `ZH still has ${retired}`)
+  }
+
+  // One scroll source: the detail column clips and is not height-capped, and
+  // the embedded Chat view keeps its floor and owns the scrollbar.
+  assert.doesNotMatch(source, /\.pj-exec-detail\{[^}]*overflow:auto/)
+  assert.doesNotMatch(source, /\.pj-exec-detail\{[^}]*max-height/)
+  assert.doesNotMatch(source, /\.pj-exec-detail > \.pj-chat-body\{[^}]*overflow:auto/)
+  assert.doesNotMatch(source, /\.pj-exec-detail > \.pj-chat-body\{[^}]*max-height/)
+  assert.match(source, /\.pj-exec-detail > \.pj-chat-body\{flex:1 1 0;min-height:140px\}/)
+  // No other rule scoped to the detail column introduces a scroll region.
+  const detailRules = [...source.matchAll(/\n\.pj-(?:exec-detail|detail-[a-z-]+)[^{]*\{[^}]*\}/g)].map(
+    (match) => match[0],
+  )
+  assert.ok(detailRules.length >= 3, 'the detail rules were found')
+  for (const rule of detailRules) {
+    assert.doesNotMatch(rule, /overflow:auto|max-height/, `unexpected scroll source: ${rule.trim()}`)
+  }
 })

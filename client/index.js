@@ -72,8 +72,6 @@ window.__ModuleLoader__.load({
       emptyTasks: 'No tasks yet. Ask the coordinator in the conversation to split the goal.',
       approve: 'Approve',
       approvedBadge: 'Approved',
-      brief: 'Brief',
-      noBrief: 'No brief recorded.',
       noTask: 'This task is no longer on the board.',
       resolve: 'Resolve',
       unresolve: 'Unresolve',
@@ -176,8 +174,6 @@ window.__ModuleLoader__.load({
       emptyTasks: '还没有任务。在对话里让协调者拆解目标，任务由它派生。',
       approve: '批准',
       approvedBadge: '已批准',
-      brief: '任务说明',
-      noBrief: '没有任务说明。',
       noTask: '这个任务已不在看板上了。',
       resolve: '解决',
       unresolve: '取消解决',
@@ -276,10 +272,10 @@ window.__ModuleLoader__.load({
 .pj-exec-title{margin:0;font-size:14px;font-weight:600}
 .pj-exec-task{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .pj-exec-scroll{flex:1;min-height:0;overflow:auto;padding:12px 14px 32px}
-/* The detail column is a plain vertical flex box: the brief message shrinks and
-   scrolls, the executor conversation keeps a floor and takes the rest. No
-   percentage caps and no absolutely positioned layers, so the two halves can
-   never paint over each other. */
+/* The detail column is a plain vertical flex box with exactly one child: the
+   embedded conversation. It clips instead of scrolling, so the Host Chat view
+   owns the only scrollbar on the page. No percentage caps and no absolutely
+   positioned layers, so nothing can paint over anything else. */
 .pj-exec-detail{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .pj-exec-detail > .pj-chat-body{flex:1 1 0;min-height:140px}
 /* The detail header is two dense rows: back + title + state controls, then one
@@ -289,10 +285,6 @@ window.__ModuleLoader__.load({
 .pj-detail-row{display:flex;align-items:center;gap:6px;min-width:0}
 .pj-detail-meta{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .pj-detail-meta-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The task brief opens the detail as a conversation message, so it reads as the
-   message the coordinator sent rather than as a labelled field. */
-.pj-msg{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:0 0 auto;max-height:38%;overflow:auto;padding:12px 14px 10px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2)}
-.pj-msg-bubble{max-width:88%;padding:8px 12px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .pj-exec-tools{display:flex;align-items:center;gap:8px;padding:0 14px 10px}
 /* Search field, copied from the Host's SearchInput primitive: a bordered
    wrapper that owns the focus ring, a 16px leading glyph, and a borderless
@@ -2024,22 +2016,19 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // The detail page is a conversation, not a form: the task brief opens it
-      // as the message the coordinator sent, and the executor's own Session
-      // follows in the same Chat view the main conversation renders. That view
-      // owns the work-details policy, so `ui-chat`'s transcriptView /
-      // collapseTiming / foldedReplies already apply here unchanged — the page
-      // must not draw its own transcript. State, resolve and approval live in
-      // the column header; deletion lives in the row menu.
-      const renderTaskDetail = (task) =>
+      // The detail page is a conversation, not a form. Its body is exactly the
+      // executor's own Session, rendered by the same Chat view the main
+      // conversation uses, so `ui-chat`'s transcriptView / collapseTiming /
+      // foldedReplies already apply here unchanged — the page must not draw its
+      // own transcript. The task brief is deliberately not repeated above the
+      // conversation: the coordinator already pasted it into the worker's
+      // prompt, so the Session's first message is the brief, rendered properly.
+      // State, resolve and approval live in the column header; deletion lives
+      // in the row menu.
+      const renderTaskDetail = () =>
         h(
           'div',
           { className: 'pj-exec-detail' },
-          h(
-            'div',
-            { className: 'pj-msg', 'aria-label': t('brief') },
-            h('div', { className: 'pj-msg-bubble' }, task.brief || t('noBrief')),
-          ),
           execTarget && execTarget.reference
             ? h(
                 'div',
@@ -2453,7 +2442,7 @@ window.__ModuleLoader__.load({
             ? null
             : execTarget
               ? execTask
-                ? renderTaskDetail(execTask)
+                ? renderTaskDetail()
                 : h('div', { className: 'pj-empty' }, t('noTask'))
               : h(
                   'div',

@@ -109,8 +109,12 @@ with its own context, and its final message lands on the task for review.
   `?session=1|true|delete|remove|yes` is rejected (400) rather than silently
   downgraded to an archive. Archiving frees **no disk space**: it hides the
   session from the default sidebar and refuses it further model steps, while
-  `$DSH_HOME/sessions/` keeps every byte. The page's delete menu currently
-  deletes only the task.
+  `$DSH_HOME/sessions/` keeps every byte. The page's delete menu offers both:
+  right-click a task row, choose **Delete**, and the second stage offers
+  **Delete task only** and **Delete and archive session** (the latter only when
+  the task has an executor session). A successful archive reports "Task
+  deleted, session archived."; a 409 — the worker is still running — keeps the
+  task on the board and asks you to wait for it to finish.
 - **Auto-compaction**: after an append or a page save, once the memory exceeds
   the project's `memoryBudget` (default 64000 characters, clamped to
   4000–200000) and `autoCompact` is not false, the Host moves whole oldest

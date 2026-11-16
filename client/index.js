@@ -1779,7 +1779,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
       )
     }
 
-    /** The group glyph: spinner, check ring, warning ring, dashed ring, none. */
+    /**
+     * The group glyph: spinner, eye, warning ring, dashed ring, none.
+     *
+     * Ready-for-review is an eye, not a check: the work is finished but not
+     * accepted, so the glyph asks the human to look at it. A check would read
+     * as accepted work, which is Resolved's meaning. The almond outline is
+     * drawn from curves only — no straight stroke can be mistaken for a check —
+     * and the solid pupil keeps the eye legible at 14px.
+     */
     function ThreadIcon({ kind }) {
       if (kind === 'spinner') {
         return h('span', { className: 'pj-thread-icon pj-thread-spinner', 'aria-hidden': true })
@@ -1795,14 +1803,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
             fill: 'none',
             'aria-hidden': true,
           },
-          h('circle', { cx: 8, cy: 8, r: 6.4, stroke: 'currentColor', strokeWidth: 1.6 }),
           h('path', {
-            d: 'M5.1 8.2l2 2 3.8-4',
+            d: 'M1.6 8c1.5-2.6 3.7-4 6.4-4c2.7 0 4.9 1.4 6.4 4c-1.5 2.6-3.7 4-6.4 4c-2.7 0-4.9-1.4-6.4-4',
             stroke: 'currentColor',
             strokeWidth: 1.6,
             strokeLinecap: 'round',
             strokeLinejoin: 'round',
           }),
+          h('circle', { cx: 8, cy: 8, r: 1.9, fill: 'currentColor' }),
         )
       }
       if (kind === 'waiting') {

@@ -2903,6 +2903,110 @@ test('the panel buckets tasks by status, so resolved is one bucket', async (t) =
   )
 })
 
+test('the five group glyphs are pairwise distinct, and review is an eye not a check', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [
+      { id: 't1', title: '执行中的', status: 'running' },
+      { id: 't2', title: '待验收的', status: 'review' },
+      { id: 't3', title: '受阻的', status: 'blocked' },
+      { id: 't4', title: '排队的', status: 'queued' },
+      { id: 't5', title: '已解决的', status: 'resolved' },
+    ],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  // The glyph belongs to the group header, so a card's own glyph (a running
+  // task wears the spinner too) cannot stand in for the group's.
+  const headerOf = (name) => {
+    const group = page.groupNamed(name)
+    assert.ok(group, `the ${name} group rendered`)
+    const header = page.byClass('pj-group-title', group)[0]
+    assert.ok(header, `the ${name} group has a header`)
+    return header
+  }
+  const glyphOf = (name) => {
+    const glyphs = page.byClass('pj-thread-icon', headerOf(name))
+    assert.equal(glyphs.length, 1, `the ${name} group draws exactly one glyph`)
+    return glyphs[0]
+  }
+
+  // A glyph's drawn structure: its tag plus the shapes it is made of, geometry
+  // included, so two glyphs cannot pass as equal just by sharing tags.
+  const structure = (glyph) => {
+    if (!glyph) return 'none'
+    const shapes = (glyph.children || []).filter((child) => child && typeof child === 'object')
+    return `${glyph.type}[${shapes
+      .map((child) => {
+        const props = child.props || {}
+        if (child.type === 'path') return `path:${props.d}`
+        if (child.type === 'circle') return `circle:${props.cx},${props.cy},${props.r}`
+        return String(child.type)
+      })
+      .join('|')}]`
+  }
+
+  const glyphs = {
+    running: glyphOf('执行中'),
+    review: glyphOf('待验收'),
+    waiting: glyphOf('等你处理'),
+    idle: glyphOf('空闲'),
+  }
+  // Resolved carries no glyph at all, which is itself its distinguishing shape.
+  assert.equal(
+    page.byClass('pj-thread-icon', headerOf('已解决')).length,
+    0,
+    'Resolved draws no glyph',
+  )
+
+  const structures = Object.fromEntries(
+    Object.entries(glyphs).map(([key, glyph]) => [key, structure(glyph)]),
+  )
+  structures.resolved = 'none'
+  assert.equal(
+    new Set(Object.values(structures)).size,
+    5,
+    `all five group glyphs differ: ${JSON.stringify(structures)}`,
+  )
+
+  // Ready-for-review is an eye: an almond outline plus a solid pupil, drawn on
+  // the same 16 grid and 1.6 stroke as its neighbours. It is deliberately not a
+  // check — a check means done, which is Resolved's meaning.
+  const review = glyphs.review
+  assert.equal(review.type, 'svg')
+  assert.equal(review.props.viewBox, '0 0 16 16')
+  assert.equal(review.props.width, 14)
+  assert.equal(review.props.height, 14)
+  assert.match(review.props.className, /pj-thread-review/, 'the review colour rule still applies')
+  assert.equal(review.children.length, 2, 'an outline and one pupil')
+
+  const [outline, pupil] = review.children
+  assert.equal(outline.type, 'path')
+  assert.equal(outline.props.stroke, 'currentColor')
+  assert.equal(outline.props.strokeWidth, 1.6)
+  // Curves only: a check is two straight strokes, so no line command can hide
+  // in the outline, and the retired checkmark's segment is gone for good.
+  assert.doesNotMatch(outline.props.d, /[lLhHvV]/, 'the eye outline has no straight segments')
+  assert.doesNotMatch(outline.props.d, /M5\.1 8\.2l2 2 3\.8-4/, 'the retired checkmark is gone')
+
+  // The ink stays inside the 16 grid and fills it like the ring glyphs do.
+  const box = inkBox(outline.props.d, outline.props.strokeWidth)
+  assert.ok(box.minX >= 0 && box.maxX <= 16, `the eye fits the grid horizontally: ${JSON.stringify(box)}`)
+  assert.ok(box.minY >= 0 && box.maxY <= 16, `the eye fits the grid vertically: ${JSON.stringify(box)}`)
+  assert.ok(box.width > 11 && box.height > 6, `the eye is not a speck: ${JSON.stringify(box)}`)
+
+  // A filled pupil, not a second ring: at 14px the dot is the only thing that
+  // makes the almond read as an eye rather than a leaf.
+  assert.equal(pupil.type, 'circle')
+  assert.equal(pupil.props.fill, 'currentColor')
+  assert.equal(pupil.props.stroke, undefined, 'the pupil is filled, not stroked')
+  assert.ok(pupil.props.r >= 1.5 && pupil.props.r <= 2.5, `the pupil survives 14px: r=${pupil.props.r}`)
+})
+
 test('the sidebar tally counts resolved tasks, the way the panel buckets them', async (t) => {
   const project = {
     ...SAMPLE_PROJECT,

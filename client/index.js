@@ -76,8 +76,8 @@ window.__ModuleLoader__.load({
       output: 'Output',
       noBrief: 'No brief recorded.',
       noTask: 'This task is no longer on the board.',
-      resolve: 'Mark resolved',
-      unresolve: 'Mark unresolved',
+      resolve: 'Resolve',
+      unresolve: 'Unresolve',
       resolvedBadge: 'Resolved',
       deleteConfirm: 'Confirm delete',
       switchDiscard: 'Discard unsaved changes and switch projects?',
@@ -187,8 +187,8 @@ window.__ModuleLoader__.load({
       output: '产出',
       noBrief: '没有任务说明。',
       noTask: '这个任务已不在看板上了。',
-      resolve: '标记为已解决',
-      unresolve: '标记为未解决',
+      resolve: '解决',
+      unresolve: '取消解决',
       resolvedBadge: '已解决',
       deleteConfirm: '确认删除',
       switchDiscard: '放弃未保存的修改并切换项目？',
@@ -252,7 +252,7 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 .pj-page{display:flex;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6}
-.pj-page :focus-visible{outline:2px solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
+.pj-page :focus-visible{outline:var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
 .pj-list{display:flex;flex-direction:column;flex:0 0 264px;width:264px;min-height:0;border-right:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
 .pj-list-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:16px 14px 10px}
 .pj-list-title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
@@ -298,10 +298,17 @@ window.__ModuleLoader__.load({
 .pj-exec-detail > .pj-chat-body{flex:1 1 0;min-height:140px}
 .pj-exec-info .pj-task-output{max-height:none}
 .pj-exec-tools{display:flex;align-items:center;gap:8px;padding:0 14px 10px}
-.pj-search{flex:1 1 auto;min-width:0;height:28px;padding:0 10px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
-.pj-search:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+/* Search field, copied from the Host's SearchInput primitive: a bordered
+   wrapper that owns the focus ring, a 16px leading glyph, and a borderless
+   input inside it. */
+.pj-search{display:inline-flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;height:32px;padding:0 8px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}
+.pj-search:focus-within{border-color:var(--dsw-alias-state-business-primary)}
+.pj-search-icon{display:inline-flex;flex:0 0 auto;width:16px;height:16px;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary)}
+.pj-search input{flex:1;min-width:0;border:0;outline:none;background:transparent;padding:0;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
+.pj-search input::placeholder{color:var(--dsw-alias-label-dimmed)}
+.pj-search input:focus-visible{outline:none}
 .pj-group{margin-bottom:14px}
-.pj-group-title{display:flex;align-items:center;gap:6px;width:100%;padding:3px 2px;margin-bottom:4px;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;font-weight:500;text-align:left;cursor:pointer}
+.pj-group-title{display:flex;align-items:center;gap:6px;width:100%;padding:6px 8px;margin-bottom:2px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11px;line-height:15px;font-weight:500;text-align:left;cursor:pointer}
 .pj-group-title:hover{color:var(--dsw-alias-label-primary)}
 .pj-group-chevron{display:inline-block;width:10px;flex:0 0 auto;font-size:11px;line-height:1;color:var(--dsw-alias-label-tertiary)}
 .pj-group-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -314,40 +321,62 @@ window.__ModuleLoader__.load({
 @keyframes pj-spin{to{transform:rotate(360deg)}}
 .pj-start{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:100%;padding:24px;text-align:center}
 .pj-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
-.pj-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;cursor:pointer;white-space:nowrap}
-.pj-btn:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.pj-btn:disabled{opacity:.5;cursor:default}
-.pj-btn-primary{background:var(--dsw-alias-button-primary-fill);border-color:transparent;color:var(--dsw-alias-label-primary-foreground)}
-.pj-btn-primary:hover{background:var(--dsw-alias-button-primary-hover)}
-.pj-btn-ghost{background:transparent;border-color:transparent;color:var(--dsw-alias-label-secondary)}
-.pj-btn-ghost:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.pj-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid transparent;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
-.pj-icon-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.pj-icon-btn:disabled{opacity:.5;cursor:default}
-.pj-icon-btn.pj-on{color:var(--dsw-alias-state-success-primary);border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent)}
+/* Buttons follow the Host Button primitive's sm scale and its three
+   variants: primary (fill), outline (hairline inset ring, the default here so
+   a bare .pj-btn keeps reading as a secondary action) and ghost. */
+.pj-btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:18px;cursor:pointer;white-space:nowrap;box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-l3)}
+.pj-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.pj-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}
+.pj-btn:disabled{cursor:not-allowed;opacity:.4}
+.pj-btn-primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);box-shadow:none}
+.pj-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
+.pj-btn-ghost{background:transparent;box-shadow:none;color:var(--dsw-alias-label-secondary)}
+.pj-btn-ghost:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pj-icon-btn{display:inline-flex;flex:none;align-items:center;justify-content:center;width:28px;height:28px;padding:6px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;line-height:1;cursor:pointer}
+.pj-icon-btn svg{width:15px;height:15px}
+.pj-icon-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pj-icon-btn:disabled{opacity:.4;cursor:default}
+.pj-icon-btn.pj-on{color:var(--dsw-alias-state-success-primary)}
 .pj-spacer{flex:1 1 auto;min-width:0}
-.pj-menu{position:fixed;z-index:60;display:flex;flex-direction:column;gap:2px;min-width:168px;max-width:280px;padding:4px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-panel)}
-.pj-menu-item{display:flex;align-items:center;width:100%;padding:7px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pj-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.pj-menu-item:disabled{opacity:.5;cursor:default}
+/* The context menu copies the Host Menu primitive: 4px padding on an elevated
+   card, 34px rows with a 14px icon seat, a hairline separator, and a danger row
+   that swaps the hover fill. */
+.pj-menu{position:fixed;z-index:60;display:flex;flex-direction:column;min-width:168px;max-width:280px;padding:4px;box-sizing:border-box;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-prominent);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1)}
+.pj-menu-item{display:flex;align-items:center;gap:6px;width:100%;min-height:34px;padding:6px 8px;border:0;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;text-align:left;cursor:pointer}
+.pj-menu-item:hover:not(:disabled),.pj-menu-item:focus-visible:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);outline:none}
+.pj-menu-item:disabled{opacity:.4;cursor:not-allowed}
+.pj-menu-icon{display:inline-flex;flex:none;align-items:center;justify-content:center;width:14px;height:14px;color:var(--dsw-alias-menu-icon)}
+.pj-menu-icon svg{width:14px;height:14px}
+.pj-menu-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pj-menu-separator{height:.5px;margin:3px 8px;background:var(--dsw-alias-border-l2)}
 .pj-menu-item.pj-danger{color:var(--dsw-alias-state-error-primary)}
+.pj-menu-item.pj-danger .pj-menu-icon{color:var(--dsw-alias-state-error-primary)}
+.pj-menu-item.pj-danger:hover:not(:disabled),.pj-menu-item.pj-danger:focus-visible:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
 .pj-badge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
-.pj-section{margin-top:22px}
-.pj-section:first-child{margin-top:0}
+.pj-section{padding:12px 0}
+.pj-section:first-child{padding-top:0}
+.pj-section+.pj-section{border-top:.5px solid var(--dsw-alias-border-l2)}
 .pj-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .pj-section-title{font-size:14px;font-weight:600;margin:0}
-.pj-hint{font-size:12px;color:var(--dsw-alias-label-tertiary);margin-bottom:8px}
-.pj-textarea,.pj-input,.pj-select{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:8px 10px}
-.pj-textarea{min-height:96px;resize:vertical;line-height:1.6}
+.pj-hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.pj-section > .pj-hint{margin-bottom:8px}
+.pj-textarea,.pj-input,.pj-select{width:100%;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.5}
+.pj-textarea{min-height:96px;padding:8px 12px;resize:vertical}
 .pj-textarea:focus-visible,.pj-input:focus-visible,.pj-select:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
-.pj-input{height:32px;padding:0 10px}
-.pj-select{height:32px;padding:0 8px}
+.pj-input{height:34px;padding:0 12px}
+.pj-input:disabled,.pj-select:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
+/* A native select cannot carry a chevron, so it sits in a wrapper that draws
+   the Host's 12px caret in the menu-icon tone. */
+.pj-select-wrap{position:relative;display:flex;align-items:center;min-width:0;width:100%}
+.pj-select{height:34px;padding:0 30px 0 12px;appearance:none;-webkit-appearance:none}
+.pj-select-chevron{position:absolute;right:10px;display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;color:var(--dsw-alias-menu-icon);pointer-events:none}
+.pj-select-chevron svg{width:12px;height:12px}
 .pj-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
-.pj-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pj-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .pj-exec-info .pj-field{margin-top:4px;max-width:320px}
 .pj-model-line{font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:2px;word-break:break-word}
-.pj-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.pj-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
 /* A thread card: icon in the gutter, then a title line, a one-line summary and
    optional chips. Two rows plus chips, and no controls at all — every action
    lives in the right-click menu or on the detail page. */
@@ -767,6 +796,51 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** The search field's leading glyph, at the Host's 16px seat. */
+    function SearchIcon() {
+      return h(
+        'svg',
+        { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('circle', { cx: 7.2, cy: 7.2, r: 4.6, stroke: 'currentColor', strokeWidth: 1.5 }),
+        h('path', {
+          d: 'M10.6 10.6l3 3',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+        }),
+      )
+    }
+
+    /** The select caret, matching the Host's 12px chevron in the menu-icon tone. */
+    function ChevronDownIcon() {
+      return h(
+        'svg',
+        { width: 12, height: 12, viewBox: '0 0 12 12', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'M3 4.75L6 7.75l3-3',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
+    /** The context menu's delete glyph, at the Host's 14px icon seat. */
+    function TrashIcon() {
+      return h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'M3.2 5.2h9.6M6.4 5.2V3.6h3.2v1.6M4.6 5.2l.6 7.2h5.6l.6-7.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
     /** The group glyph: spinner, check ring, warning ring, dashed ring, none. */
     function ThreadIcon({ kind }) {
       if (kind === 'spinner') {
@@ -918,6 +992,9 @@ window.__ModuleLoader__.load({
       // The task context menu: `{ taskId, x, y }` in viewport coordinates.
       const [menu, setMenu] = useState(null)
       const menuRef = useRef(null)
+      // Roving focus inside the open menu: the row index, and one ref per row.
+      const [menuIndex, setMenuIndex] = useState(0)
+      const menuItemRefs = useRef([])
 
       // Threads panel: the live search query and the folded groups. The folded
       // set is a page-local preference, so it persists like the column widths.
@@ -1011,6 +1088,18 @@ window.__ModuleLoader__.load({
         const y = clamp(menu.y, MENU_MARGIN, height - rect.height - MENU_MARGIN)
         if (x !== menu.x || y !== menu.y) setMenu({ ...menu, x, y })
       }, [menu])
+
+      // Opening the menu arms the first row; arrow keys move the roving focus
+      // and the row's native activation handles Enter and Space.
+      useEffect(() => {
+        if (menu) setMenuIndex(0)
+      }, [menu])
+
+      useEffect(() => {
+        if (!menu) return
+        const node = menuItemRefs.current[menuIndex]
+        if (node && typeof node.focus === 'function') node.focus({ preventScroll: true })
+      }, [menu, menuIndex])
 
       const loadProjects = useCallback(async () => {
         const data = await api('/projects')
@@ -1526,15 +1615,20 @@ window.__ModuleLoader__.load({
                 { className: 'pj-field pj-grow' },
                 h('span', { className: 'pj-label' }, t('autonomy')),
                 h(
-                  'select',
-                  {
-                    className: 'pj-select',
-                    value: project.autonomy,
-                    disabled: busy,
-                    onChange: (event) => void patchProject({ autonomy: event.target.value }),
-                  },
-                  h('option', { value: 'manual' }, t('autonomyManual')),
-                  h('option', { value: 'auto' }, t('autonomyAuto')),
+                  'span',
+                  { className: 'pj-select-wrap' },
+                  h(
+                    'select',
+                    {
+                      className: 'pj-select',
+                      value: project.autonomy,
+                      disabled: busy,
+                      onChange: (event) => void patchProject({ autonomy: event.target.value }),
+                    },
+                    h('option', { value: 'manual' }, t('autonomyManual')),
+                    h('option', { value: 'auto' }, t('autonomyAuto')),
+                  ),
+                  h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
                 ),
               ),
               h(
@@ -1546,7 +1640,7 @@ window.__ModuleLoader__.load({
                   'aria-label': t('concurrency'),
                   type: 'number',
                   min: 1,
-                  max: 10,
+                  max: 8,
                   defaultValue: project.concurrency,
                   disabled: busy,
                   style: { width: '72px' },
@@ -1618,16 +1712,21 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'pj-label' }, t('model')),
                 catalog.enumerable
                   ? h(
-                      'select',
-                      {
-                        className: 'pj-select',
-                        'aria-label': t('model'),
-                        value: project.model || '',
-                        disabled: busy,
-                        onChange: (event) => void patchProject({ model: event.target.value }),
-                      },
-                      h('option', { value: '' }, t('modelDefault')),
-                      ...catalogOptions(catalog, 'models', project.model),
+                      'span',
+                      { className: 'pj-select-wrap' },
+                      h(
+                        'select',
+                        {
+                          className: 'pj-select',
+                          'aria-label': t('model'),
+                          value: project.model || '',
+                          disabled: busy,
+                          onChange: (event) => void patchProject({ model: event.target.value }),
+                        },
+                        h('option', { value: '' }, t('modelDefault')),
+                        ...catalogOptions(catalog, 'models', project.model),
+                      ),
+                      h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
                     )
                   : h('input', {
                       className: 'pj-input',
@@ -1653,16 +1752,21 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'pj-label' }, t('agentPreset')),
                 catalog.presetsEnumerable
                   ? h(
-                      'select',
-                      {
-                        className: 'pj-select',
-                        'aria-label': t('agentPreset'),
-                        value: project.agentPreset || '',
-                        disabled: busy,
-                        onChange: (event) => void patchProject({ agentPreset: event.target.value }),
-                      },
-                      h('option', { value: '' }, t('modelDefault')),
-                      ...catalogOptions(catalog, 'presets', project.agentPreset),
+                      'span',
+                      { className: 'pj-select-wrap' },
+                      h(
+                        'select',
+                        {
+                          className: 'pj-select',
+                          'aria-label': t('agentPreset'),
+                          value: project.agentPreset || '',
+                          disabled: busy,
+                          onChange: (event) => void patchProject({ agentPreset: event.target.value }),
+                        },
+                        h('option', { value: '' }, t('modelDefault')),
+                        ...catalogOptions(catalog, 'presets', project.agentPreset),
+                      ),
+                      h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
                     )
                   : h('input', {
                       className: 'pj-input',
@@ -1750,11 +1854,50 @@ window.__ModuleLoader__.load({
       // The row context menu. It is `position:fixed` (see `.pj-menu`) so the
       // list's `overflow:auto` cannot clip it; the open handler stores the
       // pointer position and the effect above clamps it into the viewport.
+      // Rows carry a 14px icon seat and a hairline separator before the danger
+      // action, and the arrow keys move focus between them.
       const renderTaskMenu = () => {
         if (!menu) return null
         const task = taskList.find((entry) => entry.id === menu.taskId)
         if (!task) return null
         const confirming = confirmDeleteId === task.id
+        const entries = [
+          {
+            key: 'resolve',
+            icon: h(ResolveIcon, { done: Boolean(task.resolved) }),
+            label: task.resolved ? t('unresolve') : t('resolve'),
+            onSelect: () => {
+              setMenu(null)
+              void toggleResolved(task)
+            },
+          },
+          { key: 'separator', separator: true },
+          {
+            key: 'delete',
+            danger: true,
+            icon: h(TrashIcon, null),
+            label: confirming ? t('deleteConfirm') : t('delete'),
+            onSelect: () => {
+              // Two-stage delete, moved here from the detail page: the second
+              // click only counts once the arm has settled, so a double-click
+              // cannot confirm itself.
+              if (confirming && Date.now() - confirmDeleteAt.current > 600) {
+                setConfirmDeleteId(null)
+                setMenu(null)
+                void deleteTask(task.id)
+                return
+              }
+              setConfirmDeleteId(task.id)
+              confirmDeleteAt.current = Date.now()
+              setTimeout(() => {
+                setConfirmDeleteId((current) => (current === task.id ? null : current))
+              }, 3000)
+            },
+          },
+        ]
+        let row = -1
+        const rows = entries.map((entry) => (entry.separator ? entry : { ...entry, index: (row += 1) }))
+        const count = row + 1
         return h(
           'div',
           {
@@ -1766,86 +1909,78 @@ window.__ModuleLoader__.load({
             onContextMenu: (event) => {
               if (event && typeof event.preventDefault === 'function') event.preventDefault()
             },
+            onKeyDown: (event) => {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setMenuIndex((current) => (current + 1) % count)
+              } else if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setMenuIndex((current) => (current - 1 + count) % count)
+              } else if (event.key === 'Home') {
+                event.preventDefault()
+                setMenuIndex(0)
+              } else if (event.key === 'End') {
+                event.preventDefault()
+                setMenuIndex(count - 1)
+              }
+            },
           },
-          h(
-            'button',
-            {
-              className: 'pj-menu-item',
-              type: 'button',
-              role: 'menuitem',
-              disabled: busy,
-              onClick: () => {
-                setMenu(null)
-                void toggleResolved(task)
-              },
-            },
-            task.resolved ? t('unresolve') : t('resolve'),
-          ),
-          h(
-            'button',
-            {
-              className: 'pj-menu-item pj-danger',
-              type: 'button',
-              role: 'menuitem',
-              disabled: busy,
-              onClick: () => {
-                // Two-stage delete, moved here from the detail page: the second
-                // click only counts once the arm has settled, so a double-click
-                // cannot confirm itself.
-                if (confirming && Date.now() - confirmDeleteAt.current > 600) {
-                  setConfirmDeleteId(null)
-                  setMenu(null)
-                  void deleteTask(task.id)
-                  return
-                }
-                setConfirmDeleteId(task.id)
-                confirmDeleteAt.current = Date.now()
-                setTimeout(() => {
-                  setConfirmDeleteId((current) => (current === task.id ? null : current))
-                }, 3000)
-              },
-            },
-            confirming ? t('deleteConfirm') : t('delete'),
+          ...rows.map((entry) =>
+            entry.separator
+              ? h('div', { key: entry.key, className: 'pj-menu-separator', role: 'separator' })
+              : h(
+                  'button',
+                  {
+                    key: entry.key,
+                    ref: (node) => {
+                      menuItemRefs.current[entry.index] = node
+                    },
+                    className: `pj-menu-item${entry.danger ? ' pj-danger' : ''}`,
+                    type: 'button',
+                    role: 'menuitem',
+                    tabIndex: -1,
+                    disabled: busy,
+                    onMouseEnter: () => setMenuIndex(entry.index),
+                    onClick: entry.onSelect,
+                  },
+                  h('span', { className: 'pj-menu-icon', 'aria-hidden': true }, entry.icon),
+                  h('span', { className: 'pj-menu-label' }, entry.label),
+                ),
           ),
         )
       }
 
-      // One thread card per task: group glyph, title line with a relative time,
-      // a one-line summary and up to two chips. No controls at all — the brief,
-      // the output and every action live on the detail page, and the card's
-      // context menu is the only place a task can be resolved or deleted.
+      // One thread card: the group glyph in the gutter, then the title line with
+      // its relative time, a one-line summary and up to two chips. The card is
+      // the only button — every action lives in the context menu.
       const renderTask = (task) => {
-        const subtitle = taskSubtitle(task, t)
         const chips = taskChips(task)
+        const stamp = relativeTime(task, t, activeLocale())
         return h(
           'button',
           {
-            key: task.id,
-            type: 'button',
             className: `pj-task-row${execTarget && execTarget.taskId === task.id ? ' pj-active' : ''}`,
-            onClick: () => void openTaskDetail(task),
-            onContextMenu: (event) => openTaskMenu(event, task),
+            type: 'button',
             disabled: busy,
-            title: subtitle ? `${task.title}\n${subtitle}` : task.title,
+            title: `${task.title || ''}\n${taskSubtitle(task, t)}`,
+            onClick: () => openTaskDetail(task),
+            onContextMenu: (event) => openTaskMenu(event, task),
           },
           h(ThreadIcon, { kind: threadIconOf(task) }),
-          h('span', { className: 'pj-task-name' }, task.title),
-          h('span', { className: 'pj-thread-time' }, relativeTime(task, t, activeLocale())),
-          h('span', { className: 'pj-thread-sub' }, subtitle),
-          chips.length
-            ? h(
-                'span',
-                { className: 'pj-thread-chips' },
-                chips.map((chip) =>
-                  h('span', { key: chip, className: 'pj-chip' }, chip),
-                ),
-              )
-            : null,
+          h('span', { className: 'pj-task-name' }, task.title || ''),
+          stamp && h('span', { className: 'pj-thread-time' }, stamp),
+          h('span', { className: 'pj-thread-sub' }, taskSubtitle(task, t)),
+          chips.length > 0 &&
+            h(
+              'span',
+              { className: 'pj-thread-chips' },
+              chips.map((chip) => h('span', { key: chip, className: 'pj-chip' }, chip)),
+            ),
         )
       }
 
-      // A group header is a button: it folds and unfolds its cards, and the
-      // folded set is persisted. `Resolved` starts folded.
+      // A group header folds its cards and carries the count; the whole header
+      // is the toggle, so the chevron is decorative.
       const renderThreadGroup = (group) => {
         const folded = Boolean(collapsedGroups[group.key])
         return h(
@@ -1920,19 +2055,24 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'pj-field' },
               h(
-                'select',
-                {
-                  className: 'pj-select',
-                  'aria-label': t('taskModel'),
-                  value: task.model || '',
-                  // The page's task PATCH only accepts `resolved`, so a
-                  // task-level route is the coordinator's to set. The control
-                  // stays visible and read-only rather than pretending to save.
-                  disabled: true,
-                  title: t('taskModelReadonly'),
-                },
-                h('option', { value: '' }, t('modelInheritProject')),
-                ...catalogOptions(catalog, 'models', task.model),
+                'span',
+                { className: 'pj-select-wrap' },
+                h(
+                  'select',
+                  {
+                    className: 'pj-select',
+                    'aria-label': t('taskModel'),
+                    value: task.model || '',
+                    // The page's task PATCH only accepts `resolved`, so a
+                    // task-level route is the coordinator's to set. The control
+                    // stays visible and read-only rather than pretending to save.
+                    disabled: true,
+                    title: t('taskModelReadonly'),
+                  },
+                  h('option', { value: '' }, t('modelInheritProject')),
+                  ...catalogOptions(catalog, 'models', task.model),
+                ),
+                h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
               ),
               h('span', { className: 'pj-hint' }, t('taskModelReadonly')),
             ),
@@ -2304,14 +2444,18 @@ window.__ModuleLoader__.load({
             ? h(
                 'div',
                 { className: 'pj-exec-tools' },
-                h('input', {
-                  className: 'pj-search',
-                  type: 'search',
-                  value: query,
-                  placeholder: t('searchThreads'),
-                  'aria-label': t('searchThreads'),
-                  onChange: (event) => setQuery(event.target.value),
-                }),
+                h(
+                  'div',
+                  { className: 'pj-search' },
+                  h('span', { className: 'pj-search-icon', 'aria-hidden': true }, h(SearchIcon, null)),
+                  h('input', {
+                    type: 'search',
+                    value: query,
+                    placeholder: t('searchThreads'),
+                    'aria-label': t('searchThreads'),
+                    onChange: (event) => setQuery(event.target.value),
+                  }),
+                ),
                 h(
                   'button',
                   { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: toggleAllGroups },

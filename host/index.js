@@ -40,11 +40,12 @@ const MAX_PRESET = 120
  * admit at once for one project. Kept as one constant so the clamp, the update
  * path and the tool schema cannot drift apart.
  *
- * Note this is *our* ceiling only: the host's subagent runtime has a separate
- * `maxActiveSubagents` pool (default 8) that can still refuse the 9th+ live
- * child in a tree. Raising this constant does not raise that pool.
+ * This is deliberately 8, matching the host subagent runtime's
+ * `maxActiveSubagents` pool default, so the plugin never admits a worker the
+ * host would refuse. It is still *our* ceiling: raising this constant does not
+ * raise that pool.
  */
-const MAX_CONCURRENCY = 10
+const MAX_CONCURRENCY = 8
 /**
  * System statuses only. `status` is written by the host itself (add → queued,
  * dispatch → running, settle → review|failed) and by the coordinator tool
@@ -875,7 +876,7 @@ function registerTools(ctx) {
           description:
             'manual (default): a task needs human approval on the Projects page before dispatch. auto: the coordinator may dispatch without waiting.',
         },
-        concurrency: { type: 'integer', description: 'Maximum workers running at once, 1-10; defaults to 2.' },
+        concurrency: { type: 'integer', description: 'Maximum workers running at once, 1-8; defaults to 2.' },
         model: {
           type: 'string',
           description:

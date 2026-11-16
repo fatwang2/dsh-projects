@@ -660,46 +660,47 @@ test('the model catalog lists every advertised provider/model route', async () =
 
 // ---------------------------------------------------------------------------
 // Concurrency ceiling. The clamp lives in `normalizeProject` (read path) and
-// `updateProject` (PATCH path); both share MAX_CONCURRENCY = 10. The dispatch
+// `updateProject` (PATCH path); both share MAX_CONCURRENCY = 8, which matches
+// the host subagent runtime's `maxActiveSubagents` pool default. The dispatch
 // guard itself is unchanged — it still compares running workers to the stored
 // value, so the only thing these tests pin is where the ceiling now sits.
 
-test('concurrency 10 is accepted, persisted and served to the page', async () => {
+test('concurrency 8 is accepted, persisted and served to the page', async () => {
   const created = await call('projects_create', {
-    name: 'Ten wide',
-    goal: 'Run ten workers at once.',
-    concurrency: 10,
+    name: 'Eight wide',
+    goal: 'Run eight workers at once.',
+    concurrency: 8,
   })
-  assert.match(created, /concurrency=10/)
+  assert.match(created, /concurrency=8/)
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
 
   const onDisk = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
-  assert.equal(onDisk.concurrency, 10)
+  assert.equal(onDisk.concurrency, 8)
 
   const detail = await request('GET', `/projects-api/projects/${projectId}`)
   assert.equal(detail.status, 200)
-  assert.equal(detail.body.project.concurrency, 10)
+  assert.equal(detail.body.project.concurrency, 8)
 
   // The tool schema advertises the same range the clamp enforces.
-  assert.match(tool('projects_create').parameters.properties.concurrency.description, /1-10/)
+  assert.match(tool('projects_create').parameters.properties.concurrency.description, /1-8/)
 })
 
-test('concurrency above the ceiling is clamped to 10, not rejected', async () => {
+test('concurrency above the ceiling is clamped to 8, not rejected', async () => {
   const created = await call('projects_create', {
     name: 'Eleven wide',
-    goal: 'Clamp me to ten.',
+    goal: 'Clamp me to eight.',
     concurrency: 11,
   })
-  assert.match(created, /concurrency=10/)
+  assert.match(created, /concurrency=8/)
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
 
   const onDisk = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
-  assert.equal(onDisk.concurrency, 10)
+  assert.equal(onDisk.concurrency, 8)
 
   // The page's project PATCH runs through the same clamp, in both directions.
   const high = await request('PATCH', `/projects-api/projects/${projectId}`, { concurrency: 11 })
   assert.equal(high.status, 200)
-  assert.equal(high.body.project.concurrency, 10)
+  assert.equal(high.body.project.concurrency, 8)
 
   const low = await request('PATCH', `/projects-api/projects/${projectId}`, { concurrency: 0 })
   assert.equal(low.status, 200)
@@ -709,26 +710,26 @@ test('concurrency above the ceiling is clamped to 10, not rejected', async () =>
   assert.equal(one.body.project.concurrency, 1)
 })
 
-test('the dispatch guard admits 10 workers and refuses the eleventh', async () => {
+test('the dispatch guard admits 8 workers and refuses the ninth', async () => {
   const created = await call('projects_create', {
-    name: 'Ten lanes',
+    name: 'Eight lanes',
     goal: 'Fill every slot.',
-    concurrency: 10,
+    concurrency: 8,
     autonomy: 'auto',
   })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
 
   const taskIds = []
-  for (let index = 0; index < 11; index += 1) {
+  for (let index = 0; index < 9; index += 1) {
     const added = await call('projects_add_task', { project_id: projectId, title: `Lane ${index + 1}` })
     taskIds.push(added.match(/t-[0-9a-f]{8}/)[0])
   }
 
-  for (let index = 0; index < 10; index += 1) {
+  for (let index = 0; index < 8; index += 1) {
     const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskIds[index] })
     assert.match(dispatched, /Dispatched task/, `worker ${index + 1} should be admitted`)
   }
 
-  const refused = await call('projects_dispatch', { project_id: projectId, task_id: taskIds[10] })
-  assert.match(refused, /Concurrency limit reached \(10\/10 workers running\)/)
+  const refused = await call('projects_dispatch', { project_id: projectId, task_id: taskIds[8] })
+  assert.match(refused, /Concurrency limit reached \(8\/8 workers running\)/)
 })

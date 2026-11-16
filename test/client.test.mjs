@@ -264,7 +264,7 @@ test('the row context menu owns resolve and delete', () => {
   assert.match(menu, /t\('unresolve'\)/)
   assert.match(menu, /t\('deleteConfirm'\)/)
   assert.match(menu, /deleteTask\(task\.id\)/)
-  assert.match(menu, /pj-menu-item pj-danger/)
+  assert.match(menu, /pj-menu-item[\s\S]{0,40}pj-danger/)
   // Two-stage delete: the arm must settle before the second click confirms.
   assert.match(menu, /Date\.now\(\) - confirmDeleteAt\.current > 600/)
 
@@ -300,9 +300,14 @@ test('the columns collapse and resize, and the widths persist', () => {
   assert.match(source, /initialOf\(entry\.name\)/)
   assert.match(source, /aria-expanded/)
 
-  // Two native pointer separators, no dependency.
-  const separators = [...source.matchAll(/role: 'separator'/g)]
+  // Two native pointer separators, no dependency. The menu's own ARIA
+  // separator is a different control, so count the resizer handles instead.
+  const separators = [...source.matchAll(/className: 'pj-resizer'/g)]
   assert.equal(separators.length, 2, 'one separator between each pair of columns')
+  assert.ok(
+    [...source.matchAll(/role: 'separator'/g)].length >= 2,
+    'both column handles expose the separator role',
+  )
   assert.match(source, /'aria-orientation': 'vertical'/)
   assert.match(source, /addEventListener\('pointermove'/)
   assert.match(source, /pointercancel/)
@@ -484,11 +489,11 @@ test('the threads head carries a live search and a fold-all toggle', () => {
   assert.doesNotMatch(source, /t\('closePanel'\)/)
 })
 
-test('the concurrency input accepts the Host ceiling of ten', () => {
+test('the concurrency input follows the Host ceiling of eight', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   const input = source.slice(source.indexOf("t('concurrency')"), source.indexOf("t('workspace')"))
-  assert.match(input, /max: 10,/)
-  assert.doesNotMatch(source, /max: 8,/)
+  assert.match(input, /max: 8,/)
+  assert.doesNotMatch(source, /max: 10,/)
 })
 
 test('the model pickers read the Host catalog and degrade to free text', () => {
@@ -509,8 +514,8 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
   assert.ok(settingsStart > 0 && settingsEnd > settingsStart)
   const settings = source.slice(settingsStart, settingsEnd)
   assert.match(settings, /t\('execution'\)/)
-  assert.match(settings, /catalog\.enumerable[\s\S]{0,60}\? h\([\s\S]{0,40}'select'/)
-  assert.match(settings, /catalog\.presetsEnumerable[\s\S]{0,60}\? h\([\s\S]{0,40}'select'/)
+  assert.match(settings, /catalog\.enumerable[\s\S]{0,60}\? h\([\s\S]{0,160}'select'/)
+  assert.match(settings, /catalog\.presetsEnumerable[\s\S]{0,60}\? h\([\s\S]{0,160}'select'/)
   assert.match(settings, /patchProject\(\{ model: event\.target\.value \}\)/)
   assert.match(settings, /patchProject\(\{ agentPreset: event\.target\.value \}\)/)
   assert.match(settings, /t\('modelDefault'\)/)
@@ -566,4 +571,87 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
   }
+})
+
+test('the controls copy the Host primitives instead of importing them', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // No Harness Client package is loaded as a module: the markup and CSS are
+  // copied into this file, and only the theme tokens are shared.
+  assert.doesNotMatch(source, /require\('@deepseek-ai/)
+  assert.doesNotMatch(source, /from '@deepseek-ai/)
+  assert.equal(source.match(/#[0-9a-fA-F]{3,8}\b/g), null, 'no literal colors')
+  assert.equal(source.match(/rgba?\(/g), null, 'no literal colors')
+
+  // The search field is the Host SearchInput: a 32px bordered wrapper that owns
+  // the focus ring, with a 16px leading glyph and a borderless input inside.
+  const search = source.slice(source.indexOf('.pj-search{'), source.indexOf('.pj-group{'))
+  assert.match(search, /height:32px/)
+  assert.match(search, /border:\.5px solid var\(--dsw-alias-border-l4\)/)
+  assert.match(search, /border-radius:var\(--dsw-radius-md\)/)
+  assert.match(search, /\.pj-search:focus-within\{border-color:var\(--dsw-alias-state-business-primary\)\}/)
+  assert.match(search, /\.pj-search-icon\{[^}]*width:16px;height:16px/)
+  assert.match(search, /\.pj-search input\{[^}]*border:0/)
+  assert.match(source, /className: 'pj-search-icon'/)
+  assert.match(source, /h\(SearchIcon/)
+
+  // Buttons use the Host Button primitive's sm scale and its three variants,
+  // not a pill of our own invention.
+  const button = source.slice(source.indexOf('.pj-btn{'), source.indexOf('.pj-icon-btn{'))
+  assert.match(button, /height:28px/)
+  assert.match(button, /padding:0 10px/)
+  assert.match(button, /border-radius:var\(--dsw-radius-sm\)/)
+  assert.match(button, /font-size:12px;line-height:18px/)
+  assert.match(button, /\.pj-btn:disabled\{cursor:not-allowed;opacity:\.4\}/)
+  assert.match(button, /\.pj-btn-primary\{background:var\(--dsw-alias-button-primary-fill\)/)
+  assert.match(button, /\.pj-btn-ghost\{background:transparent;box-shadow:none/)
+  assert.doesNotMatch(source, /border-radius:16px/, 'the pill buttons are gone')
+  assert.doesNotMatch(source, /\.pj-btn-danger/, 'no invented danger variant')
+
+  // The context menu is the Host Menu primitive: an elevated 4px-padded card,
+  // 34px rows with a 14px icon seat, a hairline separator and a danger fill.
+  const menu = source.slice(source.indexOf('.pj-menu{'), source.indexOf('.pj-badge{'))
+  assert.match(menu, /box-shadow:var\(--dsw-elevation-prominent\)/)
+  assert.match(menu, /\.pj-menu-item\{[^}]*min-height:34px/)
+  assert.match(menu, /\.pj-menu-item\{[^}]*border-radius:var\(--dsw-radius-md\)/)
+  assert.match(menu, /\.pj-menu-icon\{[^}]*width:14px;height:14px/)
+  assert.match(menu, /\.pj-menu-separator\{height:\.5px/)
+  assert.match(menu, /\.pj-menu-item\.pj-danger:hover:not\(:disabled\)[^{]*\{background:var\(--dsw-alias-interactive-bg-hover-danger\)\}/)
+  assert.match(source, /className: 'pj-menu-icon'/)
+  assert.match(source, /className: 'pj-menu-separator'/)
+  assert.match(source, /className: 'pj-menu-label'/)
+
+  // Roving focus inside the menu: arrows, Home and End move the row index and
+  // the effect focuses that row, so Enter activates it natively.
+  assert.match(source, /event\.key === 'ArrowDown'/)
+  assert.match(source, /event\.key === 'ArrowUp'/)
+  assert.match(source, /event\.key === 'Home'/)
+  assert.match(source, /event\.key === 'End'/)
+  assert.match(source, /menuItemRefs\.current\[menuIndex\]/)
+  assert.match(source, /node\.focus\(\{ preventScroll: true \}\)/)
+
+  // A native select cannot carry a caret, so every picker sits in a wrapper
+  // that draws the Host's 12px chevron in the menu-icon tone.
+  const select = source.slice(source.indexOf('.pj-select-wrap{'), source.indexOf('.pj-row{'))
+  assert.match(select, /\.pj-select\{[^}]*appearance:none/)
+  assert.match(select, /\.pj-select\{[^}]*height:34px/)
+  assert.match(select, /\.pj-select-chevron\{[^}]*width:12px;height:12px/)
+  assert.match(select, /color:var\(--dsw-alias-menu-icon\)/)
+  assert.equal(
+    [...source.matchAll(/className: 'pj-select-wrap'/g)].length,
+    4,
+    'all four pickers are wrapped',
+  )
+  assert.equal(
+    [...source.matchAll(/className: 'pj-select-chevron'/g)].length,
+    4,
+    'all four pickers draw the caret',
+  )
+
+  // Form fields and section rhythm follow the Host settings form.
+  assert.match(source, /\.pj-input\{height:34px;padding:0 12px\}/)
+  assert.match(source, /\.pj-field\{display:flex;flex-direction:column;gap:6px/)
+  assert.match(source, /\.pj-label\{font-size:13px;font-weight:500/)
+  assert.match(source, /\.pj-section\{padding:12px 0\}/)
+  assert.match(source, /\.pj-section\+\.pj-section\{border-top:\.5px solid var\(--dsw-alias-border-l2\)\}/)
 })

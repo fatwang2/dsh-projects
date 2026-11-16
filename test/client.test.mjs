@@ -2029,8 +2029,9 @@ const SAMPLE_PROJECT = {
 
 /**
  * The Host's per-file memory payload: the project route carries metadata only
- * (`memory.files`), and one body comes from `/projects/:id/memory/:name`. The
- * two files below are the fixture every page test mounts with.
+ * (`memory.files` for the topic files, `memory.indexFile` for the generated
+ * `MEMORY.md`), and one body comes from `/projects/:id/memory/:name`. The two
+ * files below are the fixture every page test mounts with.
  */
 const SAMPLE_MEMORY_TEXTS = {
   'project-background': '这个项目是 DSH 的项目看板插件。',
@@ -2056,19 +2057,41 @@ const SAMPLE_MEMORY_FILES = [
   },
 ]
 
+/** The generated index: a read-only pseudo-file beside the topic files. */
+const SAMPLE_MEMORY_INDEX_TEXT =
+  '# 共享记忆\n\n- project-background — 这个项目是 DSH 的项目看板插件。\n- known-pitfalls — 不要碰 host/index.js\n'
+
+const SAMPLE_MEMORY_INDEX_FILE = {
+  name: 'MEMORY.md',
+  description: 'Generated index of the shared memory',
+  type: 'index',
+  modified: '2026-11-16T09:00:00.500Z',
+  size: SAMPLE_MEMORY_INDEX_TEXT.length,
+  readOnly: true,
+  isIndex: true,
+}
+
 const SAMPLE_MEMORY = {
   files: SAMPLE_MEMORY_FILES,
+  indexFile: SAMPLE_MEMORY_INDEX_FILE,
   total: SAMPLE_MEMORY_FILES.reduce((sum, file) => sum + file.size, 0),
   budget: 64000,
 }
 
 /** One body per sample file, the shape `GET …/memory/:name` answers with. */
-const SAMPLE_MEMORY_BODIES = Object.fromEntries(
-  SAMPLE_MEMORY_FILES.map((file) => [
-    file.name,
-    { ...file, text: SAMPLE_MEMORY_TEXTS[file.name], archived: false },
-  ]),
-)
+const SAMPLE_MEMORY_BODIES = {
+  ...Object.fromEntries(
+    SAMPLE_MEMORY_FILES.map((file) => [
+      file.name,
+      { ...file, text: SAMPLE_MEMORY_TEXTS[file.name], archived: false },
+    ]),
+  ),
+  'MEMORY.md': {
+    ...SAMPLE_MEMORY_INDEX_FILE,
+    text: SAMPLE_MEMORY_INDEX_TEXT,
+    archived: false,
+  },
+}
 
 const SAMPLE_MODELS = {
   models: [
@@ -2536,12 +2559,14 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(titles().includes('执行'), false)
   assert.equal(page.byText('执行', options()).length, 0)
 
-  // Memory: the file list, with no whole-memory editor entry any more.
+  // Memory: the index row plus the file list, with no whole-memory editor entry
+  // and no row actions any more: a row only browses.
   page.click(cells()[1])
   assert.deepEqual(titles(), ['共享记忆'])
-  assert.equal(page.byClass('pj-memory-row', options()).length, 2)
+  assert.equal(page.byClass('pj-memory-row', options()).length, 3, 'the index plus two files')
   assert.equal(page.byText('编辑全文', options()).length, 0)
-  assert.equal(page.byLabel('编辑文件 project-background', options()).length, 1)
+  assert.equal(page.byLabel('编辑文件 project-background', options()).length, 0)
+  assert.equal(page.byLabel('删除文件 project-background', options()).length, 0)
   assert.equal(page.byTag('select', options()).length, 0)
   assert.equal(page.byText('归档', options()).length, 0)
   assert.equal(cells()[1].props['aria-current'], 'true')
@@ -2550,7 +2575,7 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(page.byClass('pj-modal-dialog').length, 1)
 })
 
-test('the memory group lists the Host\'s files and previews one body', async (t) => {
+test('the memory group lists the index and the Host\'s files, and previews one body', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
@@ -2566,22 +2591,40 @@ test('the memory group lists the Host\'s files and previews one body', async (t)
   // string, so the old "[object Object]" preamble cannot come back.
   assert.doesNotMatch(page.textOf(page.tree()), /\[object Object\]/)
   const rows = page.byClass('pj-memory-row', options)
-  assert.equal(rows.length, 2, 'one row per memory file')
-  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), 'project-background')
+  assert.equal(rows.length, 3, 'the index plus one row per memory file')
+
+  // The generated index leads the list, marked as the read-only index, and its
+  // description is the page's own wording rather than the Host's English one.
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), 'MEMORY.md')
+  assert.match(page.textOf(rows[0]), /索引/)
+  assert.match(page.textOf(rows[0]), /只读/)
   assert.equal(
     page.textOf(page.byClass('pj-memory-row-desc', rows[0])[0]),
+    '共享记忆的索引，由主题文件自动生成',
+  )
+  assert.match(page.textOf(page.byClass('pj-memory-row-meta', rows[0])[0]), /字符/)
+
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), 'project-background')
+  assert.equal(
+    page.textOf(page.byClass('pj-memory-row-desc', rows[1])[0]),
     '这个项目是 DSH 的项目看板插件。',
   )
-  const meta = page.textOf(page.byClass('pj-memory-row-meta', rows[0])[0])
+  const meta = page.textOf(page.byClass('pj-memory-row-meta', rows[1])[0])
   assert.match(meta, /字符/)
   assert.match(meta, /2026-11-16/, 'the modified date is shown')
-  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), 'known-pitfalls')
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[2])[0]), 'known-pitfalls')
   const tally = page.textOf(page.byClass('pj-memory-tally', options)[0])
-  assert.match(tally, /2 个文件/)
+  assert.match(tally, /2 个文件/, 'the index is not counted as a topic file')
   assert.match(tally, /字符/)
 
+  // A row only browses: the open button is its one control, so hovering it can
+  // never surface an edit or a delete.
+  for (const row of rows) {
+    assert.equal(page.byTag('button', row).length, 1, 'a row carries no actions')
+  }
+
   // A row opens the body the Host serves for that one file.
-  page.click(page.byClass('pj-memory-open', rows[1])[0])
+  page.click(page.byClass('pj-memory-open', rows[2])[0])
   await page.settle()
   const dialogs = page.byClass('pj-modal-dialog')
   assert.equal(dialogs.length, 2, 'the preview stacks on the settings panel')
@@ -2598,10 +2641,48 @@ test('the memory group lists the Host\'s files and previews one body', async (t)
     'the body comes from the single-file route',
   )
 
+  // The preview owns the file's two actions, and they are live for a topic file.
+  assert.equal(page.byLabel('编辑文件 known-pitfalls', preview).length, 1)
+  assert.equal(page.byLabel('删除文件 known-pitfalls', preview).length, 1)
+  assert.equal(page.byLabel('编辑文件 known-pitfalls', preview)[0].props.disabled, false)
+  assert.equal(page.byLabel('删除文件 known-pitfalls', preview)[0].props.disabled, false)
+
   // Closing the preview leaves the memory group open.
   page.click(page.byClass('pj-modal-close', preview)[0])
   assert.equal(page.byClass('pj-modal-dialog').length, 1)
-  assert.equal(page.byClass('pj-memory-row').length, 2, 'the group is still there')
+  assert.equal(page.byClass('pj-memory-row').length, 3, 'the group is still there')
+})
+
+test('the generated index opens as a read-only preview with no actions', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
+  const options = () => page.byClass('pj-settings-options')[0]
+  const indexRow = page.byClass('pj-memory-row', options())[0]
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', indexRow)[0]), 'MEMORY.md')
+
+  page.click(page.byClass('pj-memory-open', indexRow)[0])
+  await page.settle()
+  const preview = page.byClass('pj-modal-dialog')[1]
+  assert.equal(page.textOf(page.byClass('pj-modal-title', preview)[0]), 'MEMORY.md')
+  assert.match(page.textOf(page.byClass('pj-memory-body', preview)[0]), /# 共享记忆/)
+  assert.match(page.textOf(preview), /只能查看/, 'the preview says why it is read-only')
+  assert.ok(
+    page.requests.some(
+      (entry) => entry.method === 'GET' && entry.path === '/projects/p1/memory/MEMORY.md',
+    ),
+    'the index body comes from the same single-file route',
+  )
+
+  // The index is generated, so it has no write path: neither action is offered.
+  assert.equal(page.byText('编辑文件', preview).length, 0)
+  assert.equal(page.byText('删除文件', preview).length, 0)
+  assert.equal(page.byClass('pj-modal-footer', preview).length, 0)
 })
 
 test('the memory editor saves one file by name', async (t) => {
@@ -2614,13 +2695,20 @@ test('the memory editor saves one file by name', async (t) => {
   page.click(page.byLabel('设置')[0])
   page.click(page.byClass('pj-settings-nav-cell')[1])
   const options = () => page.byClass('pj-settings-options')[0]
-  const edit = page.byLabel('编辑文件 known-pitfalls', options())[0]
-  assert.ok(edit, 'the row carries its own edit action')
+  // The edit action lives in the preview, not on the row.
+  page.click(page.byClass('pj-memory-open', page.byClass('pj-memory-row', options())[2])[0])
+  await page.settle()
+  const preview = page.byClass('pj-modal-dialog')[1]
+  const edit = page.byLabel('编辑文件 known-pitfalls', preview)[0]
+  assert.ok(edit, 'the preview carries the edit action')
   page.click(edit)
   await page.settle()
   const editor = page.byClass('pj-modal-dialog')[1]
   assert.ok(editor, 'the editor opened')
   assert.equal(page.textOf(page.byClass('pj-modal-title', editor)[0]), 'known-pitfalls')
+  // The preview handed the file over and closed: the editor is the only layer
+  // above the settings panel, so saving cannot leave a stale body behind.
+  assert.equal(page.byClass('pj-modal-dialog').length, 2, 'the preview closed when the editor opened')
   const textarea = page.byTag('textarea', editor)[0]
   assert.equal(textarea.props.value, SAMPLE_MEMORY_TEXTS['known-pitfalls'])
   assert.equal(page.byText('保存', editor)[0].props.disabled, true, 'nothing to save yet')
@@ -2645,11 +2733,11 @@ test('the memory editor saves one file by name', async (t) => {
   assert.equal(page.textOf(page.byClass('pj-notice')[0]), '已保存。')
   // The list behind it re-read the Host's files: the edited size is the new one.
   const rows = page.byClass('pj-memory-row', page.byClass('pj-settings-options')[0])
-  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), 'known-pitfalls')
-  assert.match(page.textOf(page.byClass('pj-memory-row-meta', rows[1])[0]), new RegExp(`${next.length} 字符`))
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[2])[0]), 'known-pitfalls')
+  assert.match(page.textOf(page.byClass('pj-memory-row-meta', rows[2])[0]), new RegExp(`${next.length} 字符`))
 })
 
-test('deleting a memory file arms the row and only the second press deletes', async (t) => {
+test('deleting a memory file arms the preview and only the second press deletes', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
@@ -2660,39 +2748,44 @@ test('deleting a memory file arms the row and only the second press deletes', as
   page.click(page.byClass('pj-settings-nav-cell')[1])
   const options = () => page.byClass('pj-settings-options')[0]
   const rows = () => page.byClass('pj-memory-row', options())
+  const preview = () => page.byClass('pj-modal-dialog')[1]
 
-  page.click(page.byLabel('删除文件 known-pitfalls', options())[0])
+  // The row only opens the preview; the delete action is the preview's.
+  page.click(page.byClass('pj-memory-open', rows()[2])[0])
+  await page.settle()
+  page.click(page.byLabel('删除文件 known-pitfalls', preview())[0])
   await page.settle()
   assert.equal(
     page.requests.filter((entry) => entry.method === 'DELETE').length,
     0,
-    'the first press only arms the row',
+    'the first press only arms the preview',
   )
-  assert.equal(page.byText('确认删除', options()).length, 1)
-  assert.equal(page.byText('取消', options()).length, 1)
-  assert.match(String(rows()[1].props.className), /pj-armed/)
+  assert.equal(page.byText('确认删除', preview()).length, 1)
+  assert.equal(page.byText('取消', preview()).length, 1)
+  assert.equal(page.byText('删除文件', preview()).length, 0, 'the armed preview offers the confirmation')
 
-  // Cancelling disarms the row and leaves the file alone.
-  page.click(page.byText('取消', options())[0])
-  assert.equal(page.byText('确认删除', options()).length, 0)
-  assert.equal(page.byText('删除文件', options()).length, 2)
+  // Cancelling disarms the preview and leaves the file alone.
+  page.click(page.byText('取消', preview())[0])
+  assert.equal(page.byText('确认删除', preview()).length, 0)
+  assert.equal(page.byText('删除文件', preview()).length, 1)
 
   // The second press deletes exactly that file, and the list re-reads.
-  page.click(page.byLabel('删除文件 known-pitfalls', options())[0])
+  page.click(page.byLabel('删除文件 known-pitfalls', preview())[0])
   await page.settle()
-  page.click(page.byText('确认删除', options())[0])
+  page.click(page.byText('确认删除', preview())[0])
   await page.settle()
   const deleted = page.requests.filter((entry) => entry.method === 'DELETE')
   assert.deepEqual(deleted.map((entry) => entry.path), ['/projects/p1/memory/known-pitfalls'])
-  assert.equal(page.byClass('pj-memory-row', options()).length, 1, 'the row is gone')
+  assert.equal(page.byClass('pj-modal-dialog').length, 1, 'the preview closed after deleting')
+  assert.equal(page.byClass('pj-memory-row', options()).length, 2, 'the row is gone')
   assert.equal(
-    page.textOf(page.byClass('pj-memory-row-title', options())[0]),
+    page.textOf(page.byClass('pj-memory-row-title', options())[1]),
     'project-background',
   )
   assert.equal(page.textOf(page.byClass('pj-notice')[0]), '记忆文件已删除。')
 })
 
-test('an archived memory file is marked in the list and read-only', async (t) => {
+test('an archived memory file is marked in its preview and read-only', async (t) => {
   const archivedFile = {
     name: 'legacy-notes',
     description: '旧结论',
@@ -2723,9 +2816,8 @@ test('an archived memory file is marked in the list and read-only', async (t) =>
   const options = () => page.byClass('pj-settings-options')[0]
   const row = page.byClass('pj-memory-row', options())[2]
   assert.equal(page.textOf(page.byClass('pj-memory-row-title', row)[0]), 'legacy-notes')
-  assert.match(page.textOf(row), /已归档/, 'the row is marked, not silently mixed in')
-  assert.equal(page.byLabel('编辑文件 legacy-notes', row)[0].props.disabled, true)
-  assert.equal(page.byLabel('删除文件 legacy-notes', row)[0].props.disabled, true)
+  // The list only browses: the archived marker is the preview's job now.
+  assert.doesNotMatch(page.textOf(row), /已归档/)
 
   // It still reads: the preview says where it went and shows its body.
   page.click(page.byClass('pj-memory-open', row)[0])
@@ -2734,9 +2826,11 @@ test('an archived memory file is marked in the list and read-only', async (t) =>
   assert.match(page.textOf(preview), /已归档/)
   assert.match(page.textOf(preview), /memory\/archive\//)
   assert.match(page.textOf(page.byClass('pj-memory-body', preview)[0]), /旧结论正文/)
+  assert.equal(page.byLabel('编辑文件 legacy-notes', preview)[0].props.disabled, true)
+  assert.equal(page.byLabel('删除文件 legacy-notes', preview)[0].props.disabled, true)
 })
 
-test('a file the Host reports as archived is marked after it is read', async (t) => {
+test('a file the Host reports as archived is read-only in its preview', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
@@ -2751,14 +2845,16 @@ test('a file the Host reports as archived is marked after it is read', async (t)
   page.click(page.byLabel('设置')[0])
   page.click(page.byClass('pj-settings-nav-cell')[1])
   const options = () => page.byClass('pj-settings-options')[0]
-  const row = () => page.byClass('pj-memory-row', options())[1]
+  const row = () => page.byClass('pj-memory-row', options())[2]
   assert.doesNotMatch(page.textOf(row()), /已归档/, 'the list alone cannot know it')
 
   page.click(page.byClass('pj-memory-open', row())[0])
   await page.settle()
-  page.click(page.byClass('pj-modal-close', page.byClass('pj-modal-dialog')[1])[0])
-  assert.match(page.textOf(row()), /已归档/, 'the fetched body marks the row')
-  assert.equal(page.byLabel('编辑文件 known-pitfalls', row())[0].props.disabled, true)
+  const preview = page.byClass('pj-modal-dialog')[1]
+  assert.match(page.textOf(preview), /已归档/, 'the fetched body marks the preview')
+  assert.match(page.textOf(preview), /memory\/archive\//)
+  assert.equal(page.byLabel('编辑文件 known-pitfalls', preview)[0].props.disabled, true)
+  assert.equal(page.byLabel('删除文件 known-pitfalls', preview)[0].props.disabled, true)
 })
 
 test('a long memory only grows the memory group, never the general group', async (t) => {
@@ -2912,11 +3008,19 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   assert.match(source, /titleId: 'pj-settings-title'/)
 
   // The memory group reads the Host's per-file payload: `memory.files` for the
-  // list and `/memory/:name` for one body. The old `## ` parser and the
-  // whole-memory `{ text }` save are gone.
+  // list, `memory.indexFile` for the generated MEMORY.md, and `/memory/:name`
+  // for one body. The old `## ` parser and the whole-memory `{ text }` save are
+  // gone, and so are the list rows' own actions.
   assert.match(source, /function memoryFilesOf\(memory\)/)
+  assert.match(source, /function memoryIndexFileOf\(memory\)/)
+  assert.match(source, /function memoryIndexRow\(indexFile, t\)/)
+  assert.match(source, /function isMemoryIndex\(file\)/)
+  assert.match(source, /memory\.indexFile/)
   assert.match(source, /memory\/\$\{encodeURIComponent\(name\)\}/)
   assert.match(source, /name: memoryEditor\.name/)
+  assert.match(source, /footer: memoryPreview \? renderMemoryPreviewActions\(\) : null/)
+  assert.doesNotMatch(source, /pj-memory-row-actions/)
+  assert.doesNotMatch(source, /isArchivedMemory|memoryArchivedNames/)
   assert.doesNotMatch(source, /memorySections|memoryPreamble|memoryRows/)
   assert.doesNotMatch(source, /JSON\.stringify\(\{ text: memoryText \}\)/)
   assert.doesNotMatch(source, /setMemoryEditorOpen|memoryEditorOpen/)
@@ -2999,8 +3103,8 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   assert.equal(zh.memoryEnter, undefined)
   assert.equal(en.memoryBack, undefined)
   assert.equal(zh.memoryBack, undefined)
-  // The memory group's own labels: a file list, one-file editing and deleting,
-  // and the archived marker the Host's single-file route reports.
+  // The memory group's own labels: a file list, the generated index, one-file
+  // editing and deleting, and the archived marker the Host's route reports.
   for (const key of [
     'memory',
     'memoryFiles',
@@ -3014,6 +3118,10 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
     'memoryEditFile',
     'memoryDeleteFile',
     'memoryDeleted',
+    'memoryIndex',
+    'memoryReadOnly',
+    'memoryIndexDesc',
+    'memoryIndexHint',
   ]) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
@@ -3026,6 +3134,15 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   assert.equal(zh.memoryDeleteFile, '删除文件')
   assert.equal(en.memoryArchived, 'Archived')
   assert.equal(zh.memoryArchived, '已归档')
+  // The index row's two badges and the page's own description: the Host's
+  // description is an English fallback, so the page never shows it as-is.
+  assert.equal(en.memoryIndex, 'Index')
+  assert.equal(zh.memoryIndex, '索引')
+  assert.equal(en.memoryReadOnly, 'Read-only')
+  assert.equal(zh.memoryReadOnly, '只读')
+  assert.match(zh.memoryIndexDesc, /索引/)
+  assert.match(zh.memoryIndexHint, /MEMORY\.md/)
+  assert.match(en.memoryIndexHint, /MEMORY\.md/)
   // The whole-memory wording retired with the whole-memory editor.
   for (const key of ['memoryEdit', 'memoryPreamble', 'memorySections']) {
     assert.equal(en[key], undefined, `EN still carries ${key}`)

@@ -80,6 +80,11 @@ window.__ModuleLoader__.load({
       memoryEditFile: 'Edit file',
       memoryDeleteFile: 'Delete file',
       memoryDeleted: 'Memory file deleted.',
+      memoryIndex: 'Index',
+      memoryReadOnly: 'Read-only',
+      memoryIndexDesc: 'Generated index of the shared memory',
+      memoryIndexHint:
+        'MEMORY.md is rebuilt from the topic files on every write, so it is read-only here. Edit or delete a topic file instead.',
       save: 'Save',
       concurrency: 'Concurrency',
       concurrencyHint: 'How many threads run at once.',
@@ -233,6 +238,10 @@ window.__ModuleLoader__.load({
       memoryEditFile: '编辑文件',
       memoryDeleteFile: '删除文件',
       memoryDeleted: '记忆文件已删除。',
+      memoryIndex: '索引',
+      memoryReadOnly: '只读',
+      memoryIndexDesc: '共享记忆的索引，由主题文件自动生成',
+      memoryIndexHint: 'MEMORY.md 每次写入都会按主题文件重建，因此在这里只能查看；要改内容请编辑或删除主题文件。',
       save: '保存',
       concurrency: '并发',
       concurrencyHint: '同时运行的线程数。',
@@ -584,9 +593,9 @@ window.__ModuleLoader__.load({
 .pj-path{display:flex;align-items:center;min-width:0;height:34px;padding:0 12px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
 .pj-path.pj-path-empty{color:var(--dsw-alias-label-tertiary)}
 .pj-path-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The memory is a file list, not one textarea: one row per topic file with its
-   name, one-line description, size and modified date. The row opens the body in
-   a dialog; the row's own actions edit or delete that one file. */
+/* The memory is a file list, not one textarea: one row per file with its name,
+   one-line description, size and modified date. A row only browses: it opens the
+   file's preview, and the preview owns editing and deleting. */
 .pj-memory-list{display:flex;flex-direction:column;gap:2px;margin-top:2px}
 .pj-memory-row{display:flex;align-items:flex-start;gap:8px;width:100%;padding:8px 10px;border-radius:var(--dsw-radius-sm)}
 .pj-memory-row:hover,.pj-memory-row:focus-within{background:var(--dsw-alias-interactive-bg-hover)}
@@ -595,17 +604,12 @@ window.__ModuleLoader__.load({
 .pj-memory-row-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary)}
 .pj-memory-row-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .pj-memory-row-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
-/* The row's actions sit in the trailing gutter and surface on hover or keyboard
-   focus, so the list reads as a list of files rather than a toolbar. An armed
-   row keeps them visible: the second press is the destructive one. */
-.pj-memory-row-actions{display:flex;flex:none;align-items:center;gap:4px;opacity:0;transition:opacity .12s}
-.pj-memory-row:hover .pj-memory-row-actions,.pj-memory-row:focus-within .pj-memory-row-actions,.pj-memory-row.pj-armed .pj-memory-row-actions{opacity:1}
-/* A touch device has no hover to reveal them, so they stay out. */
-@media (hover: none){.pj-memory-row-actions{opacity:1}}
-.pj-memory-row.pj-archived .pj-memory-open{cursor:default}
+/* The generated index leads the list and is separated from the topic files by a
+   hairline: it is a different kind of row, read-only and outside the budget. */
+.pj-memory-row.pj-index{margin-bottom:4px;border-bottom:.5px solid var(--dsw-alias-border-l4)}
 .pj-memory-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-primary)}
 /* A dialog's meta line: the size and date of the one file it shows, plus the
-   archived badge when the Host reported the file as moved out of the memory. */
+   badges only the dialog can know (superseded, archived, the read-only index). */
 .pj-memory-preview-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px}
 .pj-memory-preview-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;overflow-wrap:anywhere}
 .pj-memory-error{font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}
@@ -643,7 +647,10 @@ window.__ModuleLoader__.load({
    drops the marker, so keyboard users still get the ring on the next Tab. */
 .pj-modal-dialog [data-pj-automatic-focus]:focus-visible{outline:none}
 .pj-modal-form{width:min(460px,100%)}
-.pj-modal-wide{width:min(560px,100%);padding:0}
+/* The wide card is the memory preview: its content scrolls, and when the file
+   has actions the footer sits on the card's own bottom padding, so the body
+   never scrolls under it. */
+.pj-modal-wide{width:min(560px,100%)}
 .pj-modal-content{display:flex;flex-direction:column;width:100%;min-height:0;overflow-y:auto}
 .pj-modal-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:22px 14px 12px 24px}
 .pj-modal-title{margin:0;font-size:16px;line-height:24px;font-weight:500;color:var(--dsw-alias-label-primary)}
@@ -652,7 +659,6 @@ window.__ModuleLoader__.load({
 .pj-modal-body{display:flex;flex-direction:column;gap:10px;min-width:0;margin-top:20px;padding:0 24px}
 .pj-modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 24px}
 .pj-modal-action{min-width:72px}
-.pj-modal-wide .pj-modal-content{padding-bottom:24px}
 .pj-modal-body > .pj-error{margin:0}
 /* The settings dialog is the Host settings panel: a 188px navigation rail and a
    scrolling options column, so switching groups never resizes the dialog and
@@ -1142,15 +1148,46 @@ ${SHARED_CSS}${DISPATCH_RULES}
     // Shared memory
     //
     // The Host owns the memory: one markdown file per topic under
-    // `memory/<name>.md`, with a generated index. The project payload carries
-    // metadata only (`memory.files`: name, description, type, modified, size),
-    // so the page lists files and fetches one body from
-    // `GET /projects/:id/memory/:name` when a row opens. Editing is per file
-    // too: `POST /projects/:id/memory` takes that file's `name`.
+    // `memory/<name>.md`, plus a generated `MEMORY.md` index it lists beside
+    // them as `memory.indexFile`. The project payload carries metadata only
+    // (`memory.files`), so the page lists files and fetches one body from
+    // `GET /projects/:id/memory/:name` when a file opens. Editing is per file
+    // too: `POST /projects/:id/memory` takes that file's `name`. The index has
+    // no write path at all.
 
     /** The memory's topic files from the project payload, never a body. */
     function memoryFilesOf(memory) {
       return memory && Array.isArray(memory.files) ? memory.files.filter(Boolean) : []
+    }
+
+    /** The generated `MEMORY.md` the Host lists beside the topic files, or null. */
+    function memoryIndexFileOf(memory) {
+      const file = memory && memory.indexFile
+      return file && typeof file === 'object' ? file : null
+    }
+
+    /**
+     * True for the generated index rather than a topic file. The Host marks it
+     * `readOnly` and `isIndex`, and it has no write or delete path: the page
+     * lists it, previews it, and offers no actions for it.
+     */
+    function isMemoryIndex(file) {
+      return Boolean(file && (file.isIndex === true || file.readOnly === true))
+    }
+
+    /**
+     * The index as a list row: the Host's metadata, but with the page's own
+     * description (the Host's is an English fallback) and the read-only flags
+     * the preview and the actions read.
+     */
+    function memoryIndexRow(indexFile, t) {
+      return {
+        ...indexFile,
+        name: indexFile.name || 'MEMORY.md',
+        description: t('memoryIndexDesc'),
+        readOnly: true,
+        isIndex: true,
+      }
     }
 
     /** The `YYYY-MM-DD` date a `modified` timestamp carries, or ''. */
@@ -1186,17 +1223,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
         ? total
         : files.reduce((sum, file) => sum + (Number(file.size) || 0), 0)
       return `${files.length} ${t('memoryFiles')} · ${memorySize(chars, t)}`
-    }
-
-    /**
-     * True for a file the Host reported as archived. The project payload lists
-     * the live memory only, so the single-file route is what reveals an archived
-     * file; the page remembers the names it was told about and marks the row.
-     */
-    function isArchivedMemory(file, archivedNames) {
-      if (!file) return false
-      if (file.archived === true) return true
-      return Array.isArray(archivedNames) && archivedNames.includes(file.name)
     }
 
     /**
@@ -2172,16 +2198,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const [goalDirty, setGoalDirty] = useState(false)
       const [memoryDirty, setMemoryDirty] = useState(false)
       // The memory is one file per topic: a row opens that file's body in a
-      // read-only preview, and the editor edits that one file and saves it by
-      // name. Both are dialogs on top of settings.
+      // read-only preview, and the preview offers the file's two actions. The
+      // editor edits that one file and saves it by name. Both are dialogs on
+      // top of settings.
       const [memoryPreview, setMemoryPreview] = useState(null)
       const [memoryEditor, setMemoryEditor] = useState(null)
-      // Deleting one memory file is destructive, so the row arms it on the first
-      // press and only the second one deletes.
+      // Deleting one memory file is destructive, so the preview arms it on the
+      // first press and only the second one deletes.
       const [memoryDeleteArmed, setMemoryDeleteArmed] = useState('')
-      // The names the Host reported as archived. The project payload lists the
-      // live memory only, so a body fetched by name is what reveals one.
-      const [memoryArchivedNames, setMemoryArchivedNames] = useState([])
       // Both project-level surfaces are dialogs now: the list header carries a
       // plus glyph and the main header a gear, and neither takes a column.
       const [showNewProject, setShowNewProject] = useState(false)
@@ -2606,7 +2630,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setMemoryPreview(null)
         setMemoryEditor(null)
         setMemoryDeleteArmed('')
-        setMemoryArchivedNames([])
         setSettingsGroup('general')
         setExecTarget((current) => (current ? null : current))
         setMenu(null)
@@ -2814,11 +2837,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
       // closed — is dropped instead of overwriting what is on screen.
       const fetchMemoryFile = async (name) => {
         if (!projectId || !name) return null
-        const data = await api(`/projects/${projectId}/memory/${encodeURIComponent(name)}`)
-        if (data && data.archived === true) {
-          setMemoryArchivedNames((names) => (names.includes(data.name) ? names : [...names, data.name]))
-        }
-        return data
+        return api(`/projects/${projectId}/memory/${encodeURIComponent(name)}`)
+      }
+
+      // The preview is the file's own dialog: closing it also disarms its delete,
+      // because the confirmation belongs to the dialog that opened it.
+      const closeMemoryPreview = () => {
+        setMemoryDeleteArmed('')
+        setMemoryPreview(null)
       }
 
       const openMemoryPreview = (file) => {
@@ -2830,7 +2856,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
             if (!data) return
             setMemoryPreview((current) =>
               current && current.name === file.name
-                ? { ...current, ...data, loading: false, error: '' }
+                ? {
+                    ...current,
+                    ...data,
+                    // The Host's index description is an English fallback: the
+                    // page's own wording is what the list and the dialog show.
+                    description: current.description || data.description,
+                    loading: false,
+                    error: '',
+                  }
                 : current,
             )
           })
@@ -2874,6 +2908,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
           })
       }
 
+      // The preview's edit action hands the same file to the editor. The preview
+      // closes first, so saving cannot leave a stale body on screen behind it.
+      const editPreviewFile = () => {
+        const file = memoryPreview
+        if (!file) return
+        closeMemoryPreview()
+        openMemoryEditor(file)
+      }
+
       // The per-file editor saves that one file. `name` is required by the Host
       // (the old whole-memory `{ text }` save is a 400 now), and the description
       // and type are carried through so a body edit never drops the metadata.
@@ -2894,18 +2937,20 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return t('saved')
         })
 
-      // Deleting one file is destructive, so the first press only arms the row
-      // and the second one deletes. The Host deletes live files only, which is
-      // why an archived row's actions are disabled.
+      // Deleting one file is destructive, so the preview arms it on the first
+      // press and only the second one deletes. The Host deletes live files only,
+      // which is why an archived file's actions are disabled. The generated
+      // index has no delete path at all, so its preview never offers one.
       const deleteMemoryFile = (file) =>
         run(async () => {
-          if (!projectId || !file) return ''
+          if (!projectId || !file || isMemoryIndex(file)) return ''
           if (memoryDeleteArmed !== file.name) {
             setMemoryDeleteArmed(file.name)
             return ''
           }
           setMemoryDeleteArmed('')
           await api(`/projects/${projectId}/memory/${encodeURIComponent(file.name)}`, { method: 'DELETE' })
+          setMemoryPreview((current) => (current && current.name === file.name ? null : current))
           await refresh(projectId)
           return t('memoryDeleted')
         })
@@ -3621,106 +3666,114 @@ ${SHARED_CSS}${DISPATCH_RULES}
         return renderGeneralSettings()
       }
 
-      // The file list: one row per topic file. The row's body opens the
-      // read-only preview; its trailing actions edit or delete that one file.
-      // An archived file is marked and read-only here: the Host writes and
-      // deletes the live memory only.
-      const renderMemoryList = () =>
-        memoryFiles.length === 0
+      // One browse-only row: the file's name, description, size and modified
+      // date. It opens the file's preview, and nothing else — editing and
+      // deleting are the preview's actions, so a hovered row has no buttons.
+      const renderMemoryRow = (file) => {
+        const isIndex = isMemoryIndex(file)
+        return h(
+          'div',
+          {
+            key: file.name,
+            className: `pj-memory-row${isIndex ? ' pj-index' : ''}`,
+          },
+          h(
+            'button',
+            {
+              className: 'pj-memory-open',
+              type: 'button',
+              title: file.description || file.name,
+              'aria-haspopup': 'dialog',
+              onClick: () => openMemoryPreview(file),
+            },
+            h(
+              'span',
+              { className: 'pj-memory-row-head' },
+              h('span', { className: 'pj-memory-row-title' }, file.name),
+              isIndex && h('span', { className: 'pj-badge' }, t('memoryIndex')),
+              isIndex && h('span', { className: 'pj-badge' }, t('memoryReadOnly')),
+            ),
+            file.description && h('span', { className: 'pj-memory-row-desc' }, file.description),
+            h('span', { className: 'pj-memory-row-meta' }, memoryMeta(file, t)),
+          ),
+        )
+      }
+
+      // The list: the generated index first, then one row per topic file. The
+      // index is not a topic file — it is not counted in the tally, and its row
+      // is read-only — so it is rendered from `memory.indexFile`, never from
+      // `memory.files`, and only when the Host reports one.
+      const renderMemoryList = () => {
+        const indexFile = memoryIndexFileOf(detail?.memory)
+        const rows = indexFile ? [memoryIndexRow(indexFile, t), ...memoryFiles] : memoryFiles
+        return rows.length === 0
           ? h('div', { className: 'pj-hint' }, t('memoryEmpty'))
-          : h(
-              'div',
-              { className: 'pj-memory-list' },
-              memoryFiles.map((file) => {
-                const archived = isArchivedMemory(file, memoryArchivedNames)
-                const armed = memoryDeleteArmed === file.name
-                const readOnly = archived
-                return h(
-                  'div',
-                  {
-                    key: file.name,
-                    className: `pj-memory-row${archived ? ' pj-archived' : ''}${armed ? ' pj-armed' : ''}`,
-                  },
-                  h(
-                    'button',
-                    {
-                      className: 'pj-memory-open',
-                      type: 'button',
-                      title: file.description || file.name,
-                      'aria-haspopup': 'dialog',
-                      onClick: () => openMemoryPreview(file),
-                    },
-                    h(
-                      'span',
-                      { className: 'pj-memory-row-head' },
-                      h('span', { className: 'pj-memory-row-title' }, file.name),
-                      file.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
-                      archived && h('span', { className: 'pj-badge' }, t('memoryArchived')),
-                    ),
-                    file.description &&
-                      h('span', { className: 'pj-memory-row-desc' }, file.description),
-                    h('span', { className: 'pj-memory-row-meta' }, memoryMeta(file, t)),
-                  ),
-                  h(
-                    'span',
-                    { className: 'pj-memory-row-actions' },
-                    armed
-                      ? [
-                          h(
-                            'button',
-                            {
-                              key: 'confirm',
-                              className: 'pj-btn pj-btn-danger-fill',
-                              type: 'button',
-                              disabled: busy,
-                              onClick: () => deleteMemoryFile(file),
-                            },
-                            t('deleteConfirm'),
-                          ),
-                          h(
-                            'button',
-                            {
-                              key: 'cancel',
-                              className: 'pj-btn pj-btn-ghost',
-                              type: 'button',
-                              disabled: busy,
-                              onClick: () => setMemoryDeleteArmed(''),
-                            },
-                            t('cancel'),
-                          ),
-                        ]
-                      : [
-                          h(
-                            'button',
-                            {
-                              key: 'edit',
-                              className: 'pj-btn',
-                              type: 'button',
-                              disabled: busy || readOnly,
-                              title: readOnly ? t('memoryArchivedHint') : t('memoryEditFile'),
-                              'aria-label': `${t('memoryEditFile')} ${file.name}`,
-                              onClick: () => openMemoryEditor(file),
-                            },
-                            t('memoryEditFile'),
-                          ),
-                          h(
-                            'button',
-                            {
-                              key: 'delete',
-                              className: 'pj-btn pj-btn-danger',
-                              type: 'button',
-                              disabled: busy || readOnly,
-                              title: readOnly ? t('memoryArchivedHint') : t('memoryDeleteFile'),
-                              'aria-label': `${t('memoryDeleteFile')} ${file.name}`,
-                              onClick: () => deleteMemoryFile(file),
-                            },
-                            t('memoryDeleteFile'),
-                          ),
-                        ],
-                  ),
-                )
-              }),
-            )
+          : h('div', { className: 'pj-memory-list' }, rows.map(renderMemoryRow))
+      }
+
+      // The preview owns the file's two actions: editing opens the per-file
+      // editor, deleting arms the same dialog and only the second press deletes.
+      // The generated index has neither action, and an archived file is
+      // read-only here, so its actions are disabled rather than hidden.
+      const renderMemoryPreviewActions = () => {
+        if (!memoryPreview || isMemoryIndex(memoryPreview)) return null
+        const archived = memoryPreview.archived === true
+        const armed = memoryDeleteArmed === memoryPreview.name
+        if (armed) {
+          return [
+            h(
+              'button',
+              {
+                key: 'confirm',
+                className: 'pj-btn pj-btn-danger-fill pj-modal-action',
+                type: 'button',
+                disabled: busy,
+                onClick: () => deleteMemoryFile(memoryPreview),
+              },
+              t('deleteConfirm'),
+            ),
+            h(
+              'button',
+              {
+                key: 'cancel',
+                className: 'pj-btn pj-btn-ghost pj-modal-action',
+                type: 'button',
+                disabled: busy,
+                onClick: () => setMemoryDeleteArmed(''),
+              },
+              t('cancel'),
+            ),
+          ]
+        }
+        return [
+          h(
+            'button',
+            {
+              key: 'edit',
+              className: 'pj-btn pj-modal-action',
+              type: 'button',
+              disabled: busy || archived || memoryPreview.loading,
+              title: archived ? t('memoryArchivedHint') : t('memoryEditFile'),
+              'aria-label': `${t('memoryEditFile')} ${memoryPreview.name}`,
+              onClick: editPreviewFile,
+            },
+            t('memoryEditFile'),
+          ),
+          h(
+            'button',
+            {
+              key: 'delete',
+              className: 'pj-btn pj-btn-danger pj-modal-action',
+              type: 'button',
+              disabled: busy || archived || memoryPreview.loading,
+              title: archived ? t('memoryArchivedHint') : t('memoryDeleteFile'),
+              'aria-label': `${t('memoryDeleteFile')} ${memoryPreview.name}`,
+              onClick: () => deleteMemoryFile(memoryPreview),
+            },
+            t('memoryDeleteFile'),
+          ),
+        ]
+      }
 
       // The collapsed project column: a 44px rail that still shows every
       // project by its first letter, with the selected one highlighted.
@@ -4713,26 +4766,32 @@ ${SHARED_CSS}${DISPATCH_RULES}
             : null,
         }),
         // One memory file opens as a read-only preview on top of the settings
-        // panel; the same file opens in an editor. Both are dialogs, so each
-        // surface keeps one scroll source, and Escape closes only the top one
-        // (see `MODAL_LAYERS`).
+        // panel; the same file opens in an editor from that preview. Both are
+        // dialogs, so each surface keeps one scroll source, and Escape closes
+        // only the top one (see `MODAL_LAYERS`).
         h(Modal, {
           open: Boolean(memoryPreview),
           titleId: 'pj-memory-preview-title',
           title: memoryPreview ? memoryPreview.name : t('memory'),
           closeLabel: t('close'),
-          onClose: () => setMemoryPreview(null),
+          onClose: closeMemoryPreview,
           className: 'pj-modal-wide',
+          footer: memoryPreview ? renderMemoryPreviewActions() : null,
           children: memoryPreview
             ? [
                 h(
                   'div',
                   { key: 'meta', className: 'pj-memory-preview-meta' },
                   h('span', { className: 'pj-memory-row-meta' }, memoryMeta(memoryPreview, t)),
+                  memoryPreview.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
                   memoryPreview.archived && h('span', { className: 'pj-badge' }, t('memoryArchived')),
+                  isMemoryIndex(memoryPreview) &&
+                    h('span', { className: 'pj-badge' }, t('memoryReadOnly')),
                 ),
                 memoryPreview.description &&
                   h('div', { key: 'desc', className: 'pj-memory-preview-desc' }, memoryPreview.description),
+                isMemoryIndex(memoryPreview) &&
+                  h('div', { key: 'index', className: 'pj-hint' }, t('memoryIndexHint')),
                 memoryPreview.archived &&
                   h('div', { key: 'archived', className: 'pj-hint' }, t('memoryArchivedHint')),
                 memoryPreview.loading

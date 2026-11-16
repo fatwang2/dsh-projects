@@ -115,7 +115,6 @@ window.__ModuleLoader__.load({
       delete: 'Delete',
       error: 'Something went wrong',
       counts: 'tasks',
-      openInWorkspace: 'Open in workspace',
       coordinatorCreated: 'Coordinator session started.',
       coordinatorResumed: 'Coordinator session opened.',
       coordinatorChatFailed: 'The embedded conversation could not start. Open it in the workspace instead.',
@@ -251,7 +250,6 @@ window.__ModuleLoader__.load({
       delete: '删除',
       error: '出错了',
       counts: '个任务',
-      openInWorkspace: '在会话中打开',
       coordinatorCreated: '协调者会话已启动。',
       coordinatorResumed: '已打开协调者会话。',
       coordinatorChatFailed: '内嵌对话启动失败，请在会话中打开。',
@@ -2945,14 +2943,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return t('coordinatorRestored')
         })
 
-      const openInWorkspace = (sessionId) => {
-        try {
-          threadApi.openInWorkspace(sessionId)
-        } catch {
-          // Navigation is best-effort.
-        }
-      }
-
       // The memory group's list reads the saved memory, not the editor's
       // buffer: a row is a section the workers can actually read right now. The
       // group's tally counts `## ` sections, the same number the Host's index
@@ -4054,78 +4044,73 @@ ${SHARED_CSS}${DISPATCH_RULES}
                               h('span', { className: 'pj-detail-meta-text', title: execMetaTitle }, execMeta),
                             execTask?.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
                             execAccepted && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
-                            h('span', { className: 'pj-spacer' }),
-                            execTarget.sessionId &&
-                              h(
-                                'button',
-                                {
-                                  className: 'pj-btn pj-btn-ghost',
-                                  type: 'button',
-                                  onClick: () => openInWorkspace(execTarget.sessionId),
-                                },
-                                t('openInWorkspace'),
-                              ),
                           ),
                       )
                     : h('h2', { className: 'pj-exec-title' }, t('threads')),
-                  // The head's right edge is glyphs: search and the group filter on
-                  // the panel, and the fold control in both views, so the column can
-                  // always be put away. The 4s poll keeps the cards current, so there
-                  // is no refresh control to press.
-                  h(
-                    'div',
-                    { className: 'pj-actions' },
-                    execTarget || !project
-                      ? null
-                      : [
-                          h(
-                            'button',
-                            {
-                              key: 'search',
-                              className: `pj-icon-btn${searchOpen ? ' pj-active' : ''}`,
-                              type: 'button',
-                              title: t('searchThreads'),
-                              'aria-label': t('searchThreads'),
-                              'aria-expanded': searchOpen ? 'true' : 'false',
-                              onClick: toggleSearch,
-                            },
-                            h(SearchIcon, { size: 16 }),
-                          ),
-                          h(
-                            'div',
-                            { key: 'filter', className: 'pj-filter' },
-                            h(
-                              'button',
-                              {
-                                className: `pj-icon-btn${anyGroupHidden ? ' pj-active' : ''}`,
-                                type: 'button',
-                                ref: filterTrigger,
-                                title: t('filterThreads'),
-                                'aria-label': t('filterThreads'),
-                                'aria-haspopup': 'menu',
-                                'aria-expanded': filterOpen ? 'true' : 'false',
-                                onClick: () => setFilterOpen((open) => !open),
-                              },
-                              h(FilterIcon, { size: 16 }),
-                            ),
-                            renderFilterMenu(),
-                          ),
-                        ],
-                    // The mirror of the project column's fold control: same 28px seat,
-                    // same glyph weight, the panel on the other side.
-                    h(
-                      'button',
-                      {
-                        className: 'pj-icon-btn',
-                        type: 'button',
-                        title: t('collapseThreads'),
-                        'aria-label': t('collapseThreads'),
-                        'aria-expanded': 'true',
-                        onClick: toggleExecCollapsed,
-                      },
-                      h(PanelRightIcon, { size: 16 }),
-                    ),
-                  ),
+                  // The head's right edge is glyphs, and only on the list view:
+                  // the search and the group filter on the panel, and the fold
+                  // control, so the column can always be put away from the list.
+                  // The detail page is a reading surface whose back control is
+                  // the only way out, so it carries no glyph cluster at all. The
+                  // 4s poll keeps the cards current, so there is no refresh
+                  // control to press.
+                  execTarget
+                    ? null
+                    : h(
+                        'div',
+                        { className: 'pj-actions' },
+                        !project
+                          ? null
+                          : [
+                              h(
+                                'button',
+                                {
+                                  key: 'search',
+                                  className: `pj-icon-btn${searchOpen ? ' pj-active' : ''}`,
+                                  type: 'button',
+                                  title: t('searchThreads'),
+                                  'aria-label': t('searchThreads'),
+                                  'aria-expanded': searchOpen ? 'true' : 'false',
+                                  onClick: toggleSearch,
+                                },
+                                h(SearchIcon, { size: 16 }),
+                              ),
+                              h(
+                                'div',
+                                { key: 'filter', className: 'pj-filter' },
+                                h(
+                                  'button',
+                                  {
+                                    className: `pj-icon-btn${anyGroupHidden ? ' pj-active' : ''}`,
+                                    type: 'button',
+                                    ref: filterTrigger,
+                                    title: t('filterThreads'),
+                                    'aria-label': t('filterThreads'),
+                                    'aria-haspopup': 'menu',
+                                    'aria-expanded': filterOpen ? 'true' : 'false',
+                                    onClick: () => setFilterOpen((open) => !open),
+                                  },
+                                  h(FilterIcon, { size: 16 }),
+                                ),
+                                renderFilterMenu(),
+                              ),
+                            ],
+                        // The mirror of the project column's fold control: same
+                        // 28px seat, same glyph weight, the panel on the other
+                        // side.
+                        h(
+                          'button',
+                          {
+                            className: 'pj-icon-btn',
+                            type: 'button',
+                            title: t('collapseThreads'),
+                            'aria-label': t('collapseThreads'),
+                            'aria-expanded': 'true',
+                            onClick: toggleExecCollapsed,
+                          },
+                          h(PanelRightIcon, { size: 16 }),
+                        ),
+                      ),
                 ),
                 // The search field unfolds under the head; the filter popover carries
                 // the fold-all action, so neither needs a row of its own.
@@ -4489,10 +4474,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
               }
             }
             return sessions.retain(childSessionId, { source: 'projects' })
-          },
-          openInWorkspace(sessionId) {
-            const workspace = ctx.get('uiWorkspace')
-            if (workspace && typeof workspace.openSession === 'function') workspace.openSession(sessionId)
           },
         }
 

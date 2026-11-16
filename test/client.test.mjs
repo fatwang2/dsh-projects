@@ -1530,9 +1530,69 @@ test('the detail page is a conversation that reuses the Host Chat view', () => {
   assert.match(header, /className: 'pj-detail-meta'/)
   assert.match(header, /className: 'pj-detail-meta-text'/)
   assert.match(header, /execTask\.childName/)
-  assert.match(header, /t\('openInWorkspace'\)/)
   assert.match(header, /toggleResolved\(execTask\)/)
   assert.match(header, /approveTask\(execTask\)/)
+  // The back control is the only way out of the detail page.
+  assert.match(header, /← \$\{t\('threads'\)\}/)
+  // The open-in-session action is gone, and so is its key: the embedded
+  // conversation is where a task is read, so nothing navigates away from it.
+  assert.doesNotMatch(source, /openInWorkspace/)
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  assert.equal('openInWorkspace' in en, false, 'EN still carries openInWorkspace')
+  assert.equal('openInWorkspace' in zh, false, 'ZH still carries openInWorkspace')
+})
+
+test('the detail head keeps its state controls and drops the open-in-session and fold controls', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [{ id: 't1', title: '写测试', brief: '写一个测试', output: '', status: 'review' }],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+    viewport: 1200,
+  })
+  t.after(() => page.unmount())
+
+  // The list view keeps the fold control, so the column can still be put away.
+  const listHead = page.byClass('pj-exec-head')[0]
+  assert.ok(listHead, 'the Threads head is on the page')
+  assert.equal(page.byLabel('收起线程栏', listHead).length, 1)
+  assert.equal(page.byClass('pj-actions', listHead).length, 1)
+
+  page.click(page.byClass('pj-task-row')[0])
+  await page.settle()
+
+  // The detail head is exactly the state controls: back, title, pill, resolve,
+  // approval, and one secondary line naming the model, the effort and the
+  // executor. No glyph cluster and no navigation action.
+  const head = page.byClass('pj-exec-head')[0]
+  assert.equal(page.byClass('pj-detail-head', head).length, 1)
+  assert.deepEqual(
+    page.byTag('button', head).map((node) => node.props['aria-label'] || page.textOf(node)),
+    ['← 线程', '解决', '批准'],
+    'the detail head carries only the back, resolve and approve controls',
+  )
+  assert.equal(page.textOf(page.byClass('pj-exec-task', head)[0]), '写测试')
+  assert.equal(page.textOf(page.byClass('pj-pill', head)[0]), '待验收')
+  assert.equal(page.byClass('pj-actions', head).length, 0, 'the detail head carries no glyph cluster')
+  assert.equal(page.byLabel('收起线程栏', head).length, 0)
+  assert.equal(page.byLabel('展开线程栏', head).length, 0)
+  assert.equal(page.byText('在会话中打开', head).length, 0)
+  assert.equal(page.byText('在会话中打开').length, 0, 'the action is gone from the whole page')
+  assert.ok(
+    page.textOf(page.byClass('pj-detail-meta-text', head)[0]).includes('宿主默认'),
+    'the model / effort / executor line survives',
+  )
+
+  // Back returns to the list, where the fold control is still the head's.
+  page.click(page.byText('← 线程', head)[0])
+  await page.settle()
+  assert.equal(page.byClass('pj-detail-head').length, 0)
+  const backHead = page.byClass('pj-exec-head')[0]
+  assert.equal(page.byLabel('收起线程栏', backHead).length, 1)
+  assert.equal(page.byClass('pj-actions', backHead).length, 1)
 })
 
 test('the detail page never repeats the brief and has one scroll source', () => {

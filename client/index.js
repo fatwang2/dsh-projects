@@ -73,7 +73,6 @@ window.__ModuleLoader__.load({
       approve: 'Approve',
       approvedBadge: 'Approved',
       brief: 'Brief',
-      output: 'Output',
       noBrief: 'No brief recorded.',
       noTask: 'This task is no longer on the board.',
       resolve: 'Resolve',
@@ -82,9 +81,7 @@ window.__ModuleLoader__.load({
       deleteConfirm: 'Confirm delete',
       switchDiscard: 'Discard unsaved changes and switch projects?',
       archivedHint: 'This project is archived. Unarchive it to dispatch tasks.',
-      stopReason: 'Stop reason',
       worker: 'worker',
-      noOutput: 'No output recorded yet.',
       archive: 'Archive',
       unarchive: 'Unarchive',
       archivedBadge: 'Archived',
@@ -125,7 +122,6 @@ window.__ModuleLoader__.load({
       model: 'Model',
       agentPreset: 'Agent preset',
       modelDefault: 'Default (inherits host)',
-      modelInheritProject: 'Inherit project default',
       modelRoutePlaceholder: 'provider/model',
       modelFreeTextHint:
         'The model list could not be enumerated — type a route such as provider/model.',
@@ -134,9 +130,6 @@ window.__ModuleLoader__.load({
       fromTask: 'from task',
       fromProject: 'from project',
       fromHost: 'host default',
-      taskModel: 'Task model',
-      taskModelReadonly:
-        'Task-level model is set by the coordinator (projects_update_task); this page is read-only.',
     }
 
     const ZH = {
@@ -184,7 +177,6 @@ window.__ModuleLoader__.load({
       approve: '批准',
       approvedBadge: '已批准',
       brief: '任务说明',
-      output: '产出',
       noBrief: '没有任务说明。',
       noTask: '这个任务已不在看板上了。',
       resolve: '解决',
@@ -193,9 +185,7 @@ window.__ModuleLoader__.load({
       deleteConfirm: '确认删除',
       switchDiscard: '放弃未保存的修改并切换项目？',
       archivedHint: '项目已归档，取消归档后才能派发任务。',
-      stopReason: '结束原因',
       worker: '执行者',
-      noOutput: '还没有产出。',
       archive: '归档',
       unarchive: '取消归档',
       archivedBadge: '已归档',
@@ -235,7 +225,6 @@ window.__ModuleLoader__.load({
       model: '模型',
       agentPreset: 'Agent 预设',
       modelDefault: '默认（继承宿主）',
-      modelInheritProject: '继承项目默认',
       modelRoutePlaceholder: 'provider/model',
       modelFreeTextHint: '无法枚举模型列表，请手填路由，例如 provider/model。',
       presetFreeTextHint: '无法枚举预设列表，请手填预设 id。',
@@ -243,8 +232,6 @@ window.__ModuleLoader__.load({
       fromTask: '来自任务',
       fromProject: '来自项目',
       fromHost: '宿主默认',
-      taskModel: '任务模型',
-      taskModelReadonly: '任务级模型由协调者设置（projects_update_task），页面只读。',
     }
 
     // ---------------------------------------------------------------------
@@ -289,14 +276,23 @@ window.__ModuleLoader__.load({
 .pj-exec-title{margin:0;font-size:14px;font-weight:600}
 .pj-exec-task{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .pj-exec-scroll{flex:1;min-height:0;overflow:auto;padding:12px 14px 32px}
-/* The detail column is a plain vertical flex box: the info pane shrinks and
+/* The detail column is a plain vertical flex box: the brief message shrinks and
    scrolls, the executor conversation keeps a floor and takes the rest. No
    percentage caps and no absolutely positioned layers, so the two halves can
    never paint over each other. */
 .pj-exec-detail{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
-.pj-exec-info{flex:0 1 auto;min-height:0;overflow:auto;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .pj-exec-detail > .pj-chat-body{flex:1 1 0;min-height:140px}
-.pj-exec-info .pj-task-output{max-height:none}
+/* The detail header is two dense rows: back + title + state controls, then one
+   secondary line (model · executor) with the remaining actions. Everything the
+   old field form stacked as labelled blocks now lives in the conversation. */
+.pj-detail-head{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.pj-detail-row{display:flex;align-items:center;gap:6px;min-width:0}
+.pj-detail-meta{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.pj-detail-meta-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The task brief opens the detail as a conversation message, so it reads as the
+   message the coordinator sent rather than as a labelled field. */
+.pj-msg{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:0 0 auto;max-height:38%;overflow:auto;padding:12px 14px 10px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.pj-msg-bubble{max-width:88%;padding:8px 12px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .pj-exec-tools{display:flex;align-items:center;gap:8px;padding:0 14px 10px}
 /* Search field, copied from the Host's SearchInput primitive: a bordered
    wrapper that owns the focus ring, a 16px leading glyph, and a borderless
@@ -374,8 +370,6 @@ window.__ModuleLoader__.load({
 .pj-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
 .pj-field{display:flex;flex-direction:column;gap:6px;min-width:0}
-.pj-exec-info .pj-field{margin-top:4px;max-width:320px}
-.pj-model-line{font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:2px;word-break:break-word}
 .pj-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
 /* A thread card: icon in the gutter, then a title line, a one-line summary and
    optional chips. Two rows plus chips, and no controls at all — every action
@@ -389,11 +383,6 @@ window.__ModuleLoader__.load({
 .pj-thread-sub{grid-area:sub;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .pj-thread-chips{grid-area:chips;display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin-top:2px}
 .pj-chip{display:inline-flex;align-items:center;max-width:100%;height:18px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pj-task-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pj-task-body{font-size:13px;color:var(--dsw-alias-label-secondary);margin-top:6px;white-space:pre-wrap;word-break:break-word}
-.pj-task-foot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
-.pj-task-output{margin-top:8px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);font-size:12px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
-.pj-task-meta{font-size:12px;color:var(--dsw-alias-label-tertiary);margin-top:4px}
 .pj-pill{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
 .pj-pill-queued{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .pj-pill-running{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);color:var(--dsw-alias-state-business-primary)}
@@ -1279,6 +1268,29 @@ window.__ModuleLoader__.load({
       // late output shows up without reopening the task.
       const execTask = execTarget ? taskList.find((task) => task.id === execTarget.taskId) || null : null
       const execTitle = execTask?.title || execTarget?.title || ''
+      // The detail header's one secondary line: the model a dispatch would use
+      // right now (task override, else project default, else the host's own)
+      // and who runs it. The full route and its source stay in the tooltip.
+      const execEffective = execTask ? effectiveModel(project, execTask) : null
+      const execSourceKey =
+        execEffective?.source === 'task'
+          ? 'fromTask'
+          : execEffective?.source === 'project'
+            ? 'fromProject'
+            : 'fromHost'
+      const execMeta = execTask
+        ? [
+            execEffective.value ? modelLabel(catalog, execEffective.value) : t('fromHost'),
+            execTask.childName || '',
+          ]
+            .filter(Boolean)
+            .join(' · ')
+        : ''
+      const execMetaTitle = execTask
+        ? `${t('effectiveModel')}: ${
+            execEffective.value ? `${execEffective.value} · ${t(execSourceKey)}` : t('fromHost')
+          }`
+        : ''
 
       const createProject = () =>
         run(async () => {
@@ -1703,6 +1715,16 @@ window.__ModuleLoader__.load({
               h('h2', { className: 'pj-section-title' }, t('execution')),
             ),
             h('div', { className: 'pj-hint' }, t('executionHint')),
+            // Make the default that a dispatch would actually use explicit, so
+            // "which model do my workers run on" is answerable without opening a
+            // task.
+            h(
+              'div',
+              { className: 'pj-hint' },
+              `${t('effectiveModel')}: ${
+                project.model ? modelLabel(catalog, project.model) : t('modelDefault')
+              }`,
+            ),
             h(
               'div',
               { className: 'pj-row' },
@@ -2002,102 +2024,21 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // The detail page: read-only task state plus the human-only controls, with
-      // the executor conversation below. Resolve is the icon button in the
-      // top-right corner; approval stays here; deletion lives in the row menu.
-      const renderTaskDetail = (task) => {
-        const effective = effectiveModel(project, task)
-        const sourceKey =
-          effective.source === 'task'
-            ? 'fromTask'
-            : effective.source === 'project'
-              ? 'fromProject'
-              : 'fromHost'
-        return h(
+      // The detail page is a conversation, not a form: the task brief opens it
+      // as the message the coordinator sent, and the executor's own Session
+      // follows in the same Chat view the main conversation renders. That view
+      // owns the work-details policy, so `ui-chat`'s transcriptView /
+      // collapseTiming / foldedReplies already apply here unchanged — the page
+      // must not draw its own transcript. State, resolve and approval live in
+      // the column header; deletion lives in the row menu.
+      const renderTaskDetail = (task) =>
+        h(
           'div',
           { className: 'pj-exec-detail' },
           h(
             'div',
-            { className: 'pj-exec-info' },
-            h(
-              'div',
-              { className: 'pj-task-head' },
-              h('span', { className: 'pj-label' }, t('status')),
-              h(StatusPill, { status: task.status, t }),
-              task.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
-              task.resolved && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
-              h('span', { className: 'pj-spacer' }),
-              h(
-                'button',
-                {
-                  className: `pj-icon-btn${task.resolved ? ' pj-on' : ''}`,
-                  type: 'button',
-                  disabled: busy,
-                  title: task.resolved ? t('unresolve') : t('resolve'),
-                  'aria-label': task.resolved ? t('unresolve') : t('resolve'),
-                  'aria-pressed': task.resolved ? 'true' : 'false',
-                  onClick: () => void toggleResolved(task),
-                },
-                h(ResolveIcon, { done: Boolean(task.resolved) }),
-              ),
-            ),
-            task.childName && h('div', { className: 'pj-task-meta' }, `${t('worker')}: ${task.childName}`),
-            h('div', { className: 'pj-task-meta' }, t('effectiveModel')),
-            h(
-              'div',
-              { className: 'pj-model-line' },
-              effective.value
-                ? `${modelLabel(catalog, effective.value)} · ${t(sourceKey)}`
-                : t('fromHost'),
-            ),
-            h('div', { className: 'pj-task-meta' }, t('taskModel')),
-            h(
-              'div',
-              { className: 'pj-field' },
-              h(
-                'span',
-                { className: 'pj-select-wrap' },
-                h(
-                  'select',
-                  {
-                    className: 'pj-select',
-                    'aria-label': t('taskModel'),
-                    value: task.model || '',
-                    // The page's task PATCH only accepts `resolved`, so a
-                    // task-level route is the coordinator's to set. The control
-                    // stays visible and read-only rather than pretending to save.
-                    disabled: true,
-                    title: t('taskModelReadonly'),
-                  },
-                  h('option', { value: '' }, t('modelInheritProject')),
-                  ...catalogOptions(catalog, 'models', task.model),
-                ),
-                h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
-              ),
-              h('span', { className: 'pj-hint' }, t('taskModelReadonly')),
-            ),
-            h('div', { className: 'pj-task-meta' }, t('brief')),
-            h('div', { className: 'pj-task-body' }, task.brief || t('noBrief')),
-            h('div', { className: 'pj-task-meta' }, t('output')),
-            h('div', { className: 'pj-task-output' }, task.output || t('noOutput')),
-            task.stopReason && h('div', { className: 'pj-task-meta' }, `${t('stopReason')}: ${task.stopReason}`),
-            project.autonomy === 'manual' &&
-              !task.approved &&
-              task.status !== 'running' &&
-              h(
-                'div',
-                { className: 'pj-task-foot' },
-                h(
-                  'button',
-                  {
-                    className: 'pj-btn',
-                    type: 'button',
-                    disabled: busy || project.archived,
-                    onClick: () => void approveTask(task),
-                  },
-                  t('approve'),
-                ),
-              ),
+            { className: 'pj-msg', 'aria-label': t('brief') },
+            h('div', { className: 'pj-msg-bubble' }, task.brief || t('noBrief')),
           ),
           execTarget && execTarget.reference
             ? h(
@@ -2113,7 +2054,6 @@ window.__ModuleLoader__.load({
               )
             : h('div', { className: 'pj-empty' }, t('noConversation')),
         )
-      }
 
       // Five fixed groups, in reference order. A resolved task always lands in
       // `Resolved`, whatever its system state is. The search box filters on the
@@ -2401,27 +2341,73 @@ window.__ModuleLoader__.load({
             { className: 'pj-exec-head' },
             execTarget
               ? h(
-                  'button',
-                  { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: () => setExecTarget(null) },
-                  `← ${t('threads')}`,
+                  'div',
+                  { className: 'pj-detail-head' },
+                  h(
+                    'div',
+                    { className: 'pj-detail-row' },
+                    h(
+                      'button',
+                      { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: () => setExecTarget(null) },
+                      `← ${t('threads')}`,
+                    ),
+                    h('span', { className: 'pj-exec-task', title: execTitle }, shortTitle(execTitle)),
+                    h('span', { className: 'pj-spacer' }),
+                    execTask && h(StatusPill, { status: execTask.status, t }),
+                    execTask &&
+                      h(
+                        'button',
+                        {
+                          className: `pj-icon-btn${execTask.resolved ? ' pj-on' : ''}`,
+                          type: 'button',
+                          disabled: busy,
+                          title: execTask.resolved ? t('unresolve') : t('resolve'),
+                          'aria-label': execTask.resolved ? t('unresolve') : t('resolve'),
+                          'aria-pressed': execTask.resolved ? 'true' : 'false',
+                          onClick: () => void toggleResolved(execTask),
+                        },
+                        h(ResolveIcon, { done: Boolean(execTask.resolved) }),
+                      ),
+                    execTask &&
+                      project &&
+                      project.autonomy === 'manual' &&
+                      !execTask.approved &&
+                      execTask.status !== 'running' &&
+                      h(
+                        'button',
+                        {
+                          className: 'pj-btn',
+                          type: 'button',
+                          disabled: busy || project.archived,
+                          onClick: () => void approveTask(execTask),
+                        },
+                        t('approve'),
+                      ),
+                  ),
+                  (execTask || execTarget.sessionId) &&
+                    h(
+                      'div',
+                      { className: 'pj-detail-meta' },
+                      execMeta &&
+                        h('span', { className: 'pj-detail-meta-text', title: execMetaTitle }, execMeta),
+                      execTask?.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
+                      execTask?.resolved && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
+                      h('span', { className: 'pj-spacer' }),
+                      execTarget.sessionId &&
+                        h(
+                          'button',
+                          {
+                            className: 'pj-btn pj-btn-ghost',
+                            type: 'button',
+                            onClick: () => openInWorkspace(execTarget.sessionId),
+                          },
+                          t('openInWorkspace'),
+                        ),
+                    ),
                 )
               : h('h2', { className: 'pj-exec-title' }, t('threads')),
             execTarget
-              ? h(
-                  'div',
-                  { className: 'pj-actions' },
-                  h('span', { className: 'pj-exec-task', title: execTitle }, shortTitle(execTitle)),
-                  execTarget.sessionId &&
-                    h(
-                      'button',
-                      {
-                        className: 'pj-btn pj-btn-ghost',
-                        type: 'button',
-                        onClick: () => openInWorkspace(execTarget.sessionId),
-                      },
-                      t('openInWorkspace'),
-                    ),
-                )
+              ? null
               : h(
                   'div',
                   { className: 'pj-actions' },

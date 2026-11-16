@@ -138,9 +138,17 @@ test('both dictionaries carry the same keys and no add-task surface', () => {
   assert.match(zh.emptyTasks, /协调者/)
 
   // The resolve control and the detail labels exist in both languages.
-  for (const key of ['resolve', 'unresolve', 'resolvedBadge', 'brief', 'output', 'noBrief', 'noTask']) {
+  for (const key of ['resolve', 'unresolve', 'resolvedBadge', 'brief', 'noBrief', 'noTask']) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+
+  // The detail page became a conversation, so the field-form labels it used to
+  // stack (`output` / `stopReason` / the read-only task-model picker) are gone
+  // rather than left behind as dead keys.
+  for (const retired of ['output', 'noOutput', 'stopReason', 'taskModel', 'taskModelReadonly', 'modelInheritProject']) {
+    assert.equal(retired in en, false, `EN still has ${retired}`)
+    assert.equal(retired in zh, false, `ZH still has ${retired}`)
   }
 
   // The Threads panel labels exist in both languages, and the old column title
@@ -231,25 +239,31 @@ test('the task list is a read-only row and status is never written', () => {
     'the card nests no control',
   )
 
-  // The detail page never offers a status picker, and it no longer carries the
-  // resolve/delete controls at the bottom: resolve moved to the top-right icon
-  // button and deletion lives only in the row context menu.
+  // The detail page is a conversation, not a field form: the brief opens it as
+  // the message the coordinator sent and the executor Session follows. No
+  // picker, and no labelled output/stopReason blocks.
   const detail = source.slice(rowEnd, source.indexOf('const groups =', rowEnd))
-  // The only select in the detail pane is the read-only task-model picker.
-  // There is no status picker: status stays system-owned.
-  const selects = [...detail.matchAll(/h\(\s*'select'/g)]
-  assert.equal(selects.length, 1, 'the detail pane has exactly one select')
-  assert.match(detail, /value: task\.model \|\| ''[\s\S]{0,400}disabled: true/)
-  assert.doesNotMatch(detail, /patchTask\([^)]*model/)
-  assert.match(detail, /task\.brief/)
-  assert.match(detail, /task\.output/)
-  assert.match(detail, /toggleResolved/)
-  assert.match(detail, /t\('approve'\)/)
-  assert.match(detail, /t\('approvedBadge'\)/)
-  assert.match(detail, /ResolveIcon/)
-  assert.match(detail, /aria-pressed/)
+  assert.doesNotMatch(detail, /h\(\s*'select'/, 'the detail pane has no picker at all')
+  assert.doesNotMatch(detail, /task\.output|task\.stopReason/, 'no field dump of the result')
+  assert.doesNotMatch(detail, /t\('output'\)|t\('stopReason'\)|t\('taskModel'\)/)
+  assert.match(detail, /className: 'pj-msg'/)
+  assert.match(detail, /task\.brief \|\| t\('noBrief'\)/)
+  assert.match(detail, /className: 'pj-chat-body'/)
+  assert.match(detail, /renderSlot\('projects\.conversation'/)
   assert.doesNotMatch(detail, /deleteTask/)
   assert.doesNotMatch(detail, /t\('deleteConfirm'\)/)
+
+  // The human controls moved up into the column header: the status pill, the
+  // resolve icon button and the manual-mode approval gate.
+  const header = source.slice(source.indexOf('const groups =', rowEnd))
+  assert.match(header, /StatusPill/)
+  assert.match(header, /toggleResolved\(execTask\)/)
+  assert.match(header, /ResolveIcon/)
+  assert.match(header, /aria-pressed/)
+  assert.match(header, /t\('approve'\)/)
+  assert.match(header, /approveTask\(execTask\)/)
+  assert.match(header, /t\('approvedBadge'\)/)
+  assert.match(header, /t\('resolvedBadge'\)/)
 })
 
 test('the row context menu owns resolve and delete', () => {
@@ -334,17 +348,21 @@ test('the detail column is a plain flex stack with no overlap', () => {
   // The percentage cap that let the info pane and the conversation collide is
   // gone; the info pane shrinks and scrolls, the conversation keeps a floor.
   assert.doesNotMatch(source, /max-height:52%/)
-  assert.match(source, /\.pj-exec-info\{flex:0 1 auto;min-height:0;overflow:auto/)
   assert.match(source, /\.pj-exec-detail\{[^}]*display:flex[^}]*flex-direction:column[^}]*overflow:hidden/)
   assert.match(source, /\.pj-exec-detail > \.pj-chat-body\{flex:1 1 0;min-height:140px\}/)
   // The conversation gets a positioned ancestor, so its own layers stay inside.
   assert.match(source, /\.pj-chat-body\{position:relative/)
 
+  // The brief strip is a shrinking flex row capped by a share of the column, so
+  // the conversation keeps its floor and neither half can paint over the other.
+  assert.match(source, /\.pj-msg\{display:flex[^}]*flex:0 0 auto[^}]*max-height:38%[^}]*overflow:auto/)
+  assert.doesNotMatch(source, /\.pj-exec-info\{/, 'the field pane is gone')
+
   // Both halves are direct children of the detail column: no absolute layer.
   const detailStart = source.indexOf('const renderTaskDetail')
   const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
   assert.doesNotMatch(detail, /position: 'absolute'/)
-  assert.match(detail, /className: 'pj-exec-info'/)
+  assert.match(detail, /className: 'pj-msg'/)
   assert.match(detail, /className: 'pj-chat-body'/)
 })
 
@@ -526,16 +544,24 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
   assert.match(settings, /defaultValue: project\.agentPreset \|\| ''/)
   assert.match(settings, /t\('presetFreeTextHint'\)/)
 
-  // Detail page: the effective route and its source, plus a read-only override.
+  // The settings section states the default a dispatch would use right now.
+  assert.match(settings, /t\('effectiveModel'\)/)
+  assert.match(settings, /project\.model \? modelLabel\(catalog, project\.model\) : t\('modelDefault'\)/)
+
+  // Detail page: the effective route and its source are the header's one
+  // secondary line. The read-only task-model picker went with the field form.
   const detailStart = source.indexOf('const renderTaskDetail')
   const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
-  assert.match(detail, /effectiveModel\(project, task\)/)
-  assert.match(detail, /t\('effectiveModel'\)/)
-  assert.match(detail, /effective\.source === 'task'[\s\S]{0,80}'fromTask'/)
-  assert.match(detail, /'fromProject'/)
-  assert.match(detail, /t\('fromHost'\)/)
-  assert.match(detail, /t\('taskModelReadonly'\)/)
-  assert.match(detail, /h\('option', \{ value: '' \}, t\('modelInheritProject'\)\)/)
+  assert.doesNotMatch(detail, /h\(\s*'select'/, 'no picker in the conversation view')
+  assert.doesNotMatch(detail, /taskModel|modelInheritProject/)
+  const headerStart = source.indexOf('const execEffective')
+  const header = source.slice(headerStart, source.indexOf('renderTaskMenu()', headerStart))
+  assert.match(header, /effectiveModel\(project, execTask\)/)
+  assert.match(header, /t\('effectiveModel'\)/)
+  assert.match(header, /execEffective\?\.source === 'task'[\s\S]{0,80}'fromTask'/)
+  assert.match(header, /'fromProject'/)
+  assert.match(header, /t\('fromHost'\)/)
+  assert.match(header, /execMeta/)
 
   // Precedence is task > project > host, and an unknown stored route is kept
   // visible instead of silently dropped by the picker.
@@ -557,7 +583,6 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
     'model',
     'agentPreset',
     'modelDefault',
-    'modelInheritProject',
     'modelRoutePlaceholder',
     'modelFreeTextHint',
     'presetFreeTextHint',
@@ -565,8 +590,6 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
     'fromTask',
     'fromProject',
     'fromHost',
-    'taskModel',
-    'taskModelReadonly',
   ]) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
@@ -637,15 +660,17 @@ test('the controls copy the Host primitives instead of importing them', () => {
   assert.match(select, /\.pj-select\{[^}]*height:34px/)
   assert.match(select, /\.pj-select-chevron\{[^}]*width:12px;height:12px/)
   assert.match(select, /color:var\(--dsw-alias-menu-icon\)/)
+  // Three pickers remain: autonomy, model and agent preset. The fourth was the
+  // read-only task-model control, retired with the detail field form.
   assert.equal(
     [...source.matchAll(/className: 'pj-select-wrap'/g)].length,
-    4,
-    'all four pickers are wrapped',
+    3,
+    'all three pickers are wrapped',
   )
   assert.equal(
     [...source.matchAll(/className: 'pj-select-chevron'/g)].length,
-    4,
-    'all four pickers draw the caret',
+    3,
+    'all three pickers draw the caret',
   )
 
   // Form fields and section rhythm follow the Host settings form.
@@ -654,4 +679,57 @@ test('the controls copy the Host primitives instead of importing them', () => {
   assert.match(source, /\.pj-label\{font-size:13px;font-weight:500/)
   assert.match(source, /\.pj-section\{padding:12px 0\}/)
   assert.match(source, /\.pj-section\+\.pj-section\{border-top:\.5px solid var\(--dsw-alias-border-l2\)\}/)
+})
+
+test('the detail page is a conversation that reuses the Host Chat view', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The page never registers its own Conversation or view: it renders the Host
+  // factory, which resolves `conversation.view` to the Host's ChatView. That
+  // view owns the work-details policy, so `ui-chat`'s transcriptView /
+  // collapseTiming / foldedReplies already drive the embedded worker
+  // conversation exactly as they drive the main one. Duplicating them here
+  // would fork the transcript, so the page must not mention them at all.
+  // Comments may name the policy; code must not touch it.
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert.doesNotMatch(code, /transcriptView|collapseTiming|foldedReplies/)
+  assert.doesNotMatch(code, /configForms|'ui-chat'/)
+  assert.doesNotMatch(code, /name: 'conversation\.(content|view|session)'/)
+  assert.match(source, /renderFactorySlot\(\s*'conversation\.content'/)
+  assert.match(source, /slots: \{ views: FixedChatView \}/)
+  // FixedChatView only pins the view id; the Host still draws the view.
+  assert.match(
+    source,
+    /function FixedChatView\(props\) \{[\s\S]{0,200}renderSlot\('conversation\.session', \{ view: 'chat' \}\)/,
+  )
+
+  // The detail body is the brief message followed by the conversation, and
+  // nothing else: no labelled output / stopReason block and no picker.
+  const detailStart = source.indexOf('const renderTaskDetail')
+  const detail = source.slice(detailStart, source.indexOf('const groups =', detailStart))
+  assert.match(detail, /className: 'pj-exec-detail'/)
+  assert.ok(
+    detail.indexOf("className: 'pj-msg'") < detail.indexOf("className: 'pj-chat-body'"),
+    'the brief message comes before the conversation',
+  )
+  assert.match(detail, /'aria-label': t\('brief'\)/)
+  assert.match(detail, /task\.brief \|\| t\('noBrief'\)/)
+  assert.match(detail, /renderSlot\('projects\.conversation'/)
+  assert.doesNotMatch(detail, /pj-task-output|pj-task-meta|pj-task-head|pj-task-foot/)
+  assert.doesNotMatch(detail, /h\(\s*'select'/)
+  assert.doesNotMatch(detail, /task\.output|task\.stopReason/)
+
+  // The header owns the state: a status pill, the resolve icon, the approval
+  // gate, and one secondary line naming the effective model and the executor.
+  const headerStart = source.indexOf('const execEffective')
+  const header = source.slice(headerStart, source.indexOf('renderTaskMenu()', headerStart))
+  assert.match(header, /className: 'pj-detail-head'/)
+  assert.match(header, /className: 'pj-detail-row'/)
+  assert.match(header, /StatusPill/)
+  assert.match(header, /className: 'pj-detail-meta'/)
+  assert.match(header, /className: 'pj-detail-meta-text'/)
+  assert.match(header, /execTask\.childName/)
+  assert.match(header, /t\('openInWorkspace'\)/)
+  assert.match(header, /toggleResolved\(execTask\)/)
+  assert.match(header, /approveTask\(execTask\)/)
 })

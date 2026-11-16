@@ -316,6 +316,30 @@ function inkBox(d, strokeWidth = 0) {
   return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY }
 }
 
+/**
+ * The boxes an icon file actually draws, so a static asset can be measured
+ * instead of eyeballed. Rects come straight from their attributes; paths go
+ * through `inkBox`, which flattens curves.
+ */
+function shapeBoxes(svg) {
+  const boxes = []
+  for (const match of svg.matchAll(/<(rect|path)\b([^>]*?)\/?>/g)) {
+    const attrs = Object.fromEntries(
+      [...match[2].matchAll(/([\w-]+)="([^"]*)"/g)].map((pair) => [pair[1], pair[2]]),
+    )
+    if (match[1] === 'rect') {
+      const x = Number(attrs.x ?? 0)
+      const y = Number(attrs.y ?? 0)
+      const width = Number(attrs.width)
+      const height = Number(attrs.height)
+      boxes.push({ minX: x, maxX: x + width, minY: y, maxY: y + height, width, height })
+    } else {
+      boxes.push(inkBox(attrs.d, Number(attrs['stroke-width'] ?? 0)))
+    }
+  }
+  return boxes
+}
+
 test('the sidebar icon is a card stack that fills its 24 grid', () => {
   const { registrations } = applyWithFakes()
   const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
@@ -425,27 +449,68 @@ test('the sidebar icon is a card stack that fills its 24 grid', () => {
   assert.doesNotMatch(block, /\brgba?\(|\bhsla?\(/)
 })
 
-test('the market icon draws the same card stack in a neutral colour', () => {
+test('the market icon is a coloured 36-grid card stack, like the host plugin icons', () => {
   const svg = readFileSync(new URL('../icon.svg', import.meta.url), 'utf8')
-  assert.match(svg, /viewBox="0 0 24 24"/)
 
-  // One source of truth: the static asset repeats the sidebar glyph's paths.
-  const { registrations } = applyWithFakes()
-  const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
-  const icon = sidebar.component({ size: 18 })
-  const ds = [...svg.matchAll(/\bd="([^"]+)"/g)].map((match) => match[1])
-  assert.deepEqual(ds, icon.children.map((child) => child.props.d))
+  // The market draws this file as <img width="36" height="36"> with
+  // object-fit: contain, so a 36 grid renders 1:1 — the same grid every host
+  // plugin icon uses. The old 24 grid was drawn up to 36 and looked small.
+  assert.match(svg, /viewBox="0 0 36 36"/)
+  assert.match(svg, /\bwidth="36"/)
+  assert.match(svg, /\bheight="36"/)
 
-  // A static image needs a literal colour, but a neutral one: the retired
-  // #5B8DEF blue clashed with the currentColor strokes around the sidebar.
-  const colours = [...new Set([...svg.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((match) => match[0].toUpperCase()))]
-  assert.deepEqual(colours, ['#81858C'])
+  // Coloured fills instead of one neutral stroke: the retired #81858C grey read
+  // as smaller and duller than the accent-coloured icons it sits beside. The
+  // sidebar glyph stays stroke-only and currentColor, so the two assets are
+  // deliberately not the same drawing anymore.
+  const fills = [...svg.matchAll(/\bfill="([^"]+)"/g)].map((match) => match[1])
+  assert.ok(
+    fills.some((fill) => fill !== 'none'),
+    `at least one shape is filled, got ${JSON.stringify(fills)}`,
+  )
+  assert.match(svg, /\bfill="#[0-9a-fA-F]{6}"/, 'a literal host colour fills the glyph')
+  assert.doesNotMatch(svg, /#81858C/i, 'the retired neutral grey is gone')
+  assert.doesNotMatch(svg, /\bstroke=/, 'the market icon is solid fill, not an outline')
 
-  // Same weight as the live glyph, and no decoration.
-  const widths = [...svg.matchAll(/stroke-width="([\d.]+)"/g)].map((match) => Number(match[1]))
-  assert.deepEqual(widths, [1.8, 1.8, 1.8])
-  assert.doesNotMatch(svg, /gradient|filter|shadow|opacity/i)
-  assert.equal([...svg.matchAll(/fill="/g)].length, 1, 'only the root fill="none"')
+  // Three stacked shapes: short rule, long rule, then the card body.
+  const shapes = shapeBoxes(svg)
+  assert.equal(shapes.length, 3, 'two rules over one card body')
+  const [topRule, bottomRule, card] = shapes
+  assert.ok(topRule.maxY < bottomRule.minY, 'the two rules do not touch')
+  assert.ok(bottomRule.maxY < card.minY, 'the bottom rule clears the card')
+  for (const box of shapes) {
+    const centre = (box.minX + box.maxX) / 2
+    assert.ok(Math.abs(centre - 18) < 0.01, `glyph is centred on x=18, got ${centre}`)
+  }
+  assert.ok(
+    topRule.width < bottomRule.width && bottomRule.width < card.width,
+    'short rule over long rule over the wider card',
+  )
+  const gapAbove = bottomRule.minY - topRule.maxY
+  const gapBelow = card.minY - bottomRule.maxY
+  assert.ok(Math.abs(gapAbove - gapBelow) < 0.01, `even spacing: ${gapAbove} vs ${gapBelow}`)
+
+  // Content lives in the host's 6..30 safe area: 24 of 36 units, so the glyph
+  // fills 67% of its box and keeps the same optical size as its neighbours.
+  const ink = {
+    minX: Math.min(...shapes.map((box) => box.minX)),
+    maxX: Math.max(...shapes.map((box) => box.maxX)),
+    minY: Math.min(...shapes.map((box) => box.minY)),
+    maxY: Math.max(...shapes.map((box) => box.maxY)),
+  }
+  assert.ok(ink.minX >= 6 && ink.maxX <= 30, `x ink ${ink.minX}..${ink.maxX} stays in 6..30`)
+  assert.ok(ink.minY >= 6 && ink.maxY <= 30, `y ink ${ink.minY}..${ink.maxY} stays in 6..30`)
+  for (const [axis, fill] of [
+    ['x', (ink.maxX - ink.minX) / 36],
+    ['y', (ink.maxY - ink.minY) / 36],
+  ]) {
+    assert.ok(fill >= 0.62 && fill <= 0.72, `${axis} fill ${fill.toFixed(3)} lands near 0.67`)
+  }
+
+  // No decoration: a flat two-tone glyph, at most one gradient as the host does.
+  assert.doesNotMatch(svg, /filter|box-shadow|animation|@keyframes|<animate/i)
+  const gradients = [...svg.matchAll(/<linearGradient\b/g)].length
+  assert.ok(gradients <= 1, `at most one gradient, got ${gradients}`)
 })
 
 test('both dictionaries carry the same keys and no add-task surface', () => {

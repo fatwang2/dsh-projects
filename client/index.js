@@ -76,6 +76,16 @@ window.__ModuleLoader__.load({
       unresolve: 'Unresolve',
       resolvedBadge: 'Resolved',
       deleteConfirm: 'Confirm delete',
+      deleteOnlyTask: 'Delete task only',
+      deleteOnlyTaskHint: 'The executor session is kept.',
+      deleteAndArchive: 'Delete and archive session',
+      archiveSessionHint:
+        'Archives the executor session: it leaves the sidebar and will not run again. No disk space is freed.',
+      archiveSessionTitle:
+        'Archives the executor session — it is not deleted. No disk space is freed; it only leaves the sidebar.',
+      deleteArchived: 'Task deleted, session archived.',
+      archiveRunning: 'The executor is still running. Wait for it to finish first.',
+      archiveParamRejected: 'The archive request was rejected, so the task was not deleted:',
       switchDiscard: 'Discard unsaved changes and switch projects?',
       archivedHint: 'This project is archived. Unarchive it to dispatch tasks.',
       worker: 'worker',
@@ -197,6 +207,14 @@ window.__ModuleLoader__.load({
       unresolve: '取消解决',
       resolvedBadge: '已解决',
       deleteConfirm: '确认删除',
+      deleteOnlyTask: '只删任务',
+      deleteOnlyTaskHint: '执行者会话保留。',
+      deleteAndArchive: '删除并归档会话',
+      archiveSessionHint: '会归档执行者会话：不再出现在侧栏、不再运行；不释放磁盘空间。',
+      archiveSessionTitle: '归档执行者会话，不会删除它；不释放磁盘空间，只是不再出现在侧栏。',
+      deleteArchived: '任务已删除，会话已归档。',
+      archiveRunning: '执行者仍在运行，请先等它结束。',
+      archiveParamRejected: '归档参数被拒绝，任务未删除：',
       switchDiscard: '放弃未保存的修改并切换项目？',
       archivedHint: '项目已归档，取消归档后才能派发任务。',
       worker: '执行者',
@@ -415,6 +433,12 @@ window.__ModuleLoader__.load({
 .pj-menu-icon{display:inline-flex;flex:none;align-items:center;justify-content:center;width:14px;height:14px;color:var(--dsw-alias-menu-icon)}
 .pj-menu-icon svg{width:14px;height:14px}
 .pj-menu-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The delete confirmation's caption and its two-line rows: the action on the
+   first line, the plain-language consequence under it. */
+.pj-menu-caption{padding:4px 8px 2px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.pj-menu-text{display:flex;flex-direction:column;flex:1;min-width:0;gap:2px}
+.pj-menu-text .pj-menu-label{flex:none;white-space:nowrap}
+.pj-menu-hint{font-size:11px;line-height:15px;color:var(--dsw-alias-label-secondary);white-space:normal}
 .pj-menu-separator{height:.5px;margin:3px 8px;background:var(--dsw-alias-border-l2)}
 .pj-menu-item.pj-danger{color:var(--dsw-alias-state-error-primary)}
 .pj-menu-item.pj-danger .pj-menu-icon{color:var(--dsw-alias-state-error-primary)}
@@ -525,8 +549,34 @@ ${SHARED_CSS}${DISPATCH_RULES}
       } catch {
         payload = {}
       }
-      if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`)
+      if (!response.ok) {
+        const failure = new Error(payload?.error || `HTTP ${response.status}`)
+        // The status has to survive the throw: the delete confirmation tells a
+        // running worker (409) apart from a rejected request (400), and neither
+        // may be reported as a plain failure.
+        failure.status = response.status
+        throw failure
+      }
       return payload
+    }
+
+    /**
+     * The delete confirmation's failure text. A 409 on the archive call means the
+     * worker is still running (the Host refuses to archive a live session) and a
+     * 400 means the request itself was wrong; both leave the task on the board,
+     * so neither may be swallowed into a generic message.
+     */
+    function taskDeleteFailure(failure, t, archive) {
+      const status = failure && failure.status
+      const detail = messageOf(failure)
+      if (archive && status === 409) {
+        // The Host answers 409 for a live worker and, in a corner case, for the
+        // coordinator's own session. Only the first one is a "wait" message;
+        // the second keeps the Host's wording rather than claiming a worker.
+        return /still running/i.test(detail) ? t('archiveRunning') : detail
+      }
+      if (archive && status === 400) return `${t('archiveParamRejected')} ${detail}`
+      return detail
     }
 
     // ---------------------------------------------------------------------
@@ -2187,12 +2237,27 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return ''
         })
 
-      const deleteTask = (taskId) =>
+      // The Host deletes the task row; the executor session is a separate,
+      // archive-only resource (`?session=archive`). DSH has no session delete at
+      // all, so the page never asks for one and the archive action says so. A
+      // failure leaves the task on the board: the refresh only runs after the
+      // Host has answered 200.
+      const deleteTask = (taskId, options) =>
         run(async () => {
-          await api(`/projects/${projectId}/tasks/${taskId}`, { method: 'DELETE' })
+          const archive = Boolean(options && options.archive)
+          const query = archive ? '?session=archive' : ''
+          let data
+          try {
+            data = await api(`/projects/${projectId}/tasks/${taskId}${query}`, { method: 'DELETE' })
+          } catch (failure) {
+            throw new Error(taskDeleteFailure(failure, t, archive))
+          }
           if (execTarget && execTarget.taskId === taskId) setExecTarget(null)
           await refresh(projectId)
-          return t('deleted')
+          // The Host answers `archived: false` when the session was already gone,
+          // so the notice only claims an archive when one actually happened.
+          const archived = Boolean(data && data.session && data.session.archived)
+          return archive && archived ? t('deleteArchived') : t('deleted')
         })
 
       // -------------------------------------------------------------------
@@ -2799,11 +2864,48 @@ ${SHARED_CSS}${DISPATCH_RULES}
       // pointer position and the effect above clamps it into the viewport.
       // Rows carry a 14px icon seat and a hairline separator before the danger
       // action, and the arrow keys move focus between them.
+      //
+      // The delete action is two-stage. The second stage is a confirmation with
+      // two explicit actions instead of a checkbox: a checked box is easy to
+      // miss, and archiving the executor session has to be read before it is
+      // chosen. Archiving is the only session operation DSH supports — it never
+      // deletes a session — so the hint says what it does and does not do.
       const renderTaskMenu = () => {
         if (!menu) return null
         const task = taskList.find((entry) => entry.id === menu.taskId)
         if (!task) return null
         const confirming = confirmDeleteId === task.id
+        // A task that never ran has no executor session, so there is nothing to
+        // archive and the second stage offers a single action.
+        const canArchive = Boolean(task.childSessionId)
+        const armDelete = () => {
+          setConfirmDeleteId(task.id)
+          confirmDeleteAt.current = Date.now()
+          setTimeout(() => {
+            setConfirmDeleteId((current) => (current === task.id ? null : current))
+          }, 3000)
+        }
+        // A double-click cannot confirm itself: the second press only counts
+        // once the arm has settled, and a press that arrives too early re-arms.
+        const settled = () => Date.now() - confirmDeleteAt.current > 600
+        const confirmDelete = () => {
+          if (!settled()) {
+            confirmDeleteAt.current = Date.now()
+            return
+          }
+          setConfirmDeleteId(null)
+          setMenu(null)
+          void deleteTask(task.id)
+        }
+        const confirmArchive = () => {
+          if (!settled()) {
+            confirmDeleteAt.current = Date.now()
+            return
+          }
+          setConfirmDeleteId(null)
+          setMenu(null)
+          void deleteTask(task.id, { archive: true })
+        }
         const entries = [
           {
             key: 'resolve',
@@ -2815,31 +2917,46 @@ ${SHARED_CSS}${DISPATCH_RULES}
             },
           },
           { key: 'separator', separator: true },
-          {
-            key: 'delete',
-            danger: true,
-            icon: h(TrashIcon, null),
-            label: confirming ? t('deleteConfirm') : t('delete'),
-            onSelect: () => {
-              // Two-stage delete, moved here from the detail page: the second
-              // click only counts once the arm has settled, so a double-click
-              // cannot confirm itself.
-              if (confirming && Date.now() - confirmDeleteAt.current > 600) {
-                setConfirmDeleteId(null)
-                setMenu(null)
-                void deleteTask(task.id)
-                return
-              }
-              setConfirmDeleteId(task.id)
-              confirmDeleteAt.current = Date.now()
-              setTimeout(() => {
-                setConfirmDeleteId((current) => (current === task.id ? null : current))
-              }, 3000)
-            },
-          },
+          ...(confirming
+            ? [
+                { key: 'confirm', caption: t('deleteConfirm') },
+                {
+                  key: 'delete',
+                  danger: true,
+                  icon: h(TrashIcon, null),
+                  label: t('deleteOnlyTask'),
+                  hint: t('deleteOnlyTaskHint'),
+                  describedBy: 'pj-delete-only-hint',
+                  onSelect: confirmDelete,
+                },
+                ...(canArchive
+                  ? [
+                      {
+                        key: 'archive',
+                        icon: h(ArchiveIcon, null),
+                        label: t('deleteAndArchive'),
+                        hint: t('archiveSessionHint'),
+                        title: t('archiveSessionTitle'),
+                        describedBy: 'pj-archive-session-hint',
+                        onSelect: confirmArchive,
+                      },
+                    ]
+                  : []),
+              ]
+            : [
+                {
+                  key: 'delete',
+                  danger: true,
+                  icon: h(TrashIcon, null),
+                  label: t('delete'),
+                  onSelect: armDelete,
+                },
+              ]),
         ]
         let row = -1
-        const rows = entries.map((entry) => (entry.separator ? entry : { ...entry, index: (row += 1) }))
+        const rows = entries.map((entry) =>
+          entry.separator || entry.caption ? entry : { ...entry, index: (row += 1) },
+        )
         const count = row + 1
         return h(
           'div',
@@ -2871,23 +2988,39 @@ ${SHARED_CSS}${DISPATCH_RULES}
           ...rows.map((entry) =>
             entry.separator
               ? h('div', { key: entry.key, className: 'pj-menu-separator', role: 'separator' })
-              : h(
-                  'button',
-                  {
-                    key: entry.key,
-                    ref: (node) => {
-                      menuItemRefs.current[entry.index] = node
+              : entry.caption
+                ? h('div', { key: entry.key, className: 'pj-menu-caption', role: 'presentation' }, entry.caption)
+                : h(
+                    'button',
+                    {
+                      key: entry.key,
+                      ref: (node) => {
+                        menuItemRefs.current[entry.index] = node
+                      },
+                      className: `pj-menu-item${entry.danger ? ' pj-danger' : ''}`,
+                      type: 'button',
+                      role: 'menuitem',
+                      tabIndex: -1,
+                      title: entry.title,
+                      // The hint is the description, not part of the name: a
+                      // screen reader announces the action, then why.
+                      'aria-label': entry.hint ? entry.label : undefined,
+                      'aria-describedby': entry.describedBy,
+                      disabled: busy,
+                      onMouseEnter: () => setMenuIndex(entry.index),
+                      onClick: entry.onSelect,
                     },
-                    className: `pj-menu-item${entry.danger ? ' pj-danger' : ''}`,
-                    type: 'button',
-                    role: 'menuitem',
-                    tabIndex: -1,
-                    disabled: busy,
-                    onMouseEnter: () => setMenuIndex(entry.index),
-                    onClick: entry.onSelect,
-                  },
                   h('span', { className: 'pj-menu-icon', 'aria-hidden': true }, entry.icon),
-                  h('span', { className: 'pj-menu-label' }, entry.label),
+                  // A row with a hint gets a two-line text column: the action,
+                  // then the honest one-liner under it.
+                  entry.hint
+                    ? h(
+                        'span',
+                        { className: 'pj-menu-text' },
+                        h('span', { className: 'pj-menu-label' }, entry.label),
+                        h('span', { className: 'pj-menu-hint', id: entry.describedBy }, entry.hint),
+                      )
+                    : h('span', { className: 'pj-menu-label' }, entry.label),
                 ),
           ),
         )

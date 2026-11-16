@@ -673,10 +673,13 @@ test('the row context menu owns resolve and delete', () => {
   assert.match(menu, /role: 'menu'/)
   assert.match(menu, /t\('resolve'\)/)
   assert.match(menu, /t\('unresolve'\)/)
-  assert.match(menu, /t\('deleteConfirm'\)/)
   assert.match(menu, /deleteTask\(task\.id\)/)
   assert.match(menu, /pj-menu-item[\s\S]{0,40}pj-danger/)
-  // Two-stage delete: the arm must settle before the second click confirms.
+  // Two-stage delete: the first press arms, and the second stage is a
+  // confirmation with two explicit actions (see the next test). The arm must
+  // settle before the second press confirms.
+  assert.match(menu, /caption: t\('deleteConfirm'\)/)
+  assert.match(menu, /label: t\('deleteOnlyTask'\)/)
   assert.match(menu, /Date\.now\(\) - confirmDeleteAt\.current > 600/)
 
   // Fixed positioning lives in the stylesheet, so the list's overflow cannot
@@ -699,6 +702,97 @@ test('the row context menu owns resolve and delete', () => {
   assert.match(source, /addEventListener\('resize'/)
   assert.match(source, /getBoundingClientRect/)
   assert.match(source, /clamp\(menu\.x, MENU_MARGIN/)
+})
+
+test('the delete confirmation offers archiving as an explicit second action', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+
+  // Both dictionaries carry the confirmation's wording. The archive action says
+  // what it does and, just as important, what it cannot do: DSH has no session
+  // delete at all, and archiving frees no disk space.
+  for (const key of [
+    'deleteConfirm',
+    'deleteOnlyTask',
+    'deleteOnlyTaskHint',
+    'deleteAndArchive',
+    'archiveSessionHint',
+    'archiveSessionTitle',
+    'deleteArchived',
+    'archiveRunning',
+    'archiveParamRejected',
+  ]) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+  assert.match(zh.deleteOnlyTask, /只删任务/)
+  assert.match(zh.deleteAndArchive, /归档/)
+  assert.match(zh.archiveSessionHint, /不释放磁盘空间/)
+  assert.match(zh.archiveSessionHint, /侧栏/)
+  assert.match(en.archiveSessionHint, /disk space/i)
+  assert.match(en.archiveSessionHint, /sidebar/i)
+  // The action never claims to delete a session: that is not a thing DSH does.
+  assert.doesNotMatch(zh.deleteAndArchive, /删除会话/)
+  assert.doesNotMatch(en.deleteAndArchive, /delete session/i)
+  assert.doesNotMatch(zh.archiveSessionTitle, /删除会话/)
+  assert.doesNotMatch(en.archiveSessionTitle, /delete the session/i)
+
+  const menuStart = source.indexOf('const renderTaskMenu')
+  const rowStart = source.indexOf('const renderTask = (task) =>')
+  assert.ok(menuStart > 0 && rowStart > menuStart, 'the menu renderer precedes the row')
+  const menu = source.slice(menuStart, rowStart)
+
+  // The second stage is a confirmation with two buttons, never a checkbox, and
+  // the archive action only exists when the task actually has a session.
+  assert.match(menu, /const canArchive = Boolean\(task\.childSessionId\)/)
+  assert.match(menu, /caption: t\('deleteConfirm'\)/)
+  assert.match(menu, /label: t\('deleteOnlyTask'\)/)
+  assert.match(menu, /canArchive[\s\S]{0,400}label: t\('deleteAndArchive'\)/)
+  assert.match(menu, /hint: t\('archiveSessionHint'\)/)
+  assert.match(menu, /title: t\('archiveSessionTitle'\)/)
+  assert.doesNotMatch(menu, /type: 'checkbox'|menuitemcheckbox/)
+  assert.match(source, /className: 'pj-menu-caption'/)
+  assert.match(source, /className: 'pj-menu-hint'/)
+
+  // Only the archive call names the parameter, and it is the supported spelling;
+  // the spellings the Host refuses are never sent.
+  const deleteStart = source.indexOf('const deleteTask = (taskId, options)')
+  const deleteEnd = source.indexOf('// ---', deleteStart)
+  assert.ok(deleteStart > 0 && deleteEnd > deleteStart, 'deleteTask was located')
+  const flow = source.slice(deleteStart, deleteEnd)
+  assert.match(flow, /const query = archive \? '\?session=archive' : ''/)
+  assert.match(flow, /tasks\/\$\{taskId\}\$\{query\}`/)
+  assert.match(flow, /method: 'DELETE'/)
+  for (const refused of ['session=1', 'session=true', 'session=delete', 'session=remove', 'session=yes']) {
+    assert.equal(source.includes(refused), false, `the page must never send ${refused}`)
+  }
+
+  // A 409 means the worker is still running and a 400 means the request was
+  // wrong; both are surfaced, and the board only reloads after a 200 so a
+  // failure leaves the task in place.
+  assert.match(source, /function taskDeleteFailure\(failure, t, archive\)/)
+  assert.match(source, /archive && status === 409\) \{/)
+  assert.match(source, /t\('archiveRunning'\)/)
+  assert.match(source, /archive && status === 400\) return `\$\{t\('archiveParamRejected'\)\}/)
+  assert.match(source, /failure\.status = response\.status/)
+  assert.match(flow, /catch \(failure\) \{\s*throw new Error\(taskDeleteFailure\(failure, t, archive\)\)/)
+  assert.ok(
+    flow.indexOf('await refresh(projectId)') > flow.indexOf('await api('),
+    'the board reloads only after the Host answered 200',
+  )
+
+  // The new rows are styled from theme tokens only.
+  for (const rule of ['.pj-menu-caption', '.pj-menu-text', '.pj-menu-hint']) {
+    const at = source.indexOf(`${rule}{`)
+    assert.ok(at > 0, `${rule} is styled`)
+    const block = source.slice(at, source.indexOf('}', at))
+    assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|rgba?\(/i, `${rule} uses a literal colour`)
+  }
+  for (const rule of ['.pj-menu-caption', '.pj-menu-hint']) {
+    const at = source.indexOf(`${rule}{`)
+    assert.match(source.slice(at, source.indexOf('}', at)), /var\(--dsw-alias-label-secondary\)/)
+  }
 })
 
 test('the columns collapse and resize, and the widths persist', () => {

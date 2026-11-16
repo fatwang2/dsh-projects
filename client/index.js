@@ -31,8 +31,8 @@ window.__ModuleLoader__.load({
     const EN = {
       nav: 'Projects',
       title: 'Projects',
-      chatTab: 'Conversation',
-      settingsTab: 'Settings',
+      settings: 'Settings',
+      close: 'Close',
       startCoordinator: 'Start coordinator',
       startCoordinatorHint: 'The coordinator plans the goal and dispatches tasks. Its conversation lives in this column.',
       noConversation: 'This task has no executor session yet.',
@@ -55,7 +55,6 @@ window.__ModuleLoader__.load({
       deleted: 'Deleted.',
       archived: 'Archived.',
       unarchived: 'Unarchived.',
-      refresh: 'Refresh',
       instructions: 'Project instructions',
       instructionsHint: 'Sent to every worker, together with the shared memory and the task brief.',
       instructionsPlaceholder: 'Goal, constraints, conventions…',
@@ -83,6 +82,10 @@ window.__ModuleLoader__.load({
       archive: 'Archive',
       unarchive: 'Unarchive',
       archivedBadge: 'Archived',
+      dangerZone: 'Danger zone',
+      archiveWarning:
+        'Archiving hides this project from the list. Its tasks, shared memory and sessions are kept, and you can unarchive it here at any time.',
+      archiveConfirm: 'Confirm archive',
       queued: 'Queued',
       running: 'Running',
       review: 'Ready for review',
@@ -105,6 +108,9 @@ window.__ModuleLoader__.load({
       taskActions: 'Task actions',
       threads: 'Threads',
       searchThreads: 'Search threads',
+      filterThreads: 'Filter threads',
+      filterGroups: 'Groups shown',
+      showAllGroups: 'Show all groups',
       collapseAll: 'Collapse all',
       expandAll: 'Expand all',
       noMatches: 'No threads match.',
@@ -146,8 +152,8 @@ window.__ModuleLoader__.load({
     const ZH = {
       nav: '项目',
       title: '项目',
-      chatTab: '对话',
-      settingsTab: '设置',
+      settings: '设置',
+      close: '关闭',
       startCoordinator: '启动协调者',
       startCoordinatorHint: '协调者负责拆解目标、派发任务；它的对话就在这一栏。',
       noConversation: '这个任务还没有执行者会话。',
@@ -170,7 +176,6 @@ window.__ModuleLoader__.load({
       deleted: '已删除。',
       archived: '已归档。',
       unarchived: '已取消归档。',
-      refresh: '刷新',
       instructions: '项目指令',
       instructionsHint: '每个执行者都会收到它，连同共享记忆和任务说明。',
       instructionsPlaceholder: '目标、约束、约定……',
@@ -198,6 +203,10 @@ window.__ModuleLoader__.load({
       archive: '归档',
       unarchive: '取消归档',
       archivedBadge: '已归档',
+      dangerZone: '危险区',
+      archiveWarning:
+        '归档后项目会从列表中隐藏。任务、共享记忆与会话都会保留，随时可以在这里取消归档。',
+      archiveConfirm: '确认归档',
       queued: '排队中',
       running: '执行中',
       review: '待验收',
@@ -220,6 +229,9 @@ window.__ModuleLoader__.load({
       taskActions: '任务操作',
       threads: '线程',
       searchThreads: '搜索线程',
+      filterThreads: '筛选线程',
+      filterGroups: '显示的分组',
+      showAllGroups: '显示全部分组',
       collapseAll: '全部折叠',
       expandAll: '全部展开',
       noMatches: '没有匹配的线程。',
@@ -315,7 +327,6 @@ window.__ModuleLoader__.load({
 .pj-resizer::after{content:'';position:absolute;inset:0 -3px}
 .pj-resizer:hover,.pj-resizer:focus-visible{background:var(--dsw-alias-border-l2)}
 .pj-page.pj-resizing{cursor:col-resize;user-select:none}
-.pj-new-project{display:flex;flex-direction:column;gap:8px;padding:4px 14px 14px}
 .pj-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;border-right:1px solid var(--dsw-alias-border-l2)}
 .pj-main-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);min-height:56px;box-sizing:border-box}
 [data-platform='darwin'] .pj-list-head{padding-top:calc(16px + var(--dsh-frame-top-clearance, 0px))}
@@ -325,8 +336,9 @@ window.__ModuleLoader__.load({
 .pj-main-title{display:flex;align-items:center;gap:8px;min-width:0}
 .pj-title{margin:0;font-size:18px;line-height:26px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pj-main-body{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
-.pj-main-scroll{flex:1;min-height:0;overflow:auto;padding:16px clamp(16px,3vw,32px) 40px}
-.pj-settings{max-width:760px;margin:0 auto}
+/* The settings dialog body owns the only scroll source, so the form is a plain
+   column: no column-width cap and no centred gutter of its own. */
+.pj-settings{display:flex;flex-direction:column;min-width:0}
 .pj-chat-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .pj-exec{display:flex;flex-direction:column;flex:0 0 380px;width:380px;min-width:0;min-height:0;background:var(--dsw-alias-bg-layer-1)}
 .pj-exec-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);min-height:56px;box-sizing:border-box}
@@ -374,11 +386,24 @@ window.__ModuleLoader__.load({
 .pj-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
 .pj-btn-ghost{background:transparent;box-shadow:none;color:var(--dsw-alias-label-secondary)}
 .pj-btn-ghost:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+/* The page's one destructive action: a hairline in the danger ink, and a filled
+   variant for the second, confirming press. Both stay on theme tokens. */
+.pj-btn-danger{box-shadow:inset 0 0 0 .5px var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.pj-btn-danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
+.pj-btn-danger-fill{background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-foreground);box-shadow:none}
+.pj-btn-danger-fill:hover:not(:disabled){background:var(--dsw-alias-state-error-primary);opacity:.88}
 .pj-icon-btn{display:inline-flex;flex:none;align-items:center;justify-content:center;width:28px;height:28px;padding:6px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;line-height:1;cursor:pointer}
 .pj-icon-btn svg{width:15px;height:15px}
+/* The header glyphs are the Host's own 16px outline set, so they keep their
+   native seat instead of the 15px default of this button. */
+.pj-icon-btn .pj-icon-16{width:16px;height:16px}
+.pj-icon-btn .pj-icon-18{width:18px;height:18px}
 .pj-icon-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .pj-icon-btn:disabled{opacity:.4;cursor:default}
 .pj-icon-btn.pj-on{color:var(--dsw-alias-state-success-primary)}
+/* A header glyph that is holding something open (the unfolded search, the
+   filter with a hidden group) reads as pressed, not as a success state. */
+.pj-icon-btn.pj-active{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}
 .pj-spacer{flex:1 1 auto;min-width:0}
 /* The context menu copies the Host Menu primitive: 4px padding on an elevated
    card, 34px rows with a 14px icon seat, a hairline separator, and a danger row
@@ -394,6 +419,15 @@ window.__ModuleLoader__.load({
 .pj-menu-item.pj-danger{color:var(--dsw-alias-state-error-primary)}
 .pj-menu-item.pj-danger .pj-menu-icon{color:var(--dsw-alias-state-error-primary)}
 .pj-menu-item.pj-danger:hover:not(:disabled),.pj-menu-item.pj-danger:focus-visible:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger)}
+/* The Threads filter popover: the same elevated card as the context menu, but
+   anchored under its own trigger instead of at the pointer, so it needs a
+   positioned wrapper. Rows carry a drawn check seat, because a native checkbox
+   would not match the Host's menu rows. */
+.pj-filter{position:relative;display:inline-flex;flex:none}
+.pj-filter-menu{position:absolute;top:calc(100% + 6px);right:0;z-index:70;display:flex;flex-direction:column;min-width:196px;padding:4px;box-sizing:border-box;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-prominent);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1)}
+.pj-filter-check{display:inline-flex;flex:none;align-items:center;justify-content:center;width:14px;height:14px;color:var(--dsw-alias-state-business-primary)}
+.pj-filter-check svg{width:14px;height:14px}
+.pj-filter-menu .pj-menu-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pj-badge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .pj-section{padding:12px 0}
 .pj-section:first-child{padding-top:0}
@@ -402,6 +436,14 @@ window.__ModuleLoader__.load({
 .pj-section-title{font-size:14px;font-weight:600;margin:0}
 .pj-hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .pj-section > .pj-hint{margin-bottom:8px}
+/* The danger zone closes the settings dialog: a danger-tinted rule above it and
+   the error ink on its title, so the one irreversible action never reads as
+   another settings row. */
+/* Two classes, because the sibling-section rule also draws a top border and
+   would otherwise win on specificity. */
+.pj-section.pj-danger-zone{margin-top:8px;padding-top:16px;border-top:.5px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, var(--dsw-alias-bg-layer-2))}
+.pj-section.pj-danger-zone .pj-section-title{color:var(--dsw-alias-state-error-primary)}
+.pj-danger-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
 .pj-textarea,.pj-input,.pj-select{width:100%;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.5}
 .pj-textarea{min-height:96px;padding:8px 12px;resize:vertical}
 .pj-textarea:focus-visible,.pj-input:focus-visible,.pj-select:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
@@ -434,6 +476,32 @@ window.__ModuleLoader__.load({
 .pj-error{margin:8px 16px 0;padding:8px 12px;border-radius:var(--dsw-radius-sm);font-size:13px;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-base));color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}
 .pj-empty{padding:24px 16px;color:var(--dsw-alias-label-tertiary);font-size:13px;text-align:center}
 .pj-empty-action{margin-top:12px}
+/* The modal, copied from the Host Modal primitive (its CSS module rules, not an
+   import): a fixed full-viewport layer, a blurred mask that fades in, and a
+   layer-2 card with the panel radius and the prominent elevation. The dialog is
+   a flex column with one 20px gap, so the header, the body and the pinned footer
+   keep the Host's rhythm; the body is the only scroll source. */
+.pj-modal-root{pointer-events:auto;position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:max(24px,var(--dsh-frame-overlay-top, 24px)) 24px}
+.pj-modal-mask{position:absolute;inset:var(--dsh-frame-chrome-top, 0px) 0 0;backdrop-filter:var(--dsw-mask-blur)}
+.pj-modal-mask:after{content:"";position:absolute;inset:0;background:var(--dsw-alias-bg-mask-1);animation:pj-modal-enter var(--ds-transition-duration) var(--ds-ease-in-out)}
+.pj-modal-dialog{box-sizing:border-box;position:relative;z-index:1;display:flex;flex-direction:column;gap:20px;width:min(380px,100%);max-height:100%;padding:0 0 24px;overflow:hidden;border:0;border-radius:var(--dsw-radius-panel);background:var(--dsw-alias-bg-layer-2);box-shadow:var(--dsw-elevation-prominent);animation:pj-modal-enter var(--ds-transition-duration) var(--ds-ease-in-out)}
+.pj-modal-dialog:focus{outline:none}
+/* Programmatic focus must not flash the focus ring; the first real key press
+   drops the marker, so keyboard users still get the ring on the next Tab. */
+.pj-modal-dialog [data-pj-automatic-focus]:focus-visible{outline:none}
+.pj-modal-form{width:min(460px,100%)}
+.pj-modal-wide{width:min(560px,100%);padding:0}
+.pj-modal-content{display:flex;flex-direction:column;width:100%;min-height:0;overflow-y:auto}
+.pj-modal-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:22px 14px 12px 24px}
+.pj-modal-title{margin:0;font-size:16px;line-height:24px;font-weight:500;color:var(--dsw-alias-label-primary)}
+.pj-modal-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:var(--dsw-radius-sm);background:transparent;cursor:pointer;color:var(--dsw-alias-label-secondary)}
+.pj-modal-close:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-modal-body{display:flex;flex-direction:column;gap:10px;min-width:0;margin-top:20px;padding:0 24px}
+.pj-modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 24px}
+.pj-modal-action{min-width:72px}
+.pj-modal-wide .pj-modal-content{padding-bottom:24px}
+.pj-modal-body > .pj-error{margin:0}
+@keyframes pj-modal-enter{0%{opacity:0}to{opacity:1}}
 ${SHARED_CSS}${DISPATCH_RULES}
 
 `
@@ -968,18 +1036,339 @@ ${SHARED_CSS}${DISPATCH_RULES}
       )
     }
 
-    /** The search field's leading glyph, at the Host's 16px seat. */
-    function SearchIcon() {
+    /**
+     * The Host's 16px outline glyphs, drawn from its own symbol paths.
+     *
+     * A client bundle may not import a Host package, so every icon below is the
+     * path data of the matching `Icon*OutlineRegular` symbol, redrawn inline on
+     * the Host's 16 grid. The Host's `regular` stroke weight is 1 and its
+     * `medium` 1.3; these use 1.4 so they carry the same optical weight as the
+     * 16px glyphs this file already draws (the resolve ring, the trash can),
+     * which is what makes a header row of them read as one set.
+     */
+    const ICON_STROKE = 1.4
+
+    /** One outline glyph on the Host's 16 grid. */
+    function OutlineIcon({ size, className, children }) {
+      const edge = typeof size === 'number' && size > 0 ? size : 16
       return h(
         'svg',
-        { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
-        h('circle', { cx: 7.2, cy: 7.2, r: 4.6, stroke: 'currentColor', strokeWidth: 1.5 }),
+        {
+          width: edge,
+          height: edge,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          'aria-hidden': true,
+          className,
+        },
+        children,
+      )
+    }
+
+    /** `IconPanelLeftOutlineRegular`: the Host's sidebar-collapse mark. */
+    function PanelLeftIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size, className: size === 18 ? 'pj-icon-18' : 'pj-icon-16' },
         h('path', {
-          d: 'M10.6 10.6l3 3',
+          d: 'M13.5 1.5H2.5C1.94772 1.5 1.5 1.94772 1.5 2.5V13.5C1.5 14.0523 1.94772 14.5 2.5 14.5H13.5C14.0523 14.5 14.5 14.0523 14.5 13.5V2.5C14.5 1.94772 14.0523 1.5 13.5 1.5Z',
           stroke: 'currentColor',
-          strokeWidth: 1.5,
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', { d: 'M5.5 1.5V14.5', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
+    /** `IconSettingsOutlineRegular`: the settings-dialog trigger. */
+    function GearIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size, className: 'pj-icon-16' },
+        h('path', {
+          d: 'M8 9.75012C8.9665 9.75012 9.75 8.96662 9.75 8.00012C9.75 7.03362 8.9665 6.25012 8 6.25012C7.0335 6.25012 6.25 7.03362 6.25 8.00012C6.25 8.96662 7.0335 9.75012 8 9.75012Z',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', {
+          d: 'M13.0107 7.79377C12.9505 7.89401 12.9205 7.94413 12.9205 7.99951C12.9205 8.0549 12.9505 8.10502 13.0106 8.20528L13.9849 9.83006C14.045 9.93029 14.0751 9.9804 14.0751 10.0358C14.0751 10.0911 14.045 10.1413 13.9849 10.2415L13.0037 11.8777C12.9468 11.9726 12.9184 12.0201 12.8725 12.0461C12.8267 12.072 12.7713 12.072 12.6607 12.072H10.6704C10.5598 12.072 10.5045 12.072 10.4586 12.098C10.4128 12.1239 10.3843 12.1714 10.3274 12.2662L9.33825 13.9142C9.28133 14.009 9.25287 14.0564 9.20703 14.0823C9.16118 14.1083 9.10588 14.1083 8.99529 14.1083H7.00486C6.89426 14.1083 6.83896 14.1083 6.79312 14.0823C6.74727 14.0564 6.71881 14.009 6.6619 13.9142L5.67273 12.2662C5.61581 12.1714 5.58735 12.1239 5.54151 12.098C5.49566 12.072 5.44036 12.072 5.32977 12.072H3.33945C3.2288 12.072 3.17347 12.072 3.12761 12.0461C3.08176 12.0201 3.0533 11.9726 2.9964 11.8777L2.0152 10.2415C1.9551 10.1413 1.92505 10.0911 1.92505 10.0358C1.92505 9.9804 1.9551 9.93029 2.0152 9.83006L2.98951 8.20528C3.04963 8.10502 3.07969 8.0549 3.07969 7.99951C3.07968 7.94413 3.04961 7.89401 2.98946 7.79377L2.01529 6.17011C1.95514 6.06987 1.92507 6.01975 1.92507 5.96437C1.92506 5.90899 1.95512 5.85886 2.01524 5.7586L2.9964 4.1224C3.0533 4.0275 3.08176 3.98005 3.12761 3.95408C3.17347 3.92811 3.2288 3.92811 3.33945 3.92811H5.32977C5.44036 3.92811 5.49566 3.92811 5.54151 3.90216C5.58735 3.87621 5.61581 3.82879 5.67273 3.73397L6.6619 2.08599C6.71881 1.99116 6.74727 1.94375 6.79312 1.9178C6.83896 1.89185 6.89426 1.89185 7.00486 1.89185H8.99529C9.10588 1.89185 9.16118 1.89185 9.20703 1.9178C9.25287 1.94375 9.28133 1.99116 9.33825 2.08599L10.3274 3.73397C10.3843 3.82879 10.4128 3.87621 10.4586 3.90216C10.5045 3.92811 10.5598 3.92811 10.6704 3.92811H12.6607C12.7713 3.92811 12.8267 3.92811 12.8725 3.95408C12.9184 3.98005 12.9468 4.0275 13.0037 4.1224L13.9849 5.7586C14.045 5.85886 14.0751 5.90899 14.0751 5.96437C14.0751 6.01975 14.045 6.06987 13.9849 6.17011L13.0107 7.79377Z',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+          strokeMiterlimit: 10,
+        }),
+      )
+    }
+
+    /** `IconPlusOutlineRegular`: the new-project trigger. */
+    function PlusIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size, className: 'pj-icon-16' },
+        h('path', { d: 'M8 2V14', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+        h('path', { d: 'M2 8H14', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
+    /** `IconSearchOutlineRegular`: the search trigger and the field's glyph. */
+    function SearchIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size, className: 'pj-icon-16' },
+        h('path', {
+          d: 'M6.58727 11.8586C9.55061 11.8586 11.9529 9.45637 11.9529 6.49304C11.9529 3.5297 9.55061 1.12744 6.58727 1.12744C3.62394 1.12744 1.22168 3.5297 1.22168 6.49304C1.22168 9.45637 3.62394 11.8586 6.58727 11.8586Z',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', {
+          d: 'M10.2991 10.3933L14.7783 14.8725',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+      )
+    }
+
+    /** `IconSlidersTwoOutlineRegular`: the group-filter trigger. */
+    function FilterIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size, className: 'pj-icon-16' },
+        h('path', {
+          d: 'M2.3 5h5.85M12.05 5h1.65',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
           strokeLinecap: 'round',
         }),
+        h('circle', { cx: 9.95, cy: 5, r: 1.45, stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+        h('path', {
+          d: 'M2.3 11h1.65M7.85 11h5.85',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+          strokeLinecap: 'round',
+        }),
+        h('circle', { cx: 5.75, cy: 11, r: 1.45, stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
+    /** `IconCloseOutlineRegular`: the dialog's dismiss control. */
+    function CloseIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size },
+        h('path', { d: 'M2.5 2.5L13.5 13.5', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+        h('path', { d: 'M13.5 2.5L2.5 13.5', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
+    /** `IconArchiveOutlineRegular`: the danger-zone action. */
+    function ArchiveIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size },
+        h('path', {
+          d: 'M13.5 2.5H2.5C1.94772 2.5 1.5 2.94772 1.5 3.5V4.5C1.5 5.05228 1.94772 5.5 2.5 5.5H13.5C14.0523 5.5 14.5 5.05228 14.5 4.5V3.5C14.5 2.94772 14.0523 2.5 13.5 2.5Z',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', {
+          d: 'M2.5 5.5V13.5C2.5 13.7652 2.60536 14.0196 2.79289 14.2071C2.98043 14.3946 3.23478 14.5 3.5 14.5H12.5C12.7652 14.5 13.0196 14.3946 13.2071 14.2071C13.3946 14.0196 13.5 13.7652 13.5 13.5V5.5',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', { d: 'M6.5 9.5H9.5', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
+    /** `IconCheckOutlineRegular`: a drawn check for the filter menu's rows. */
+    function CheckIcon() {
+      return h(
+        OutlineIcon,
+        { size: 14 },
+        h('path', {
+          d: 'M3.2 8.4L6.2 11.4L12.8 4.8',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
+    // ---------------------------------------------------------------------
+    // Modal
+    //
+    // Copied from the Host Modal primitive (`dsh-client-ui-primitives`), which a
+    // client bundle may not import: the same layer / mask / card geometry and
+    // the same focus contract.
+    //   - `role="dialog"` + `aria-modal="true"` + `aria-labelledby`
+    //   - Escape closes; a click on the mask closes unless the dialog opts out
+    //     (a destructive confirmation must not dismiss on a stray click)
+    //   - focus moves into the dialog on open and returns to the trigger on
+    //     close
+    //   - Tab and Shift+Tab cycle inside the dialog and cannot escape it
+    //   - the page behind the mask does not scroll
+
+    /** The Host's focusable selector, verbatim. */
+    const FOCUSABLE =
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]'
+
+    /** Keys that end the "focus arrived programmatically" state. */
+    const NAV_KEYS = ['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End']
+
+    /**
+     * Focus a node without flashing the focus ring, the way the Host's
+     * `focusWithoutRing` does: mark the node, drop the mark on blur or on the
+     * first navigation key, so a keyboard user still gets the ring on the next
+     * Tab. Degrades to a plain `focus()` when the node cannot be marked.
+     */
+    function focusWithoutRing(node) {
+      if (!node || typeof node.focus !== 'function') return
+      const release = () => {
+        try {
+          node.removeAttribute('data-pj-automatic-focus')
+          node.removeEventListener('blur', release)
+          node.removeEventListener('keydown', onKey, true)
+        } catch {
+          // A detached node is already released.
+        }
+      }
+      const onKey = (event) => {
+        if (event.isComposing || event.ctrlKey || event.altKey || event.metaKey) return
+        if (NAV_KEYS.includes(event.key)) release()
+      }
+      try {
+        node.setAttribute('data-pj-automatic-focus', '')
+        node.addEventListener('blur', release)
+        node.addEventListener('keydown', onKey, true)
+      } catch {
+        // No listener surface: focus plainly.
+      }
+      node.focus({ preventScroll: true })
+      if (typeof node.matches === 'function' && !node.matches(':focus')) release()
+    }
+
+    /**
+     * Hold one dialog open for its lifetime: move focus in, trap Tab, close on
+     * Escape, lock the page scroll and hand focus back to the trigger.
+     *
+     * A no-op without a document, so the element-tree harness can render the
+     * page. `returnFocusRef` is the trigger element's ref; when it is gone the
+     * element that had focus when the dialog opened gets it back.
+     */
+    function useModalLayer(ref, open, onClose, returnFocusRef) {
+      const closeRef = useRef(onClose)
+      closeRef.current = onClose
+      const returnRef = useRef(returnFocusRef)
+      returnRef.current = returnFocusRef
+      useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined
+        const node = ref && ref.current
+        if (!node || typeof node.querySelector !== 'function') return undefined
+        const previous = document.activeElement
+        // The Host's order: the marked control, else the first focusable, else
+        // the dialog itself.
+        const target =
+          node.querySelector('[data-pj-modal-autofocus]') || node.querySelector(FOCUSABLE) || node
+        if (!node.contains(document.activeElement)) focusWithoutRing(target)
+        const onKeyDown = (event) => {
+          if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return
+          if (event.ctrlKey || event.altKey || event.metaKey) return
+          if (event.key === 'Escape') {
+            if (event.shiftKey) return
+            event.preventDefault()
+            if (!event.repeat) closeRef.current()
+            return
+          }
+          if (event.key !== 'Tab') return
+          const focusable = [...node.querySelectorAll(FOCUSABLE)]
+          const first = focusable[0] || node
+          const last = focusable[focusable.length - 1] || node
+          const active = document.activeElement
+          const cycling =
+            active === last ? !event.shiftKey : active === first ? event.shiftKey : false
+          if (!node.contains(active) || cycling) {
+            event.preventDefault()
+            const next = event.shiftKey ? last : first
+            if (typeof next.focus === 'function') next.focus()
+          }
+        }
+        document.addEventListener('keydown', onKeyDown)
+        // The mask covers the viewport, but a wheel over it would still scroll
+        // the page behind: lock the body while the dialog is open.
+        const body = document.body
+        const previousOverflow = body ? body.style.overflow : ''
+        if (body) body.style.overflow = 'hidden'
+        return () => {
+          document.removeEventListener('keydown', onKeyDown)
+          if (body) body.style.overflow = previousOverflow
+          const trigger = returnRef.current && returnRef.current.current
+          const back = trigger && trigger.isConnected ? trigger : previous
+          if (back && back.isConnected) focusWithoutRing(back)
+        }
+      }, [ref, open])
+    }
+
+    /**
+     * One dialog. The page root is already a full-size surface, so the layer is
+     * a plain child with `position:fixed` instead of a portal: it still covers
+     * the viewport, and it unmounts with the page.
+     */
+    function Modal(props) {
+      const {
+        open,
+        titleId,
+        title,
+        closeLabel,
+        onClose,
+        maskClose = true,
+        returnFocusRef,
+        className,
+        children,
+        footer,
+      } = props
+      const dialogRef = useRef(null)
+      useModalLayer(dialogRef, open, onClose, returnFocusRef)
+      if (!open) return null
+      return h(
+        'div',
+        { className: 'pj-modal-root', role: 'presentation' },
+        h('div', {
+          className: 'pj-modal-mask',
+          'aria-hidden': 'true',
+          // A destructive confirmation opts out: a stray press outside it must
+          // not dismiss the dialog that is about to archive the project.
+          onClick: maskClose ? onClose : undefined,
+        }),
+        h(
+          'div',
+          {
+            ref: dialogRef,
+            tabIndex: -1,
+            className: `pj-modal-dialog${className ? ` ${className}` : ''}`,
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-labelledby': titleId,
+          },
+          h(
+            'div',
+            { className: 'pj-modal-content' },
+            h(
+              'div',
+              { className: 'pj-modal-header' },
+              h('h2', { className: 'pj-modal-title', id: titleId }, title),
+              h(
+                'button',
+                {
+                  className: 'pj-modal-close',
+                  type: 'button',
+                  'aria-label': closeLabel,
+                  onClick: onClose,
+                },
+                h(CloseIcon, { size: 14 }),
+              ),
+            ),
+            h('div', { className: 'pj-modal-body' }, children),
+          ),
+          footer ? h('div', { className: 'pj-modal-footer' }, footer) : null,
+        ),
       )
     }
 
@@ -1224,11 +1613,24 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const [workspaceText, setWorkspaceText] = useState('')
       const [goalDirty, setGoalDirty] = useState(false)
       const [memoryDirty, setMemoryDirty] = useState(false)
+      // Both project-level surfaces are dialogs now: the list header carries a
+      // plus glyph and the main header a gear, and neither takes a column.
       const [showNewProject, setShowNewProject] = useState(false)
-      const [newProject, setNewProject] = useState({ name: '', goal: '', workspace: '' })
+      const [newProject, setNewProject] = useState({
+        name: '',
+        goal: '',
+        workspace: '',
+        autonomy: 'manual',
+        concurrency: 2,
+      })
+      const [showSettings, setShowSettings] = useState(false)
+      // Archiving is destructive, so the settings dialog arms it on the first
+      // press and only the second one archives.
+      const [archiveArmed, setArchiveArmed] = useState(false)
+      const newProjectTrigger = useRef(null)
+      const settingsTrigger = useRef(null)
       const [confirmDeleteId, setConfirmDeleteId] = useState(null)
       const confirmDeleteAt = useRef(0)
-      const [centerView, setCenterView] = useState('chat')
       const [thread, setThread] = useState(null)
       const [execTarget, setExecTarget] = useState(null)
       // The worker model catalog from `GET /projects-api/models`. The Host
@@ -1253,10 +1655,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const [menuIndex, setMenuIndex] = useState(0)
       const menuItemRefs = useRef([])
 
-      // Threads panel: the live search query and the folded groups. The folded
-      // set is a page-local preference, so it persists like the column widths.
+      // Threads panel: the live search query, the folded groups and the groups
+      // the filter hides. The folded set is a page-local preference, so it
+      // persists like the column widths; the hidden set is per visit.
       const [query, setQuery] = useState('')
       const [collapsedGroups, setCollapsedGroups] = useState(readCollapsedGroups)
+      const [searchOpen, setSearchOpen] = useState(false)
+      const [filterOpen, setFilterOpen] = useState(false)
+      const [hiddenGroups, setHiddenGroups] = useState({})
+      const searchInputRef = useRef(null)
+      const filterTrigger = useRef(null)
+      const filterPanel = useRef(null)
+      const filterItemRefs = useRef([])
 
       const useWorkspacesSafe = typeof useWorkspaces === 'function' ? useWorkspaces : () => undefined
       const archivedSessionIds = useWorkspacesSafe((state) => state.archivedSessionIds)
@@ -1307,6 +1717,51 @@ ${SHARED_CSS}${DISPATCH_RULES}
       useEffect(() => {
         writeStored('collapsedGroups', JSON.stringify(collapsedGroups))
       }, [collapsedGroups])
+
+      // The Threads filter popover closes on an outside press, Escape, any
+      // scroll and a resize, and Escape hands focus back to its trigger.
+      useEffect(() => {
+        if (!filterOpen || typeof window === 'undefined') return undefined
+        const onPointerDown = (event) => {
+          const panel = filterPanel.current
+          if (panel && typeof panel.contains === 'function' && panel.contains(event.target)) return
+          const trigger = filterTrigger.current
+          if (trigger && typeof trigger.contains === 'function' && trigger.contains(event.target)) return
+          setFilterOpen(false)
+        }
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape') return
+          setFilterOpen(false)
+          const trigger = filterTrigger.current
+          if (trigger && typeof trigger.focus === 'function') trigger.focus()
+        }
+        const onScroll = () => setFilterOpen(false)
+        window.addEventListener('pointerdown', onPointerDown, true)
+        window.addEventListener('keydown', onKeyDown, true)
+        window.addEventListener('scroll', onScroll, true)
+        window.addEventListener('resize', onScroll)
+        return () => {
+          window.removeEventListener('pointerdown', onPointerDown, true)
+          window.removeEventListener('keydown', onKeyDown, true)
+          window.removeEventListener('scroll', onScroll, true)
+          window.removeEventListener('resize', onScroll)
+        }
+      }, [filterOpen])
+
+      // Opening the filter arms its first row, the way the context menu does.
+      useEffect(() => {
+        if (!filterOpen) return
+        const node = filterItemRefs.current[0]
+        if (node && typeof node.focus === 'function') node.focus({ preventScroll: true })
+      }, [filterOpen])
+
+      // Expanding the search puts the caret in the field. Collapsing it clears
+      // the query, so results never stay filtered by an invisible needle.
+      useEffect(() => {
+        if (!searchOpen) return
+        const node = searchInputRef.current
+        if (node && typeof node.focus === 'function') node.focus({ preventScroll: true })
+      }, [searchOpen])
 
       // The context menu closes on an outside press, Escape, any scroll and a
       // resize, so it can never be left floating over stale content.
@@ -1488,15 +1943,17 @@ ${SHARED_CSS}${DISPATCH_RULES}
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [coordinatorArchived, coordinatorSessionId])
 
-      // A different project resets the edit buffers, the executor pane and the
-      // center view before they are synced.
+      // A different project resets the edit buffers, the executor pane, the
+      // armed archive and the Threads filter before they are synced.
       useEffect(() => {
         goalDirtyRef.current = false
         memoryDirtyRef.current = false
         workspaceDirtyRef.current = false
         setGoalDirty(false)
         setMemoryDirty(false)
-        setCenterView('chat')
+        setArchiveArmed(false)
+        setFilterOpen(false)
+        setHiddenGroups({})
         setExecTarget((current) => (current ? null : current))
         setMenu(null)
       }, [detail?.project?.id])
@@ -1577,6 +2034,35 @@ ${SHARED_CSS}${DISPATCH_RULES}
           ].join('\n')
         : ''
 
+      // The new-project dialog starts from the Host's own defaults (manual
+      // autonomy, two workers), so the two extra fields are never blank.
+      const BLANK_PROJECT = { name: '', goal: '', workspace: '', autonomy: 'manual', concurrency: 2 }
+
+      const openNewProject = () => {
+        setNewProject(BLANK_PROJECT)
+        setShowNewProject(true)
+      }
+
+      const closeNewProject = () => {
+        if (busy) return
+        setShowNewProject(false)
+        setNewProject(BLANK_PROJECT)
+      }
+
+      const openSettings = () => {
+        setArchiveArmed(false)
+        setShowSettings(true)
+      }
+
+      const closeSettings = () => {
+        setArchiveArmed(false)
+        setShowSettings(false)
+      }
+
+      // One POST carries every field the dialog collects: the Host's
+      // `createProject` accepts autonomy and concurrency alongside name, goal
+      // and workspace, so the project is born with its policy rather than
+      // patched a moment later.
       const createProject = () =>
         run(async () => {
           if (!newProject.name.trim()) throw new Error(t('nameRequired'))
@@ -1586,9 +2072,11 @@ ${SHARED_CSS}${DISPATCH_RULES}
               name: newProject.name.trim(),
               goal: newProject.goal.trim(),
               workspace: newProject.workspace.trim(),
+              autonomy: newProject.autonomy,
+              concurrency: Number(newProject.concurrency) || 2,
             }),
           })
-          setNewProject({ name: '', goal: '', workspace: '' })
+          setNewProject(BLANK_PROJECT)
           setShowNewProject(false)
           await refresh(created.project.id)
           return t('projectCreated')
@@ -1653,10 +2141,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return t('saved')
         })
 
-      const toggleArchive = () =>
+      // Archiving hides the project from the list, so it is armed first and
+      // only the second press archives. Unarchiving is not destructive and
+      // stays a single press.
+      const archiveProject = () =>
         run(async () => {
-          if (!projectId) return ''
+          if (!projectId || !project) return ''
+          if (!project.archived && !archiveArmed) {
+            setArchiveArmed(true)
+            return ''
+          }
           const archived = !project.archived
+          setArchiveArmed(false)
           await api(`/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ archived }) })
           await refresh(projectId)
           return archived ? t('archived') : t('unarchived')
@@ -1712,12 +2208,34 @@ ${SHARED_CSS}${DISPATCH_RULES}
 
       const allGroupsCollapsed = THREAD_GROUPS.every((group) => collapsedGroups[group.key])
 
-      // One button flips every group at once: collapse all when any is open,
+      // One row flips every group at once: collapse all when any is open,
       // expand all once everything is folded.
       const toggleAllGroups = () => {
         const next = {}
         for (const group of THREAD_GROUPS) next[group.key] = !allGroupsCollapsed
         setCollapsedGroups(next)
+        setFilterOpen(false)
+      }
+
+      // A hidden group leaves the panel entirely; the filter row is its
+      // checkbox, so the same press shows it again.
+      const toggleGroupVisible = (key) =>
+        setHiddenGroups((current) => ({ ...current, [key]: !current[key] }))
+
+      const anyGroupHidden = THREAD_GROUPS.some((group) => hiddenGroups[group.key])
+
+      const showAllGroups = () => {
+        setHiddenGroups({})
+        setFilterOpen(false)
+      }
+
+      // The search field is collapsed by default, so the panel head is two
+      // glyphs. Collapsing the field drops the needle with it.
+      const toggleSearch = () => {
+        setSearchOpen((open) => {
+          if (open) setQuery('')
+          return !open
+        })
       }
 
       const activeLocale = () => {
@@ -1823,7 +2341,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
           if (restored) await threadApi.restoreSession(project.coordinatorSessionId)
           const result = await threadApi.ensure(project, coordinatorPrompt(project, locale))
           setThread({ sessionId: result.sessionId, reference: result.reference })
-          setCenterView('chat')
           if (result.created && result.sessionId !== project.coordinatorSessionId) {
             await saveProjectPatch({ coordinatorSessionId: result.sessionId })
             return t('coordinatorCreated')
@@ -2174,6 +2691,70 @@ ${SHARED_CSS}${DISPATCH_RULES}
               },
             }),
           ),
+          // The danger zone closes the dialog. Archiving hides the project from
+          // the list, so the first press only arms it and the second one acts;
+          // unarchiving is not destructive and stays a single press.
+          h(
+            'div',
+            { className: 'pj-section pj-danger-zone' },
+            h(
+              'div',
+              { className: 'pj-section-head' },
+              h('h2', { className: 'pj-section-title' }, t('dangerZone')),
+            ),
+            h('div', { className: 'pj-hint' }, t('archiveWarning')),
+            h(
+              'div',
+              { className: 'pj-danger-actions' },
+              project.archived
+                ? h(
+                    'button',
+                    {
+                      className: 'pj-btn',
+                      type: 'button',
+                      disabled: busy,
+                      onClick: archiveProject,
+                    },
+                    t('unarchive'),
+                  )
+                : archiveArmed
+                  ? [
+                      h(
+                        'button',
+                        {
+                          key: 'confirm',
+                          className: 'pj-btn pj-btn-danger-fill',
+                          type: 'button',
+                          disabled: busy,
+                          onClick: archiveProject,
+                        },
+                        t('archiveConfirm'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          key: 'cancel',
+                          className: 'pj-btn pj-btn-ghost',
+                          type: 'button',
+                          disabled: busy,
+                          onClick: () => setArchiveArmed(false),
+                        },
+                        t('cancel'),
+                      ),
+                    ]
+                  : h(
+                      'button',
+                      {
+                        className: 'pj-btn pj-btn-danger',
+                        type: 'button',
+                        disabled: busy,
+                        onClick: archiveProject,
+                      },
+                      h(ArchiveIcon, { size: 14 }),
+                      t('archive'),
+                    ),
+            ),
+          ),
         )
 
       // The collapsed project column: a 44px rail that still shows every
@@ -2192,7 +2773,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
               'aria-expanded': 'false',
               onClick: toggleListCollapsed,
             },
-            '»',
+            // The rail shows the same panel glyph, one step larger: the Host's
+            // rail spec renders this control at 18 and the expanded one at 16.
+            h(PanelLeftIcon, { size: 18 }),
           ),
           projects.map((entry) =>
             h(
@@ -2362,6 +2945,94 @@ ${SHARED_CSS}${DISPATCH_RULES}
         )
       }
 
+      // The group filter popover. One checkbox row per group, then a hairline
+      // and the fold-all action, then a reset while anything is hidden. Rows are
+      // `menuitemcheckbox`, so the shown/hidden state is announced; the drawn
+      // check stands in for a native checkbox, which would not match the Host's
+      // menu rows. Arrow keys rove between the rows, and Escape (handled by the
+      // effect above) closes the popover and returns focus to the trigger.
+      const renderFilterMenu = () => {
+        if (!filterOpen) return null
+        filterItemRefs.current = []
+        let seat = 0
+        const row = (options) => {
+          const index = seat
+          seat += 1
+          return h(
+            'button',
+            {
+              key: options.key,
+              ref: (node) => {
+                filterItemRefs.current[index] = node
+              },
+              className: 'pj-menu-item',
+              type: 'button',
+              role: options.role,
+              tabIndex: -1,
+              'aria-checked': options.checked === undefined ? undefined : options.checked,
+              onClick: options.onSelect,
+            },
+            h(
+              'span',
+              { className: 'pj-filter-check', 'aria-hidden': true },
+              options.checked ? h(CheckIcon, null) : null,
+            ),
+            h('span', { className: 'pj-menu-label' }, options.label),
+          )
+        }
+        return h(
+          'div',
+          {
+            className: 'pj-filter-menu',
+            role: 'menu',
+            'aria-label': t('filterGroups'),
+            ref: filterPanel,
+            onKeyDown: (event) => {
+              const items = filterItemRefs.current.filter(Boolean)
+              if (!items.length) return
+              const at = items.indexOf(event.target)
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                items[(at + 1) % items.length].focus()
+              } else if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                items[(at - 1 + items.length) % items.length].focus()
+              } else if (event.key === 'Home') {
+                event.preventDefault()
+                items[0].focus()
+              } else if (event.key === 'End') {
+                event.preventDefault()
+                items[items.length - 1].focus()
+              }
+            },
+          },
+          ...THREAD_GROUPS.map((group) =>
+            row({
+              key: group.key,
+              role: 'menuitemcheckbox',
+              checked: !hiddenGroups[group.key],
+              label: t(group.titleKey),
+              onSelect: () => toggleGroupVisible(group.key),
+            }),
+          ),
+          h('div', { key: 'separator', className: 'pj-menu-separator', role: 'separator' }),
+          row({
+            key: 'fold',
+            role: 'menuitem',
+            label: allGroupsCollapsed ? t('expandAll') : t('collapseAll'),
+            onSelect: toggleAllGroups,
+          }),
+          anyGroupHidden
+            ? row({
+                key: 'all',
+                role: 'menuitem',
+                label: t('showAllGroups'),
+                onSelect: showAllGroups,
+              })
+            : null,
+        )
+      }
+
       // The detail page is a conversation, not a form. Its body is exactly the
       // executor's own Session, rendered by the same Chat view the main
       // conversation uses, so `ui-chat`'s transcriptView / collapseTiming /
@@ -2400,6 +3071,11 @@ ${SHARED_CSS}${DISPATCH_RULES}
           )
         : taskList
       const groups = threadGroups(visibleTasks)
+      // A group the filter hides leaves the panel entirely; when every group is
+      // hidden or empty the panel says so instead of going blank.
+      const shownGroups = groups.filter(
+        (group) => group.tasks.length > 0 && !hiddenGroups[group.key],
+      )
 
       return h(
         'div',
@@ -2421,15 +3097,22 @@ ${SHARED_CSS}${DISPATCH_RULES}
                   h(
                     'div',
                     { className: 'pj-actions' },
+                    // Both header controls are glyphs, the way the Host's own
+                    // sidebar head is: create, then collapse at the right edge.
                     h(
                       'button',
                       {
-                        className: 'pj-btn pj-btn-ghost',
-                        onClick: () => setShowNewProject((value) => !value),
-                        disabled: busy,
+                        className: 'pj-icon-btn',
                         type: 'button',
+                        ref: newProjectTrigger,
+                        title: t('newProject'),
+                        'aria-label': t('newProject'),
+                        'aria-haspopup': 'dialog',
+                        'aria-expanded': showNewProject ? 'true' : 'false',
+                        onClick: openNewProject,
+                        disabled: busy,
                       },
-                      t('newProject'),
+                      h(PlusIcon, { size: 16 }),
                     ),
                     h(
                       'button',
@@ -2441,65 +3124,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
                         'aria-expanded': 'true',
                         onClick: toggleListCollapsed,
                       },
-                      '«',
+                      h(PanelLeftIcon, { size: 16 }),
                     ),
                   ),
                 ),
-                showNewProject &&
-                  h(
-                    'div',
-                    { className: 'pj-new-project' },
-                    h('input', {
-                      className: 'pj-input',
-                      'aria-label': t('projectName'),
-                      placeholder: t('projectName'),
-                      value: newProject.name,
-                      onChange: (event) => setNewProject({ ...newProject, name: event.target.value }),
-                    }),
-                    h('textarea', {
-                      className: 'pj-textarea',
-                      style: { minHeight: '64px' },
-                      'aria-label': t('instructions'),
-                      placeholder: t('instructionsPlaceholder'),
-                      value: newProject.goal,
-                      onChange: (event) => setNewProject({ ...newProject, goal: event.target.value }),
-                    }),
-                    h(
-                      'div',
-                      { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
-                      h('input', {
-                        className: 'pj-input pj-grow',
-                        'aria-label': t('workspace'),
-                        placeholder: t('workspacePlaceholder'),
-                        value: newProject.workspace,
-                        onChange: (event) => setNewProject({ ...newProject, workspace: event.target.value }),
-                      }),
-                      h(
-                        'button',
-                        { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseNewProjectFolder },
-                        t('chooseFolderShort'),
-                      ),
-                    ),
-                    h(
-                      'div',
-                      { className: 'pj-row' },
-                      h(
-                        'button',
-                        { className: 'pj-btn pj-btn-primary', onClick: createProject, disabled: busy, type: 'button' },
-                        t('create'),
-                      ),
-                      h(
-                        'button',
-                        {
-                          className: 'pj-btn pj-btn-ghost',
-                          onClick: () => setShowNewProject(false),
-                          disabled: busy,
-                          type: 'button',
-                        },
-                        t('cancel'),
-                      ),
-                    ),
-                  ),
                 h(
                   'div',
                   { className: 'pj-list-scroll' },
@@ -2516,7 +3144,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
                             {
                               className: 'pj-btn pj-btn-primary',
                               type: 'button',
-                              onClick: () => setShowNewProject(true),
+                              onClick: openNewProject,
                             },
                             t('newProject'),
                           ),
@@ -2569,6 +3197,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
               h('h1', { className: 'pj-title' }, project ? project.name : t('title')),
               project?.archived && h('span', { className: 'pj-badge' }, t('archivedBadge')),
             ),
+            // One glyph replaces the old tab row: the column always shows the
+            // conversation, and settings (with the archive danger zone) is a
+            // dialog behind this gear.
             project &&
               h(
                 'div',
@@ -2576,25 +3207,16 @@ ${SHARED_CSS}${DISPATCH_RULES}
                 h(
                   'button',
                   {
-                    className: `pj-btn${centerView === 'chat' ? ' pj-btn-primary' : ''}`,
+                    className: 'pj-icon-btn',
                     type: 'button',
-                    onClick: () => setCenterView('chat'),
+                    ref: settingsTrigger,
+                    title: t('settings'),
+                    'aria-label': t('settings'),
+                    'aria-haspopup': 'dialog',
+                    'aria-expanded': showSettings ? 'true' : 'false',
+                    onClick: openSettings,
                   },
-                  t('chatTab'),
-                ),
-                h(
-                  'button',
-                  {
-                    className: `pj-btn${centerView === 'settings' ? ' pj-btn-primary' : ''}`,
-                    type: 'button',
-                    onClick: () => setCenterView('settings'),
-                  },
-                  t('settingsTab'),
-                ),
-                h(
-                  'button',
-                  { className: 'pj-btn pj-btn-ghost', onClick: toggleArchive, disabled: busy, type: 'button' },
-                  project.archived ? t('unarchive') : t('archive'),
+                  h(GearIcon, { size: 16 }),
                 ),
               ),
           ),
@@ -2616,40 +3238,38 @@ ${SHARED_CSS}${DISPATCH_RULES}
               ),
             !project
               ? h('div', { className: 'pj-empty' }, t('noSelection'))
-              : centerView === 'settings'
-                ? h('div', { className: 'pj-main-scroll' }, renderSettings())
-                : h(
-                    'div',
-                    { className: 'pj-chat-body' },
-                    thread
-                      ? h(
-                          EmbeddedBoundary,
-                          { fallback: h('div', { className: 'pj-empty' }, t('coordinatorChatFailed')) },
-                          typeof SessionProvider === 'function' && typeof renderSlot === 'function'
-                            ? h(SessionProvider, { session: thread.reference }, renderSlot('projects.conversation', {}))
-                            : h('div', { className: 'pj-empty' }, t('coordinatorChatFailed')),
-                        )
-                      : h(
-                          'div',
-                          { className: 'pj-empty pj-start' },
-                          h('div', null, t('startCoordinatorHint')),
-                          h(
-                            'div',
-                            { className: 'pj-empty-action' },
-                            h(
-                              'button',
-                              {
-                                className: 'pj-btn pj-btn-primary',
-                                type: 'button',
-                                onClick: startCoordinator,
-                                disabled: busy || project.archived,
-                                title: project.archived ? t('archivedHint') : undefined,
-                              },
-                              t('startCoordinator'),
-                            ),
-                          ),
+              : h(
+                'div',
+                { className: 'pj-chat-body' },
+                thread
+                  ? h(
+                      EmbeddedBoundary,
+                      { fallback: h('div', { className: 'pj-empty' }, t('coordinatorChatFailed')) },
+                      typeof SessionProvider === 'function' && typeof renderSlot === 'function'
+                        ? h(SessionProvider, { session: thread.reference }, renderSlot('projects.conversation', {}))
+                        : h('div', { className: 'pj-empty' }, t('coordinatorChatFailed')),
+                    )
+                  : h(
+                      'div',
+                      { className: 'pj-empty pj-start' },
+                      h('div', null, t('startCoordinatorHint')),
+                      h(
+                        'div',
+                        { className: 'pj-empty-action' },
+                        h(
+                          'button',
+                          {
+                            className: 'pj-btn pj-btn-primary',
+                            type: 'button',
+                            onClick: startCoordinator,
+                            disabled: busy || project.archived,
+                            title: project.archived ? t('archivedHint') : undefined,
+                          },
+                          t('startCoordinator'),
                         ),
-                  ),
+                      ),
+                    ),
+              ),
           ),
         ),
         h('div', {
@@ -2741,7 +3361,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
                     ),
                 )
               : h('h2', { className: 'pj-exec-title' }, t('threads')),
-            execTarget
+            // The panel head is two glyphs at the right edge: search and the
+            // group filter. The 4s poll keeps the cards current, so there is no
+            // refresh control to press.
+            execTarget || !project
               ? null
               : h(
                   'div',
@@ -2749,19 +3372,39 @@ ${SHARED_CSS}${DISPATCH_RULES}
                   h(
                     'button',
                     {
-                      className: 'pj-btn pj-btn-ghost',
+                      className: `pj-icon-btn${searchOpen ? ' pj-active' : ''}`,
                       type: 'button',
-                      disabled: busy || !project,
-                      onClick: () => {
-                        void refresh(projectId).catch((failure) => setError(messageOf(failure)))
-                      },
+                      title: t('searchThreads'),
+                      'aria-label': t('searchThreads'),
+                      'aria-expanded': searchOpen ? 'true' : 'false',
+                      onClick: toggleSearch,
                     },
-                    t('refresh'),
+                    h(SearchIcon, { size: 16 }),
+                  ),
+                  h(
+                    'div',
+                    { className: 'pj-filter' },
+                    h(
+                      'button',
+                      {
+                        className: `pj-icon-btn${anyGroupHidden ? ' pj-active' : ''}`,
+                        type: 'button',
+                        ref: filterTrigger,
+                        title: t('filterThreads'),
+                        'aria-label': t('filterThreads'),
+                        'aria-haspopup': 'menu',
+                        'aria-expanded': filterOpen ? 'true' : 'false',
+                        onClick: () => setFilterOpen((open) => !open),
+                      },
+                      h(FilterIcon, { size: 16 }),
+                    ),
+                    renderFilterMenu(),
                   ),
                 ),
           ),
-          // Search and the fold-all toggle belong to the list view only.
-          !execTarget && project
+          // The search field unfolds under the head; the filter popover carries
+          // the fold-all action, so neither needs a row of its own.
+          !execTarget && project && searchOpen
             ? h(
                 'div',
                 { className: 'pj-exec-tools' },
@@ -2770,17 +3413,13 @@ ${SHARED_CSS}${DISPATCH_RULES}
                   { className: 'pj-search' },
                   h('span', { className: 'pj-search-icon', 'aria-hidden': true }, h(SearchIcon, null)),
                   h('input', {
+                    ref: searchInputRef,
                     type: 'search',
                     value: query,
                     placeholder: t('searchThreads'),
                     'aria-label': t('searchThreads'),
                     onChange: (event) => setQuery(event.target.value),
                   }),
-                ),
-                h(
-                  'button',
-                  { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: toggleAllGroups },
-                  allGroupsCollapsed ? t('expandAll') : t('collapseAll'),
                 ),
               )
             : null,
@@ -2795,14 +3434,161 @@ ${SHARED_CSS}${DISPATCH_RULES}
                   { className: 'pj-exec-scroll' },
                   taskList.length === 0
                     ? h('div', { className: 'pj-empty' }, t('emptyTasks'))
-                    : visibleTasks.length === 0
+                    : shownGroups.length === 0
                       ? h('div', { className: 'pj-empty' }, t('noMatches'))
-                      : groups
-                          .filter((group) => group.tasks.length > 0)
-                          .map(renderThreadGroup),
+                      : shownGroups.map(renderThreadGroup),
                 ),
         ),
         renderTaskMenu(),
+        // Both project-level surfaces are dialogs, rendered last so they paint
+        // over every column. Each is unmounted while closed, so neither holds
+        // focus or a scroll lock.
+        h(Modal, {
+          open: showNewProject,
+          titleId: 'pj-new-project-title',
+          title: t('newProject'),
+          closeLabel: t('close'),
+          onClose: closeNewProject,
+          returnFocusRef: newProjectTrigger,
+          className: 'pj-modal-form',
+          footer: [
+            h(
+              'button',
+              {
+                key: 'cancel',
+                className: 'pj-btn pj-modal-action',
+                type: 'button',
+                disabled: busy,
+                onClick: closeNewProject,
+              },
+              t('cancel'),
+            ),
+            h(
+              'button',
+              {
+                key: 'create',
+                className: 'pj-btn pj-btn-primary pj-modal-action',
+                type: 'button',
+                disabled: busy,
+                onClick: createProject,
+              },
+              t('create'),
+            ),
+          ],
+          children: [
+            error && h('div', { key: 'error', className: 'pj-error', role: 'alert' }, `${t('error')}: ${error}`),
+            h(
+              'label',
+              { key: 'name', className: 'pj-field' },
+              h('span', { className: 'pj-label' }, t('projectName')),
+              h('input', {
+                className: 'pj-input',
+                'aria-label': t('projectName'),
+                placeholder: t('projectName'),
+                value: newProject.name,
+                'data-pj-modal-autofocus': '',
+                onChange: (event) => setNewProject({ ...newProject, name: event.target.value }),
+              }),
+            ),
+            h(
+              'label',
+              { key: 'goal', className: 'pj-field' },
+              h('span', { className: 'pj-label' }, t('instructions')),
+              h('textarea', {
+                className: 'pj-textarea',
+                style: { minHeight: '72px' },
+                'aria-label': t('instructions'),
+                placeholder: t('instructionsPlaceholder'),
+                value: newProject.goal,
+                onChange: (event) => setNewProject({ ...newProject, goal: event.target.value }),
+              }),
+            ),
+            h(
+              'div',
+              { key: 'workspace', className: 'pj-field' },
+              h('span', { className: 'pj-label' }, t('workspace')),
+              h(
+                'div',
+                { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
+                h('input', {
+                  className: 'pj-input pj-grow',
+                  'aria-label': t('workspace'),
+                  placeholder: t('workspacePlaceholder'),
+                  value: newProject.workspace,
+                  onChange: (event) => setNewProject({ ...newProject, workspace: event.target.value }),
+                }),
+                h(
+                  'button',
+                  { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseNewProjectFolder },
+                  t('chooseFolderShort'),
+                ),
+              ),
+            ),
+            h(
+              'div',
+              { key: 'policy', className: 'pj-row' },
+              h(
+                'label',
+                { className: 'pj-field pj-grow' },
+                h('span', { className: 'pj-label' }, t('autonomy')),
+                h(
+                  'span',
+                  { className: 'pj-select-wrap' },
+                  h(
+                    'select',
+                    {
+                      className: 'pj-select',
+                      'aria-label': t('autonomy'),
+                      value: newProject.autonomy,
+                      disabled: busy,
+                      onChange: (event) => setNewProject({ ...newProject, autonomy: event.target.value }),
+                    },
+                    h('option', { value: 'manual' }, t('autonomyManual')),
+                    h('option', { value: 'auto' }, t('autonomyAuto')),
+                  ),
+                  h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
+                ),
+              ),
+              h(
+                'label',
+                { className: 'pj-field' },
+                h('span', { className: 'pj-label' }, t('concurrency')),
+                h('input', {
+                  className: 'pj-input',
+                  'aria-label': t('concurrency'),
+                  type: 'number',
+                  min: 1,
+                  max: 8,
+                  value: newProject.concurrency,
+                  disabled: busy,
+                  style: { width: '88px' },
+                  onChange: (event) =>
+                    setNewProject({ ...newProject, concurrency: event.target.value }),
+                }),
+              ),
+            ),
+          ],
+        }),
+        h(Modal, {
+          open: showSettings,
+          titleId: 'pj-settings-title',
+          title: t('settings'),
+          closeLabel: t('close'),
+          onClose: closeSettings,
+          // The armed archive is a destructive confirmation, so the mask stops
+          // dismissing the dialog until it is cancelled or confirmed.
+          maskClose: !archiveArmed,
+          returnFocusRef: settingsTrigger,
+          className: 'pj-modal-wide',
+          children: project
+            ? [
+                error &&
+                  h('div', { key: 'error', className: 'pj-error', role: 'alert' }, `${t('error')}: ${error}`),
+                notice && h('div', { key: 'notice', className: 'pj-notice', role: 'status' }, notice),
+                renderSettings(),
+              ]
+            : null,
+        }),
       )
     }
 
@@ -2950,12 +3736,19 @@ ${SHARED_CSS}${DISPATCH_RULES}
         // so the subtask appears the moment the coordinator dispatches it rather
         // than only when its final message lands. `translate` and `activeLocale`
         // are injected because the card reads the active locale at call time.
+        //
+        // `tool.call.toolview` is declared by `@deepseek-ai/dsh-client-ui-tool`
+        // (the `tool-call` entry of `conversation.chat.node`), which may activate
+        // after this plugin. That is safe: `ctx.slots.inject` keeps the callback
+        // until the declaration exists and re-runs it on every declaration
+        // lifetime, so the entry installs whenever the owner mounts. No `locale`
+        // namespace is declared here — the card renders through its own injected
+        // `translate`, so it never depends on the host locale face.
         ctx.slots.inject('tool.call.toolview', () =>
           ctx.slots.register(
             {
               name: 'tool.call.toolview',
               key: 'projects_dispatch',
-              locale: NS,
               inject: () => ({ translate, activeLocale }),
             },
             ProjectsDispatchRow,

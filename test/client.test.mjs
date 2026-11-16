@@ -31,10 +31,33 @@ function fakeRequire(name) {
   throw new Error(`unexpected require(${JSON.stringify(name)})`)
 }
 
-/** Apply the plugin to a fake Client context and collect what it registers. */
-function applyWithFakes() {
+/**
+ * Every slot the plugin contributes to, in declaration order. A booted page has
+ * all of them: `sidebar.panellist` (ui-sidebar), `main` (ui-layout),
+ * `projects.conversation` (this plugin's own `main` children) and
+ * `tool.call.toolview` (ui-tool's `tool-call` entry).
+ */
+const SLOT_KEYS = ['sidebar.panellist', 'main', 'projects.conversation', 'tool.call.toolview']
+
+/**
+ * Apply the plugin to a fake Client context and collect what it registers.
+ *
+ * The fake `slots` mirrors the real `SlotRegistry`: `inject(key, callback)` runs
+ * the callback only while `key` is declared, keeps it pending otherwise, and
+ * re-runs it whenever a declaration appears. `undeclared` simulates a page where
+ * a contributing package has not registered yet (its slot is not declared).
+ */
+function applyWithFakes(options = {}) {
+  const undeclared = new Set(options.undeclared || [])
   const registrations = []
   const dictionaries = []
+  const declared = new Set(SLOT_KEYS.filter((key) => !undeclared.has(key)))
+  const pending = new Map(SLOT_KEYS.map((key) => [key, []]))
+  const run = (key) => {
+    const callbacks = pending.get(key) || []
+    pending.set(key, [])
+    for (const callback of callbacks) callback()
+  }
   const context = {
     effect(fn) {
       return fn()
@@ -53,13 +76,15 @@ function applyWithFakes() {
     },
     slots: {
       inject(key, callback) {
-        assert.ok(
-          ['sidebar.panellist', 'main', 'projects.conversation', 'tool.call.toolview'].includes(key),
-          `unexpected slot ${key}`,
-        )
-        return callback()
+        assert.ok(SLOT_KEYS.includes(key), `unexpected slot ${key}`)
+        if (declared.has(key)) callback()
+        else pending.get(key).push(callback)
+        return () => {}
       },
       register(options, component) {
+        // The real registry throws for an undeclared slot; keep that contract so
+        // a plugin that registers without `inject` fails here too.
+        assert.ok(declared.has(options.name), `slot ${options.name} is not declared`)
         registrations.push({ options, component })
         return () => {}
       },
@@ -67,7 +92,16 @@ function applyWithFakes() {
   }
 
   plugin.apply(context)
-  return { registrations, dictionaries }
+  return {
+    registrations,
+    dictionaries,
+    /** Publish a declaration after activation, as a late-activating owner does. */
+    declare(key) {
+      assert.ok(SLOT_KEYS.includes(key), `unexpected slot ${key}`)
+      declared.add(key)
+      run(key)
+    },
+  }
 }
 
 before(async () => {
@@ -122,12 +156,57 @@ test('registers the sidebar entry and the main page', () => {
   const dispatch = registrations.find((entry) => entry.options.name === 'tool.call.toolview')
   assert.ok(dispatch, 'the dispatch tool view is registered')
   assert.equal(dispatch.options.key, 'projects_dispatch')
-  assert.equal(dispatch.options.locale, 'projects')
+  // The card renders through its own injected `translate`, so it declares no
+  // host locale namespace and cannot fail on a missing locale face.
+  assert.equal(dispatch.options.locale, undefined)
   assert.equal(typeof dispatch.component, 'function')
   assert.equal(typeof dispatch.options.inject, 'function')
   const injected = dispatch.options.inject()
   assert.equal(typeof injected.translate, 'function')
   assert.equal(typeof injected.activeLocale, 'function')
+})
+
+test('the dispatch tool view installs when the tool plugin declares its slot late', () => {
+  // Activation order is not guaranteed: this plugin injects `slots` only, so it
+  // can apply before `@deepseek-ai/dsh-client-ui-tool` registers the `tool-call`
+  // entry that declares `tool.call.toolview`. `ctx.slots.inject` must hold the
+  // callback until that declaration exists — the entry is not lost.
+  const page = applyWithFakes({ undeclared: ['tool.call.toolview'] })
+
+  assert.equal(page.registrations.length, 3)
+  assert.equal(
+    page.registrations.some((entry) => entry.options.name === 'tool.call.toolview'),
+    false,
+    'nothing registers into an undeclared slot',
+  )
+
+  page.declare('tool.call.toolview')
+
+  const dispatch = page.registrations.find((entry) => entry.options.name === 'tool.call.toolview')
+  assert.ok(dispatch, 'the pending registration installs once the slot is declared')
+  assert.equal(dispatch.options.key, 'projects_dispatch')
+  assert.equal(typeof dispatch.component, 'function')
+})
+
+test('declares the client packages whose slots it occupies', () => {
+  // `dsh.client.inject` orders module arrival and composes this plugin under the
+  // packages it contributes into. Every slot this plugin registers is owned by
+  // one of them, so a missing entry is a composition bug even though
+  // `ctx.slots.inject` keeps the registration alive on its own.
+  const manifest = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  )
+  const inject = manifest.dsh.client.inject
+  assert.ok(Array.isArray(inject))
+  for (const name of [
+    '@deepseek-ai/dsh-client-ui-layout', // main
+    '@deepseek-ai/dsh-client-ui-sidebar', // sidebar.panellist
+    '@deepseek-ai/dsh-client-ui-conversation', // conversation.content (renderFactorySlot)
+    '@deepseek-ai/dsh-client-ui-tool', // tool.call.toolview
+  ]) {
+    assert.ok(inject.includes(name), `dsh.client.inject must list ${name}`)
+  }
+  assert.equal(manifest.dsh.client.platform, 'web')
 })
 
 /**
@@ -749,26 +828,49 @@ test('relative times come from the Host stamps and degrade to a date', () => {
   assert.match(block, /delta < 7 \* day/)
 })
 
-test('the threads head carries a live search and a fold-all toggle', () => {
+test('the threads head is two glyphs, and the fold-all action lives in the filter', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
 
   // The column is titled Threads, and the detail page returns to it.
   assert.match(source, /t\('threads'\)/)
   assert.doesNotMatch(source, /t\('executors'\)/)
 
-  // Search filters title + summary before the bucketing happens.
+  // The head carries a search glyph and a filter glyph, both at the Host's
+  // 16px seat, and neither is a text button.
+  assert.match(source, /h\(SearchIcon, \{ size: 16 \}\)/)
+  assert.match(source, /h\(FilterIcon, \{ size: 16 \}\)/)
+  assert.match(source, /t\('searchThreads'\)/)
+  assert.match(source, /t\('filterThreads'\)/)
+  assert.match(source, /'aria-expanded': searchOpen \? 'true' : 'false'/)
+  assert.match(source, /'aria-haspopup': 'menu'/)
+
+  // The 4s poll keeps the panel current, so the refresh control is gone.
+  assert.doesNotMatch(source, /t\('refresh'\)/)
+  assert.doesNotMatch(source, /refresh: '/)
+
+  // The search field unfolds under the head and still filters title + summary
+  // before the bucketing happens.
+  assert.match(source, /!execTarget && project && searchOpen/)
   assert.match(source, /className: 'pj-search'/)
   assert.match(source, /placeholder: t\('searchThreads'\)/)
   assert.match(source, /onChange: \(event\) => setQuery\(event\.target\.value\)/)
   assert.match(source, /const needle = query\.trim\(\)\.toLowerCase\(\)/)
   assert.match(source, /`\$\{task\.title \|\| ''\} \$\{taskSubtitle\(task, t\)\}`\.toLowerCase\(\)/)
+  // Collapsing the field drops the needle with it.
+  assert.match(source, /const toggleSearch = \(\) => \{/)
+  assert.match(source, /if \(open\) setQuery\(''\)/)
 
-  // One button flips every group; the label reflects the current state.
+  // The filter popover is one checkbox row per group plus the fold-all action;
+  // the label reflects the current state.
+  assert.match(source, /role: 'menuitemcheckbox'/)
+  assert.match(source, /checked: !hiddenGroups\[group\.key\]/)
   assert.match(source, /allGroupsCollapsed \? t\('expandAll'\) : t\('collapseAll'\)/)
   assert.match(source, /const allGroupsCollapsed = THREAD_GROUPS\.every/)
+  assert.match(source, /const shownGroups = groups\.filter\(/)
+  assert.match(source, /!hiddenGroups\[group\.key\]/)
+  assert.match(source, /t\('showAllGroups'\)/)
 
-  // The reference panel's filter/expand/close icons are deliberately absent.
-  assert.doesNotMatch(source, /t\('filterThreads'\)/)
+  // The reference panel's close icon is still deliberately absent.
   assert.doesNotMatch(source, /t\('closePanel'\)/)
 })
 
@@ -900,7 +1002,15 @@ test('the controls copy the Host primitives instead of importing them', () => {
   assert.match(button, /\.pj-btn-primary\{background:var\(--dsw-alias-button-primary-fill\)/)
   assert.match(button, /\.pj-btn-ghost\{background:transparent;box-shadow:none/)
   assert.doesNotMatch(source, /border-radius:16px/, 'the pill buttons are gone')
-  assert.doesNotMatch(source, /\.pj-btn-danger/, 'no invented danger variant')
+
+  // The one destructive action has its own variant, and it is built from theme
+  // tokens like every other button: a danger hairline, a danger hover fill and
+  // a filled confirming state.
+  const danger = source.slice(source.indexOf('.pj-btn-danger{'), source.indexOf('.pj-icon-btn{'))
+  assert.match(danger, /\.pj-btn-danger\{box-shadow:inset 0 0 0 \.5px var\(--dsw-alias-state-error-primary\)/)
+  assert.match(danger, /\.pj-btn-danger:hover:not\(:disabled\)\{background:var\(--dsw-alias-interactive-bg-hover-danger\)\}/)
+  assert.match(danger, /\.pj-btn-danger-fill\{background:var\(--dsw-alias-state-error-primary\)/)
+  assert.equal(danger.match(/#[0-9a-fA-F]{3,8}\b/g), null)
 
   // The context menu is the Host Menu primitive: an elevated 4px-padded card,
   // 34px rows with a 14px icon seat, a hairline separator and a danger fill.
@@ -931,17 +1041,18 @@ test('the controls copy the Host primitives instead of importing them', () => {
   assert.match(select, /\.pj-select\{[^}]*height:34px/)
   assert.match(select, /\.pj-select-chevron\{[^}]*width:12px;height:12px/)
   assert.match(select, /color:var\(--dsw-alias-menu-icon\)/)
-  // Three pickers remain: autonomy, model and agent preset. The fourth was the
-  // read-only task-model control, retired with the detail field form.
+  // Four pickers: autonomy, model and reasoning effort in the settings dialog,
+  // plus the autonomy picker in the new-project dialog. The read-only task-model
+  // control was retired with the detail field form.
   assert.equal(
     [...source.matchAll(/className: 'pj-select-wrap'/g)].length,
-    3,
-    'all three pickers are wrapped',
+    4,
+    'all four pickers are wrapped',
   )
   assert.equal(
     [...source.matchAll(/className: 'pj-select-chevron'/g)].length,
-    3,
-    'all three pickers draw the caret',
+    4,
+    'all four pickers draw the caret',
   )
 
   // Form fields and section rhythm follow the Host settings form.
@@ -1239,5 +1350,133 @@ test('a dispatch call renders a card that opens its task', () => {
   for (const key of ['dispatchCard', 'dispatchPreparing', 'dispatchOpenHint']) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+})
+
+test('the two project surfaces are Host-shaped dialogs, not page regions', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The old surfaces are gone: no settings tab, no in-page new-project form.
+  assert.doesNotMatch(source, /centerView/)
+  assert.doesNotMatch(source, /\.pj-new-project\{/)
+  assert.doesNotMatch(source, /t\('chatTab'\)/)
+  assert.doesNotMatch(source, /t\('settingsTab'\)/)
+
+  // Both dialogs are the same component, and both are mounted from the page.
+  assert.match(source, /function Modal\(props\)/)
+  assert.equal([...source.matchAll(/h\(Modal, \{/g)].length, 2)
+  assert.match(source, /titleId: 'pj-new-project-title'/)
+  assert.match(source, /titleId: 'pj-settings-title'/)
+
+  // The Host's dialog contract: a labelled modal dialog with a mask.
+  assert.match(source, /role: 'dialog'/)
+  assert.match(source, /'aria-modal': 'true'/)
+  assert.match(source, /'aria-labelledby': titleId/)
+  assert.match(source, /className: 'pj-modal-mask'/)
+  assert.match(source, /className: 'pj-modal-root'/)
+
+  // Escape closes, Tab cycles inside, focus moves in and comes back.
+  assert.match(source, /if \(event\.key === 'Escape'\) \{/)
+  assert.match(source, /if \(event\.key !== 'Tab'\) return/)
+  assert.match(source, /const focusable = \[\.\.\.node\.querySelectorAll\(FOCUSABLE\)\]/)
+  assert.match(source, /const FOCUSABLE =\s*\n?\s*'button:not\(:disabled\), input:not\(:disabled\)/)
+  assert.match(source, /focusWithoutRing\(target\)/)
+  assert.match(source, /returnFocusRef/)
+  assert.match(source, /data-pj-automatic-focus/)
+  assert.match(source, /\[data-pj-modal-autofocus\]/)
+  // The page behind the mask does not scroll while a dialog is open.
+  assert.match(source, /body\.style\.overflow = 'hidden'/)
+  assert.match(source, /body\.style\.overflow = previousOverflow/)
+
+  // The card geometry is the Host Modal primitive's, on theme tokens only.
+  const modal = source.slice(source.indexOf('.pj-modal-root{'), source.indexOf('@keyframes pj-modal-enter'))
+  assert.match(modal, /\.pj-modal-root\{[^}]*position:fixed[^}]*z-index:1000/)
+  assert.match(modal, /\.pj-modal-mask\{[^}]*backdrop-filter:var\(--dsw-mask-blur\)/)
+  assert.match(modal, /\.pj-modal-mask:after\{[^}]*background:var\(--dsw-alias-bg-mask-1\)/)
+  assert.match(modal, /\.pj-modal-dialog\{[^}]*gap:20px/)
+  assert.match(modal, /\.pj-modal-dialog\{[^}]*width:min\(380px,100%\)/)
+  assert.match(modal, /\.pj-modal-dialog\{[^}]*border-radius:var\(--dsw-radius-panel\)/)
+  assert.match(modal, /\.pj-modal-dialog\{[^}]*background:var\(--dsw-alias-bg-layer-2\)/)
+  assert.match(modal, /\.pj-modal-dialog\{[^}]*box-shadow:var\(--dsw-elevation-prominent\)/)
+  assert.match(modal, /\.pj-modal-action\{min-width:72px\}/)
+  assert.equal(modal.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g), null, 'the dialog carries no literal colour')
+})
+
+test('the header triggers are glyphs, and archive moved into the settings dialog', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The list head is a plus glyph plus the Host's panel toggle; the main head is
+  // a gear. None of them is a text button any more.
+  assert.match(source, /h\(PlusIcon, \{ size: 16 \}\)/)
+  assert.match(source, /h\(GearIcon, \{ size: 16 \}\)/)
+  assert.match(source, /h\(PanelLeftIcon, \{ size: 16 \}\)/)
+  assert.match(source, /h\(PanelLeftIcon, \{ size: 18 \}\)/)
+  assert.match(source, /ref: newProjectTrigger/)
+  assert.match(source, /ref: settingsTrigger/)
+  assert.match(source, /onClick: openNewProject/)
+  assert.match(source, /onClick: openSettings/)
+  // The rail keeps its narrow strip and still expands from the same glyph.
+  assert.match(source, /\.pj-list\.pj-collapsed\{[^}]*44px/)
+  assert.match(source, /const renderListRail/)
+  assert.doesNotMatch(source, /'«'/)
+  assert.doesNotMatch(source, /'»'/)
+
+  // The new-project dialog collects every field the Host's create route takes.
+  for (const field of ['name', 'goal', 'workspace', 'autonomy', 'concurrency']) {
+    assert.match(source, new RegExp(`newProject\\.${field}`), `the dialog edits ${field}`)
+  }
+  assert.match(source, /autonomy: newProject\.autonomy/)
+  assert.match(source, /concurrency: Number\(newProject\.concurrency\) \|\| 2/)
+  assert.match(source, /const BLANK_PROJECT = \{ name: '', goal: '', workspace: '', autonomy: 'manual', concurrency: 2 \}/)
+
+  // Archive is the last thing in the settings dialog, in a danger zone.
+  const settings = source.slice(source.indexOf('const renderSettings = () =>'))
+  const danger = settings.indexOf("className: 'pj-section pj-danger-zone'")
+  assert.ok(danger > 0, 'the danger zone is inside the settings dialog')
+  assert.ok(danger > settings.indexOf("t('memory')"), 'the danger zone closes the dialog')
+  assert.match(source, /\.pj-section\.pj-danger-zone\{[^}]*border-top:\.5px solid color-mix\(in srgb, var\(--dsw-alias-state-error-primary\)/)
+  assert.match(source, /\.pj-section\.pj-danger-zone \.pj-section-title\{color:var\(--dsw-alias-state-error-primary\)\}/)
+  assert.match(source, /t\('dangerZone'\)/)
+  assert.match(source, /t\('archiveWarning'\)/)
+
+  // Archiving needs two presses: the first only arms it, and the armed dialog
+  // refuses to close on a mask press.
+  assert.match(source, /const \[archiveArmed, setArchiveArmed\] = useState\(false\)/)
+  assert.match(source, /if \(!project\.archived && !archiveArmed\) \{/)
+  assert.match(source, /setArchiveArmed\(true\)/)
+  assert.match(source, /className: 'pj-btn pj-btn-danger-fill'/)
+  assert.match(source, /t\('archiveConfirm'\)/)
+  assert.match(source, /maskClose: !archiveArmed/)
+  assert.match(source, /onClick: maskClose \? onClose : undefined/)
+  // Unarchiving is not destructive, so it stays one press.
+  assert.match(source, /project\.archived\s*\n?\s*\? h\(\s*\n?\s*'button'/)
+
+  // The archive action is no longer reachable from the main header.
+  const head = source.slice(source.indexOf("className: 'pj-main-head'"), source.indexOf("className: 'pj-main-body'"))
+  assert.doesNotMatch(head, /archiveProject/)
+  assert.doesNotMatch(head, /t\('archive'\)/)
+
+  // The copy says what archiving costs.
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  for (const key of [
+    'settings',
+    'close',
+    'dangerZone',
+    'archiveWarning',
+    'archiveConfirm',
+    'filterThreads',
+    'filterGroups',
+    'showAllGroups',
+  ]) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+  assert.match(en.archiveWarning, /hides this project from the list/)
+  assert.match(zh.archiveWarning, /从列表中隐藏/)
+  // The retired keys are gone from both dictionaries.
+  for (const key of ['chatTab', 'settingsTab', 'refresh']) {
+    assert.equal(en[key], undefined, `EN still carries ${key}`)
+    assert.equal(zh[key], undefined, `ZH still carries ${key}`)
   }
 })

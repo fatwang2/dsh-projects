@@ -2311,7 +2311,7 @@ function createPageHarness({ projects = [], detail = null, viewport = 0, memoryB
     const path = String(url).replace('/projects-api', '')
     const method = (init && init.method) || 'GET'
     const body = init && typeof init.body === 'string' ? JSON.parse(init.body) : undefined
-    requests.push({ method, path, body })
+    requests.push({ method, path, body, headers: init && init.headers })
     // The memory's single-file routes: one body per GET, one file per POST or
     // DELETE. `name` is required on the save route, as the Host requires it.
     const memoryRoute = /^\/projects\/([^/]+)\/memory(?:\/([^/]+))?$/.exec(path)
@@ -2454,7 +2454,7 @@ function createPageHarness({ projects = [], detail = null, viewport = 0, memoryB
       if (globalThis.window) globalThis.window.innerWidth = pristineWindowWidth
     },
     tree: () => tree,
-    /** Every `/projects-api` call the page made, in order: `{ method, path, body }`. */
+    /** Every `/projects-api` call the page made, in order: `{ method, path, body, headers }`. */
     requests,
     nodes,
     textOf,
@@ -3323,6 +3323,51 @@ test('the resolve toggle writes status resolved / review, never the retired bool
   assert.deepEqual(second.body, { status: 'review' })
   assert.equal(page.byLabel('解决')[0].props['aria-pressed'], 'false')
   assert.equal(page.byClass('pj-pill-resolved').length, 0)
+})
+
+test('every write request carries the JSON content type and the CSRF header', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [{ id: 't1', title: '写测试', brief: '写一个测试', output: '', status: 'review' }],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  // PATCH: the resolve toggle.
+  page.click(page.byClass('pj-task-row')[0])
+  await page.settle()
+  page.click(page.byLabel('解决')[0])
+  await page.settle()
+
+  // POST: the approve gate.
+  page.click(page.byText('批准')[0])
+  await page.settle()
+
+  // DELETE: the memory preview's two-press delete.
+  page.click(page.byLabel('设置')[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
+  const options = () => page.byClass('pj-settings-options')[0]
+  page.click(page.byClass('pj-memory-open', page.byClass('pj-memory-row', options())[2])[0])
+  await page.settle()
+  const preview = () => page.byClass('pj-modal-dialog')[1]
+  page.click(page.byLabel('删除文件 known-pitfalls', preview())[0])
+  await page.settle()
+  page.click(page.byText('确认删除', preview())[0])
+  await page.settle()
+
+  const writes = page.requests.filter((entry) => entry.method !== 'GET')
+  assert.deepEqual(writes.map((entry) => entry.method).sort(), ['DELETE', 'PATCH', 'POST'])
+  for (const entry of writes) {
+    assert.equal(
+      entry.headers['content-type'],
+      'application/json',
+      `${entry.method} ${entry.path} carries the JSON content type`,
+    )
+    assert.equal(entry.headers['x-projects-api'], '1', `${entry.method} ${entry.path} carries the CSRF header`)
+  }
 })
 
 test('the row context menu resolves and unresolves through the status enum', async (t) => {

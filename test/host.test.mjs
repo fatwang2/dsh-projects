@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
@@ -145,10 +145,20 @@ function fakeResponse() {
   return response
 }
 
-async function request(method, path, body) {
+/**
+ * Call the route handler. Write methods carry the Host's write fence by
+ * default — the page always sends both headers — while `options.headers`
+ * replaces that default so a test can omit one header and assert the refusal.
+ */
+async function request(method, path, body, options = {}) {
   const req = new EventEmitter()
   req.method = method
   req.url = path
+  req.headers =
+    options.headers ??
+    (method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD'
+      ? {}
+      : { 'content-type': 'application/json', 'x-projects-api': '1' })
   req.destroy = () => {}
   const res = fakeResponse()
   const pending = routes[0].handler(req, res)
@@ -425,6 +435,103 @@ test('the create-task HTTP route is gone', async () => {
 
   const detail = await request('GET', `/projects-api/projects/${launchProjectId}`)
   assert.equal(detail.body.project.tasks.length, 2)
+})
+
+// ---------------------------------------------------------------------------
+// The write fence: a cross-site page can send a "simple" request at loopback
+// without a CORS preflight, so every write route demands a JSON content type
+// and the custom header. Reads stay open.
+
+test('write routes demand the JSON content type and the CSRF header', async () => {
+  const created = await call('projects_create', { name: 'Fenced board', goal: 'Only the page may write.' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Fence me' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  const writePath = `/projects-api/projects/${projectId}/tasks/${taskId}`
+
+  // No custom header: exactly the shape a cross-site simple request can send.
+  const noHeader = await request('PATCH', writePath, { status: 'resolved' }, {
+    headers: { 'content-type': 'application/json' },
+  })
+  assert.equal(noHeader.status, 400)
+  assert.match(noHeader.body.error, /x-projects-api/)
+  assert.match(noHeader.body.error, /content-type: application\/json/)
+
+  // No JSON content type: the other half of the fence.
+  const noType = await request('PATCH', writePath, { status: 'resolved' }, {
+    headers: { 'x-projects-api': '1' },
+  })
+  assert.equal(noType.status, 400)
+  assert.match(noType.body.error, /content-type: application\/json/)
+
+  // A simple request's usual content type is refused too.
+  const textPlain = await request('PATCH', writePath, { status: 'resolved' }, {
+    headers: { 'content-type': 'text/plain', 'x-projects-api': '1' },
+  })
+  assert.equal(textPlain.status, 400)
+
+  // The fence covers POST and DELETE, not just PATCH.
+  const post = await request('POST', `/projects-api/projects/${projectId}/memory`, { name: 'x', text: 'x' }, {
+    headers: { 'content-type': 'application/json' },
+  })
+  assert.equal(post.status, 400)
+  const del = await request('DELETE', `/projects-api/projects/${projectId}/memory/x`, undefined, {
+    headers: { 'x-projects-api': '1' },
+  })
+  assert.equal(del.status, 400)
+
+  // Nothing was written by the refused calls.
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.status, 200)
+  assert.equal(detail.body.project.tasks.find((task) => task.id === taskId).status, 'queued')
+
+  // Both headers (with a charset, as a browser may send) let the write through.
+  const accepted = await request('PATCH', writePath, { status: 'resolved' }, {
+    headers: { 'content-type': 'application/json; charset=utf-8', 'x-projects-api': '1' },
+  })
+  assert.equal(accepted.status, 200)
+  assert.equal(accepted.body.task.status, 'resolved')
+
+  // GET stays compatible with a caller that sends no headers at all.
+  const bareRead = await request('GET', `/projects-api/projects/${projectId}`, undefined, { headers: {} })
+  assert.equal(bareRead.status, 200)
+  assert.equal(bareRead.body.project.id, projectId)
+})
+
+test('a project write fsyncs the temporary file and leaves it 0600', async () => {
+  const created = await call('projects_create', { name: 'Durable board', goal: 'Survive a crash.' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const file = join(home, 'projects', projectId, 'project.json')
+
+  // The Host imports `open` directly, so the shared FileHandle prototype is the
+  // only seam over the imported binding. The patch window is one request.
+  const probe = await open(file, 'r')
+  const prototype = Object.getPrototypeOf(probe)
+  const originalSync = prototype.sync
+  let syncs = 0
+  prototype.sync = async function (...args) {
+    syncs += 1
+    return originalSync.apply(this, args)
+  }
+  try {
+    const patched = await request('PATCH', `/projects-api/projects/${projectId}`, { name: 'Durable board v2' })
+    assert.equal(patched.status, 200)
+  } finally {
+    prototype.sync = originalSync
+    await probe.close()
+  }
+
+  assert.ok(syncs >= 1, 'the write flushes the temporary file before the rename')
+  // The replacement inode is 0600: project data is not for other local users.
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(file)).mode & 0o777, 0o600)
+  }
+  // The rename committed: no temporary sibling survives.
+  const leftovers = (await readdir(join(home, 'projects', projectId))).filter((name) => name.endsWith('.tmp'))
+  assert.deepEqual(leftovers, [])
+  // And the content is the complete new document, not a zero-length file.
+  const stored = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(stored.name, 'Durable board v2')
 })
 
 test('the coordinator tool can relay the human verdict, and has no resolved boolean', async () => {

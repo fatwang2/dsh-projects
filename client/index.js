@@ -705,9 +705,17 @@ ${SHARED_CSS}${DISPATCH_RULES}
     }
 
     async function api(path, init) {
+      // Every write route fences on `x-projects-api`; sending it on reads too
+      // keeps one code path and costs nothing. The JSON content type is the
+      // other half of the Host's fence, so both stay here rather than at each
+      // call site.
       const response = await fetch(`${API}${path}`, {
-        headers: { 'content-type': 'application/json' },
         ...init,
+        headers: {
+          'content-type': 'application/json',
+          'x-projects-api': '1',
+          ...(init && init.headers),
+        },
       })
       let payload = {}
       try {

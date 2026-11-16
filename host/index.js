@@ -23,7 +23,7 @@
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -32,6 +32,19 @@ export const inject = ['webServer', 'tools']
 
 const ROUTE = '/projects-api'
 const BODY_LIMIT = 2 * 1024 * 1024
+/**
+ * The write-route fence. A browser can fire a cross-site "simple" request at a
+ * loopback server without a CORS preflight (`mode: 'no-cors'` plus a
+ * `text/plain` body), so a write route that only parses JSON is reachable from
+ * any page the human visits. Requiring a JSON content type *and* a custom
+ * header closes both halves: the content type refuses the form/text shapes a
+ * simple request can send, and the custom header forces a preflight the Host
+ * never approves. Reads stay open, so the page's GETs are unchanged.
+ */
+const WRITE_METHODS = new Set(['POST', 'PATCH', 'DELETE'])
+const CSRF_HEADER = 'x-projects-api'
+const CSRF_VALUE = '1'
+const WRITE_FENCE = 'write routes require "content-type: application/json" and "x-projects-api: 1"'
 const MAX_GOAL = 16_000
 const MAX_BRIEF = 8_000
 const MAX_OUTPUT = 4_000
@@ -357,10 +370,37 @@ async function isDirectory(path) {
   }
 }
 
+/**
+ * Replace `file` in one step: write a fresh sibling, flush it to disk, then
+ * rename it over the target. The fsync is what keeps a crash from publishing a
+ * zero-length file — without it the rename can reach the disk before the
+ * contents do. The temporary inode is created 0600, and the rename carries that
+ * mode onto the target, so project data (briefs, outputs, memory) is not
+ * readable by other local users.
+ */
 async function writeFileAtomic(file, contents) {
   const temporary = `${file}.${randomBytes(4).toString('hex')}.tmp`
-  await writeFile(temporary, contents, 'utf8')
-  await rename(temporary, file)
+  const handle = await open(temporary, 'w', 0o600)
+  try {
+    await handle.writeFile(contents, 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+  try {
+    await rename(temporary, file)
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error
+    // The sibling lives in the target's own directory, so EXDEV means that
+    // directory itself was replaced by a mount point (or a bind mount). A
+    // rename cannot cross filesystems; fall back to a plain in-place write
+    // rather than losing the save. This path gives up the fsync guarantee, so
+    // it narrows the target's mode explicitly: `writeFile`'s `mode` only applies
+    // to a fresh inode, and the target usually exists here.
+    await rm(temporary, { force: true })
+    await writeFile(file, contents, { encoding: 'utf8', mode: 0o600 })
+    await chmod(file, 0o600)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2959,6 +2999,28 @@ function readJson(req) {
 }
 
 /**
+ * Refuse a write that did not come from the page. Both checks are deliberate:
+ * the content type refuses the form/text shapes a cross-site simple request can
+ * send, and the custom header forces a preflight this Host never approves. A
+ * client that ignores the preflight is still rejected server-side. Reads are
+ * untouched: GET has no body to forge and stays compatible with old callers.
+ */
+function requireWriteHeaders(req, method) {
+  if (!WRITE_METHODS.has(method)) return
+  const headers = req.headers || {}
+  const contentType = String(headers['content-type'] || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase()
+  if (contentType !== 'application/json') {
+    throw httpError(400, `content_type_required: ${WRITE_FENCE}`)
+  }
+  if (String(headers[CSRF_HEADER] || '').trim() !== CSRF_VALUE) {
+    throw httpError(400, `csrf_header_required: ${WRITE_FENCE}`)
+  }
+}
+
+/**
  * The `?session=` value of a task DELETE, normalized. Absent, empty and
  * whitespace all mean "no session action", which is the conservative default:
  * deleting a task must never touch a session unless the caller asked.
@@ -3190,6 +3252,7 @@ function createRouteHandler(ctx) {
     const path = url.pathname.slice(ROUTE.length) || '/'
     const method = (req.method || 'GET').toUpperCase()
     try {
+      requireWriteHeaders(req, method)
       const result = await routeRequest(ctx, method, path, req, url.searchParams)
       send(res, result.status, result.body)
     } catch (error) {

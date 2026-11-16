@@ -7,25 +7,37 @@ with its own context, and its final message lands on the task for review.
 
 ## Where it lives
 
-- Left sidebar: a **Projects** entry (board glyph) opens the project page.
+- Left sidebar: a **Projects** entry (a stacked-card glyph drawn on a 24 grid
+  with `currentColor` strokes) opens the project page. The plugin-market icon
+  (`icon.svg`) follows the Host's plugin-icon convention instead: a 36 grid,
+  filled colour, and padded content.
 - The page is three columns: **projects** | **main conversation** | **executors**.
-  - Column 1 lists projects and creates new ones; it collapses to a narrow icon
-    rail, and the two column edges are draggable (both widths and the collapsed
-    state are remembered locally).
+  - Column 1 lists projects. The `+` glyph in its header opens a create dialog
+    (name, instructions, optional workspace, autonomy, concurrency); the
+    panel-left glyph collapses the column to a narrow icon rail, and the two
+    column edges are draggable (both widths and the collapsed state are
+    remembered locally).
   - Column 2 is the project's coordinator conversation: the real DSH chat with
     its composer. **Start coordinator** creates the Session and sends the
-    coordinator prompt; **Settings** switches this column to instructions,
-    shared memory, dispatch policy, worker model/effort and workspace.
+    coordinator prompt. The gear glyph in this column's header opens a
+    **settings dialog** — instructions, shared memory, dispatch policy, worker
+    model/effort and workspace — whose bottom is a danger zone that **archives**
+    the project behind a two-step confirm (arm, then confirm; the mask does not
+    dismiss it while armed).
   - Column 3 is the Threads panel: five collapsible groups (running, ready for
     review, waiting on you = blocked + failed, idle = queued, resolved — folded
-    by default). A card is a status icon, the title (single line, ellipsised), a
-    relative time, a one-line summary and optional chips (model, task id) — no
-    body text, no controls. Click a card to open its detail view in the same
-    column: the executor's own conversation, with a back button. The task brief
-    is not repeated there — it is already the first message of that
-    conversation, and the worker's final message is the output. **Resolve** sits
-    at the top right of the detail view; **delete** lives only in the card's
-    right-click menu.
+    by default). The panel head carries two glyphs: **search** (unfolds a field
+    that filters on title and summary, and clears when folded again) and
+    **filter** (show or hide each of the five groups, plus fold-all/expand-all).
+    There is no refresh control; a 4s poll keeps the cards current. A card is a
+    status icon, the title (single line, ellipsised), a relative time, a
+    one-line summary and optional chips (model, task id) — no body text, no
+    controls. Click a card to open its detail view in the same column: the
+    executor's own conversation, with a back button. The task brief is not
+    repeated there — it is already the first message of that conversation, and
+    the worker's final message is the output. **Resolve** sits at the top right
+    of the detail view; **delete** lives only in the card's right-click menu
+    (two-step confirm).
 - Each `projects_dispatch` call in the coordinator conversation renders as a
   clickable task card: title, read-only status pill, relative time and a
   resolved chip. Clicking it opens that task's detail view (switching projects
@@ -39,12 +51,14 @@ with its own context, and its final message lands on the task for review.
 
 ## The loop
 
-1. Create a project on the page (or with `projects_create`). The workspace is
-   optional: **Choose folder** opens the Host's own directory chooser (the same
-   dialog the workspace picker uses), and a project with no folder inherits the
-   coordinator session's directory. Then click **Open coordinator**: the page
-   creates the project's coordinator Session, sends the coordinator prompt into
-   it, and shows the conversation beside the board.
+1. Click the `+` glyph in the first column's header (or call
+   `projects_create`). The dialog takes a name, the instructions, an optional
+   workspace, autonomy and concurrency. **Choose folder** opens the Host's own
+   directory chooser (the same dialog the workspace picker uses), and a project
+   with no folder inherits the coordinator session's directory. Then click
+   **Start coordinator**: the page creates the project's coordinator Session,
+   sends the coordinator prompt into it, and shows the conversation beside the
+   board.
 2. The coordinator splits the goal with `projects_add_task` and dispatches with
    `projects_dispatch`. Dispatch returns immediately; the coordinator stays
    responsive.
@@ -58,7 +72,8 @@ with its own context, and its final message lands on the task for review.
    **Resolve** in the task detail view: status is system-owned and read-only, so
    acceptance is the `resolved` flag, not a status edit. To send work back or
    add a follow-up, say so in the main conversation and let the coordinator
-   derive a new task. Deleting a task is in the row's right-click menu.
+   derive a new task. Deleting a task is in the row's right-click menu
+   (two-step confirm).
 
 ## Dispatch policy
 
@@ -85,6 +100,17 @@ with its own context, and its final message lands on the task for review.
     Never deleted automatically.
 
   Deleting the plugin does not delete any of it.
+- **Sessions are archived, never deleted.** DeepSeek Harness has no way to
+  delete a session — its own UI says sessions can be archived but are never
+  deleted. Deleting a task can archive its worker session with
+  `DELETE /projects-api/projects/:id/tasks/:taskId?session=archive`; the route
+  only ever touches that task's own `childSessionId`, refuses the coordinator
+  session and a worker that is still running, and
+  `?session=1|true|delete|remove|yes` is rejected (400) rather than silently
+  downgraded to an archive. Archiving frees **no disk space**: it hides the
+  session from the default sidebar and refuses it further model steps, while
+  `$DSH_HOME/sessions/` keeps every byte. The page's delete menu currently
+  deletes only the task.
 - **Auto-compaction**: after an append or a page save, once the memory exceeds
   the project's `memoryBudget` (default 64000 characters, clamped to
   4000–200000) and `autoCompact` is not false, the Host moves whole oldest
@@ -93,9 +119,11 @@ with its own context, and its final message lands on the task for review.
   write, and rolls back on any mismatch, so nothing is silently dropped. Turn it
   off per project with `autoCompact: false` to keep the memory append-only.
 - Workers are in-process subagents: they stop when the plugin is disabled or
-  the process exits. There is no cloud execution in this version, and two
+  the process exits. There is no cloud execution in this version, and four
   planned features are still missing: **per-task git worktree isolation** (each
-  task gets its own branch/worktree) and **scheduled or event-triggered runs**.
+  task gets its own branch/worktree), **scheduled or event-triggered runs**, a
+  **global pause / reporting policy**, and an **output library** (task outputs
+  and workspace files collected on the page).
 - Project instructions are capped at 16000 characters; each task output keeps
   the last 4000 characters of the worker's final message.
 - The worker route is a project setting (`model`, `reasoningEffort`,

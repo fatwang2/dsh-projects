@@ -1196,6 +1196,30 @@ test('the coordinator prompt lists open tasks and counts the resolved ones', () 
   assert.doesNotMatch(empty, /include_resolved/)
 })
 
+test('the coordinator prompt says to continue a task instead of opening a new one', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function coordinatorPrompt')
+  const end = source.indexOf('function ProjectsIcon', start)
+  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
+  const coordinatorPrompt = new Function(`${source.slice(start, end)}; return coordinatorPrompt;`)()
+  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks: [] }
+
+  // The rule has to be in both prompts: the coordinator decides between "continue
+  // this task" and "create another one" before every dispatch, in the language the
+  // human reads.
+  const zh = coordinatorPrompt(project, 'zh')
+  assert.match(zh, /派发前先看上面的任务列表/)
+  assert.match(zh, /projects_dispatch 的 note 参数继续那条任务/)
+  assert.match(zh, /只有不同的事才用 projects_add_task 新建任务/)
+  assert.match(zh, /append_brief/)
+
+  const en = coordinatorPrompt(project, 'en')
+  assert.match(en, /Before dispatching, read the task list above/)
+  assert.match(en, /continue that task with the projects_dispatch note parameter/)
+  assert.match(en, /create a task only for different work/)
+  assert.match(en, /append_brief/)
+})
+
 test('the panel groups threads into five fixed sections in reference order', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   const start = source.indexOf('const THREAD_GROUPS')

@@ -24,13 +24,32 @@ const tools = new Map()
 const routes = []
 const listeners = new Map()
 const activations = []
+/** Messages the host delivered to an existing worker session (continuation). */
+const workerMessages = []
 /** Temporary git repositories and plain directories the worktree tests create. */
 const tempDirs = []
 
 const fakeSubagents = {
+  /**
+   * One-shot child id override. Every dispatch otherwise reuses
+   * `child-session-1`, which is fine for "one worker per test" cases but not for
+   * a test that settles its own worker: `settleWorker` finds the first task with
+   * that id, which could be another project's.
+   */
+  nextChildId: null,
+  /** When set, `sendMessage` rejects with it, exercising the fresh-session fallback. */
+  sendMessageError: null,
   async startActivation(spec) {
     activations.push(spec)
-    return { childId: 'child-session-1', name: 'agent-1', result: Promise.resolve({}), dispose: async () => {} }
+    const childId = fakeSubagents.nextChildId || 'child-session-1'
+    fakeSubagents.nextChildId = null
+    return { childId, name: 'agent-1', result: Promise.resolve({}), dispose: async () => {} }
+  },
+  /** The continuation seam: a message to an existing member of the tree. */
+  async sendMessage(sender, targetId, content, options) {
+    if (fakeSubagents.sendMessageError) throw fakeSubagents.sendMessageError
+    workerMessages.push({ sender, targetId, content, options })
+    return `msg-${workerMessages.length}`
   },
 }
 
@@ -1414,6 +1433,155 @@ test('projects_memory append creates a file with frontmatter and appends to it',
   )
   // A second append keeps the description the file was created with.
   assert.match(await memoryFileOf(projectId, 'deployment-notes'), /^description: How deploys work$/m)
+})
+
+// ---------------------------------------------------------------------------
+// A memory write is a read-modify-write of the whole file, so writes to one
+// file are serialized per file: two workers appending to the same topic at the
+// same time must not overwrite each other. Different topics still run in
+// parallel, and a failed write must release its slot.
+
+test('concurrent appends to one memory file all survive', async () => {
+  const projectId = await newProject('Concurrent appends')
+  // Seed the file first: every append below is then a read-modify-write of an
+  // existing body, which is the shape that loses data without a lock.
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 'race-log',
+    text: 'SEGMENT-0 seed',
+  })
+
+  const workers = 8
+  const results = await Promise.all(
+    Array.from({ length: workers }, (_, index) => call('projects_memory', {
+      project_id: projectId,
+      action: 'append',
+      name: 'race-log',
+      text: `SEGMENT-${index + 1} from worker ${index + 1}`,
+    })),
+  )
+
+  // Each answer reports the size after its own append. Serialized writes make
+  // those sizes strictly grow; without the lock every append reads the seed and
+  // they all report the same size, with only the last body left on disk.
+  const sizes = results
+    .map((answer) => Number(answer.match(/\((\d+) characters\)/)[1]))
+    .sort((left, right) => left - right)
+  for (let index = 1; index < sizes.length; index += 1) {
+    assert.ok(sizes[index] > sizes[index - 1], `sizes grow one append at a time: ${sizes.join(',')}`)
+  }
+
+  const body = await call('projects_memory', { project_id: projectId, action: 'read', name: 'race-log' })
+  const segments = [...body.matchAll(/SEGMENT-(\d+)/g)].map((match) => Number(match[1]))
+  assert.deepEqual(
+    segments.sort((left, right) => left - right),
+    Array.from({ length: workers + 1 }, (_, index) => index),
+  )
+  for (let index = 1; index <= workers; index += 1) {
+    assert.equal(body.split(`SEGMENT-${index} `).length - 1, 1, `SEGMENT-${index} is there exactly once`)
+  }
+})
+
+test('concurrent appends to different files all land', async () => {
+  const projectId = await newProject('Parallel appends')
+  const names = ['alpha-decisions', 'beta-gotchas', 'gamma-notes']
+  await Promise.all(
+    names.flatMap((name) => [1, 2, 3].map((index) => call('projects_memory', {
+      project_id: projectId,
+      action: 'append',
+      name,
+      text: `${name}-MARK-${index}`,
+    }))),
+  )
+  for (const name of names) {
+    const body = await call('projects_memory', { project_id: projectId, action: 'read', name })
+    for (let index = 1; index <= 3; index += 1) {
+      assert.equal(body.split(`${name}-MARK-${index}`).length - 1, 1, `${name} kept MARK-${index}`)
+    }
+  }
+  // The tool's index reads the directory, so it lists every file even though
+  // concurrent writers each regenerated MEMORY.md from their own snapshot.
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  for (const name of names) assert.match(index, new RegExp(`· ${name} — `))
+})
+
+test('the memory write lock is per file: a different file is never blocked', async () => {
+  const projectId = await newProject('Per-file lock')
+  // Hold one file's lock through the test seam, then write a different file
+  // through the real tool: a global lock would make this append wait.
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const held = plugin.withMemoryWriteLock(plugin.memoryWriteKey(projectId, 'held-file'), async () => {
+    await gate
+  })
+  let timer
+  try {
+    const blocked = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('an append to a different file was blocked by the memory write lock')),
+        2_000,
+      )
+    })
+    const appended = await Promise.race([
+      call('projects_memory', { project_id: projectId, action: 'append', name: 'free-file', text: 'FREE-FILE-LANDED' }),
+      blocked,
+    ])
+    assert.match(appended, /Appended/)
+    assert.match(
+      await call('projects_memory', { project_id: projectId, action: 'read', name: 'free-file' }),
+      /FREE-FILE-LANDED/,
+    )
+
+    // The held file itself queues: its append cannot start while the lock is held.
+    let landed = false
+    const queued = call('projects_memory', {
+      project_id: projectId,
+      action: 'append',
+      name: 'held-file',
+      text: 'HELD-FILE-LANDED',
+    }).then((answer) => {
+      landed = true
+      return answer
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(landed, false, 'an append to the locked file must wait for the lock')
+    release()
+    await queued
+    assert.match(
+      await call('projects_memory', { project_id: projectId, action: 'read', name: 'held-file' }),
+      /HELD-FILE-LANDED/,
+    )
+  } finally {
+    clearTimeout(timer)
+    release()
+    await held
+  }
+})
+
+test('a failed memory write releases its lock instead of wedging the file', async () => {
+  // The seam: a rejecting run must not poison the queue, and its entry must be
+  // gone once it settles, so an idle file leaks nothing.
+  const key = plugin.memoryWriteKey('p-test', 'broken')
+  await assert.rejects(
+    () => plugin.withMemoryWriteLock(key, async () => { throw new Error('boom') }),
+    /boom/,
+  )
+  assert.equal(plugin.memoryWriteLockCount(), 0)
+  assert.equal(await plugin.withMemoryWriteLock(key, async () => 'ran'), 'ran')
+
+  // The real path: a write that fails on disk (a directory where the topic file
+  // belongs) rejects, and the next append to that file still lands.
+  const projectId = await newProject('Failed write lock')
+  await mkdir(join(memoryDirOf(projectId), 'wedged.md'), { recursive: true })
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'append', name: 'wedged', text: 'never lands' }),
+    /EISDIR|ENOTDIR|EPERM|EACCES/i,
+  )
+  await rm(join(memoryDirOf(projectId), 'wedged.md'), { recursive: true, force: true })
+  await call('projects_memory', { project_id: projectId, action: 'append', name: 'wedged', text: 'lands now' })
+  assert.match(await call('projects_memory', { project_id: projectId, action: 'read', name: 'wedged' }), /lands now/)
+  assert.equal(plugin.memoryWriteLockCount(), 0)
 })
 
 test('projects_memory write replaces one file and keeps the others', async () => {
@@ -2963,4 +3131,229 @@ test('the worktree isolation switch round-trips through create, update and the p
   assert.match(viaTool, /worktreeIsolation=on/)
   const list = await call('projects_list', {})
   assert.match(list, /worktree=on/)
+})
+
+// ---------------------------------------------------------------------------
+// Continuing a task instead of always creating a new one.
+//
+// A task is one piece of work, and a piece of work often has stages: research
+// the form, then fill it in. `projects_dispatch` on a task that already ran
+// delivers the follow-up to that same worker session (`ctx.subagents.sendMessage`
+// — the seam the model-facing `send_message` tool uses), so the worker keeps the
+// files it read and the decisions it made, and the board keeps one row. A
+// session that cannot be resumed falls back to a fresh worker with the same
+// instruction; a task that never ran is unchanged.
+
+/** Create an auto project with one task, and return both ids. */
+async function boardWithTask(title, brief = '') {
+  const created = await call('projects_create', { name: `Continue · ${title}`, autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', { project_id: projectId, title, brief })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  return { projectId, taskId }
+}
+
+/** Dispatch once under a unique session id, then settle it, so the task is idle. */
+async function runFirstStage(projectId, taskId, childId, output) {
+  fakeSubagents.nextChildId = childId
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.match(dispatched, /Dispatched task/)
+  listeners.get('subagent/end')({
+    id: childId,
+    parentSessionId: 'lead-session',
+    provider: 'spawn',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: output }],
+  })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+}
+
+test('dispatching a task that already ran continues its worker session', async () => {
+  const { projectId, taskId } = await boardWithTask('Research then submit the form', 'First find the form fields.')
+  await runFirstStage(projectId, taskId, 'child-session-continue', 'Found the fields.')
+
+  const activationsBefore = activations.length
+  const messagesBefore = workerMessages.length
+  const continued = await call('projects_dispatch', {
+    project_id: projectId,
+    task_id: taskId,
+    note: 'Now fill in and submit it.',
+  })
+
+  // Same task, same session: no new worker was started.
+  assert.match(continued, /Continued task/)
+  assert.match(continued, /child-session-continue/)
+  assert.equal(activations.length, activationsBefore, 'no new activation for a continuation')
+  assert.equal(workerMessages.length, messagesBefore + 1)
+
+  const message = workerMessages.at(-1)
+  assert.equal(message.targetId, 'child-session-continue')
+  assert.equal(message.sender.id, 'lead-session')
+  assert.ok(message.options.signal instanceof AbortSignal)
+  const text = message.content[0].text
+  assert.match(text, /## Follow-up stage of task t-[0-9a-f]{8}/)
+  assert.match(text, /Research then submit the form/)
+  assert.match(text, /## Follow-up note\nNow fill in and submit it\./)
+  // The session already has the brief, so the continuation must not repeat it.
+  assert.doesNotMatch(text, /First find the form fields\./)
+
+  // The task is live again, on the same row and the same session.
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  const task = detail.body.project.tasks.find((candidate) => candidate.id === taskId)
+  assert.equal(task.status, 'running')
+  assert.equal(task.childSessionId, 'child-session-continue')
+  assert.equal(task.output, '')
+  assert.equal('finishedAt' in task, false)
+
+  // The continued run settles onto the same task, replacing the earlier output.
+  listeners.get('subagent/end')({
+    id: 'child-session-continue',
+    parentSessionId: 'lead-session',
+    provider: 'spawn',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Submitted; confirmation number 42.' }],
+  })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  const after = await request('GET', `/projects-api/projects/${projectId}`)
+  const settled = after.body.project.tasks.find((candidate) => candidate.id === taskId)
+  assert.equal(settled.status, 'review')
+  assert.equal(settled.output, 'Submitted; confirmation number 42.')
+  assert.equal(settled.childSessionId, 'child-session-continue')
+})
+
+test('append_brief grows the brief and the continuation carries only the addition', async () => {
+  const { projectId, taskId } = await boardWithTask('Two-stage brief', 'Stage one: read the docs.')
+  await runFirstStage(projectId, taskId, 'child-session-brief', 'Docs read.')
+
+  const appended = await call('projects_update_task', {
+    project_id: projectId,
+    task_id: taskId,
+    append_brief: 'Stage two: write the summary.',
+  })
+  assert.match(appended, /brief=\d+ characters/)
+  // The append is a real brief write, not a side channel: the page and a fresh
+  // worker both see one growing brief.
+  const onDisk = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
+  assert.equal(onDisk.tasks[0].brief, 'Stage one: read the docs.\n\nStage two: write the summary.')
+  assert.equal(onDisk.tasks[0].status, 'review', 'appending does not touch the status')
+
+  const messagesBefore = workerMessages.length
+  const continued = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.match(continued, /Continued task/)
+  assert.equal(workerMessages.length, messagesBefore + 1)
+  const text = workerMessages.at(-1).content[0].text
+  // The session already has the brief, so only the appended paragraph travels.
+  assert.match(text, /## Follow-up note\nStage two: write the summary\./)
+  assert.doesNotMatch(text, /Stage one: read the docs\./)
+  // Delivered once: the queue is consumed, so the next dispatch has nothing to
+  // repeat and says so.
+  const afterDispatch = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
+  assert.equal('pendingNotes' in afterDispatch.tasks[0], false)
+
+  // A second continuation with nothing new says so instead of repeating itself.
+  listeners.get('subagent/end')({
+    id: 'child-session-brief',
+    parentSessionId: 'lead-session',
+    provider: 'spawn',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Summary written.' }],
+  })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.match(workerMessages.at(-1).content[0].text, /There is no new instruction/)
+})
+
+test('a worker session that cannot be continued falls back to a fresh session', async () => {
+  const { projectId, taskId } = await boardWithTask('Session is gone', 'Do the first half.')
+  await runFirstStage(projectId, taskId, 'child-session-gone', 'First half done.')
+
+  const activationsBefore = activations.length
+  const messagesBefore = workerMessages.length
+  fakeSubagents.sendMessageError = new Error('subagent "child-session-gone" is unavailable')
+  try {
+    fakeSubagents.nextChildId = 'child-session-fallback'
+    const dispatched = await call('projects_dispatch', {
+      project_id: projectId,
+      task_id: taskId,
+      note: 'Do the second half.',
+    })
+    // A refused continuation must not fail the dispatch: it starts a fresh
+    // worker and says so, and the note still reaches that worker.
+    assert.match(dispatched, /Dispatched task/)
+    assert.match(dispatched, /could not be continued/)
+    assert.match(dispatched, /fresh session/)
+    assert.equal(activations.length, activationsBefore + 1)
+    assert.equal(workerMessages.length, messagesBefore, 'nothing was delivered to the dead session')
+    assert.match(activations.at(-1).prompt[0].text, /## Follow-up note\nDo the second half\./)
+
+    const detail = await request('GET', `/projects-api/projects/${projectId}`)
+    const task = detail.body.project.tasks.find((candidate) => candidate.id === taskId)
+    assert.equal(task.childSessionId, 'child-session-fallback')
+    assert.equal(task.status, 'running')
+  } finally {
+    fakeSubagents.sendMessageError = null
+  }
+})
+
+test('a task that never ran still gets a fresh worker and no continuation message', async () => {
+  const { projectId, taskId } = await boardWithTask('First run', 'Do it once.')
+
+  const activationsBefore = activations.length
+  const messagesBefore = workerMessages.length
+  fakeSubagents.nextChildId = 'child-session-first'
+  const dispatched = await call('projects_dispatch', {
+    project_id: projectId,
+    task_id: taskId,
+    note: 'Start with the header.',
+  })
+
+  assert.match(dispatched, /Dispatched task/)
+  assert.equal(activations.length, activationsBefore + 1)
+  assert.equal(workerMessages.length, messagesBefore, 'a first run has no session to continue')
+  const prompt = activations.at(-1).prompt[0].text
+  assert.match(prompt, /Do it once\./)
+  assert.match(prompt, /## Follow-up note\nStart with the header\./)
+})
+
+test('append_brief refuses to overflow the brief instead of cutting it', async () => {
+  const { projectId, taskId } = await boardWithTask('Full brief', 'x'.repeat(7_990))
+  await assert.rejects(
+    () => call('projects_update_task', {
+      project_id: projectId,
+      task_id: taskId,
+      append_brief: 'y'.repeat(100),
+    }),
+    /brief_too_long/,
+  )
+  const onDisk = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
+  assert.equal(onDisk.tasks[0].brief.length, 7_990, 'the stored brief is untouched')
+})
+
+test('changing the task model starts a fresh session instead of continuing the old one', async () => {
+  const { projectId, taskId } = await boardWithTask('Route change', 'Run on the default route.')
+  await runFirstStage(projectId, taskId, 'child-session-route', 'First stage done.')
+
+  // A continued session keeps the model it was created with, so a changed
+  // override must not be silently ignored: the dispatch starts a fresh session
+  // and says why.
+  await call('projects_update_task', {
+    project_id: projectId,
+    task_id: taskId,
+    model: 'gamma/gamma-large',
+  })
+  const activationsBefore = activations.length
+  const messagesBefore = workerMessages.length
+  fakeSubagents.nextChildId = 'child-session-route-2'
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+
+  assert.match(dispatched, /Dispatched task/)
+  assert.match(dispatched, /could not be continued \(the task model, preset or effort changed/)
+  assert.equal(activations.length, activationsBefore + 1)
+  assert.equal(workerMessages.length, messagesBefore, 'the old session is not touched')
+  assert.deepEqual(activations.at(-1).agentOptions, { provider: 'gamma', model: 'gamma-large' })
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  const task = detail.body.project.tasks.find((candidate) => candidate.id === taskId)
+  assert.equal(task.childSessionId, 'child-session-route-2')
+  assert.deepEqual(task.childRoute, { model: 'gamma/gamma-large', agentPreset: '', effort: '' })
 })

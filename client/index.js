@@ -1301,6 +1301,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
           project.autonomy === 'manual'
             ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
             : '7. 当前自主程度是自动：你可以直接派发任务。',
+          '8. 派发前先看上面的任务列表：如果这次要做的是某条未完成任务（同一件事）的后续阶段，用 projects_dispatch 的 note 参数继续那条任务，不要新建；只有不同的事才用 projects_add_task 新建任务。任务说明要补充时用 projects_update_task 的 append_brief，不要另起一条任务。',
           '',
           '## 回答方式（硬约束）',
           '- 回答尽量短：一般不超过 3-5 句。',
@@ -1333,6 +1334,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
         project.autonomy === 'manual'
           ? '7. Autonomy is manual: get the user\'s explicit go-ahead in this conversation, mark the task approved with projects_update_task, then dispatch.'
           : '7. Autonomy is auto: you may dispatch without waiting for approval.',
+        '8. Before dispatching, read the task list above: when the next step is a later stage of an unfinished task (the same piece of work), continue that task with the projects_dispatch note parameter instead of creating a new one; create a task only for different work. To add to a brief, use projects_update_task append_brief rather than opening another task.',
         '',
         '## Reply style (hard rules)',
         '- Keep answers short: usually 3-5 sentences at most.',

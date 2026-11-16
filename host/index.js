@@ -36,6 +36,19 @@ const MAX_GOAL = 16_000
 const MAX_BRIEF = 8_000
 const MAX_OUTPUT = 4_000
 /**
+ * Ceiling for one dispatch `note`. A follow-up stage is an instruction, not a
+ * second brief; anything longer belongs in the task brief (which is bounded by
+ * MAX_BRIEF and visible on the page).
+ */
+const MAX_NOTE = 4_000
+/**
+ * How many undelivered notes one task may carry. A note is handed to the worker
+ * by the next dispatch, so a queue only builds up when dispatch keeps failing;
+ * the cap keeps a pathological caller from growing the project file instead of
+ * failing the write.
+ */
+const MAX_PENDING_NOTES = 20
+/**
  * Healthy size of the shared memory. Writes past this still succeed — silently
  * dropping a worker's findings would be worse than a fat memory — but the tool
  * result says so, and auto-compaction archives the oldest whole files, so the
@@ -372,6 +385,30 @@ function normalizeTask(raw) {
   }
   if (typeof raw.childSessionId === 'string' && raw.childSessionId) task.childSessionId = raw.childSessionId
   if (typeof raw.childName === 'string' && raw.childName) task.childName = raw.childName
+  // Brief paragraphs recorded with `append_brief` that no dispatch has delivered
+  // yet. They are consumed by the dispatch that delivers them, so a continuation
+  // is never asked to read the same instruction twice, and a board with nothing
+  // pending carries no extra bytes.
+  // The task-level route overrides the current worker session was created with.
+  // A continued session keeps its own model/preset/effort (the subagent service
+  // restores the child's descriptor), so a changed override must start a fresh
+  // session instead of silently not applying.
+  if (raw.childRoute && typeof raw.childRoute === 'object') {
+    // Kept even when all three are empty: "this session was created with no
+    // override" is exactly what a later override has to be compared against.
+    task.childRoute = {
+      model: text(raw.childRoute.model, 200),
+      agentPreset: text(raw.childRoute.agentPreset, 200),
+      effort: text(raw.childRoute.effort, 100),
+    }
+  }
+  if (Array.isArray(raw.pendingNotes)) {
+    const notes = raw.pendingNotes
+      .filter((note) => typeof note === 'string' && note.trim())
+      .slice(-MAX_PENDING_NOTES)
+      .map((note) => text(note, MAX_NOTE))
+    if (notes.length > 0) task.pendingNotes = notes
+  }
   if (typeof raw.stopReason === 'string' && raw.stopReason) task.stopReason = raw.stopReason
   // Worktree isolation is recorded on the task that ran: the branch and the
   // checkout path when it succeeded, and a reason code plus a sentence when the
@@ -1133,8 +1170,83 @@ async function readMemoryIndexFile(id) {
   }
 }
 
+/**
+ * Per-file write locks for the shared memory: one promise chain per
+ * `<project>/<topic>`.
+ *
+ * `appendMemoryFile` is a read-modify-write of the whole file, so two workers
+ * appending to the same topic at the same time both read the old body and both
+ * write it back; the later write silently drops the earlier addition. The race
+ * is not specific to append — a replace and an append to one file interleave the
+ * same way — so every mutation of one file (append, replace, delete) takes that
+ * file's lock. The key carries the project id, so two projects never queue
+ * behind each other, and different files of the same project run in parallel.
+ *
+ * Scope: this is an in-process lock. It serializes every write that reaches this
+ * module instance — the `projects_memory` tool and the `/projects-api` routes,
+ * which is where every writer in one DSH host lives (workers are subagents in
+ * the same process). It cannot coordinate a second process writing the same
+ * `$DSH_HOME` (another DSH instance, a CLI session, or a human editor): Node has
+ * no portable `flock`, and `writeFileAtomic` only guarantees that a single write
+ * is not torn. Cross-process writers keep the old last-writer-wins behavior.
+ *
+ * Known boundaries. Compaction is not serialized against these locks: it moves
+ * whole files, so a file archived while an append is in flight keeps the
+ * appended text in `memory/archive/` (still readable by name) or is recreated
+ * live — no text is lost, only its placement is racy. And the generated
+ * `MEMORY.md` is still rewritten from each writer's own snapshot, so two
+ * concurrent writers to *different* files can leave it missing an entry until
+ * the next mutation; the tool's index reads the directory, so it is always
+ * complete.
+ *
+ * The queue is a promise chain. Each run waits for the previous run to settle,
+ * then runs; the map entry is removed when the last waiter finishes, so an idle
+ * project leaks nothing. A failed run releases its slot in a `finally` and
+ * cannot poison the queue, because the next waiter chains on a promise that
+ * never rejects.
+ */
+const memoryWriteLocks = new Map()
+
+/** The lock key for one topic file: project + slug, never a bare file name. */
+function memoryWriteKey(projectId, name) {
+  return `${projectId}\u0000${name}`
+}
+
+/**
+ * Run `run` exclusively for one memory file. Different keys run in parallel.
+ * Resolves or rejects with `run`'s outcome; the lock is released in a `finally`,
+ * so a throwing write never wedges the file.
+ */
+function withMemoryWriteLock(key, run) {
+  const previous = memoryWriteLocks.get(key) ?? Promise.resolve()
+  // Chain on settlement, not success: a failed predecessor must neither block
+  // nor fail the next writer.
+  const result = previous.then(run, run)
+  // The queue tail never rejects, so an unawaited failure cannot surface as an
+  // unhandled rejection from the lock itself.
+  const tail = result.then(() => {}, () => {})
+  memoryWriteLocks.set(key, tail)
+  return result.finally(() => {
+    // Only the last waiter removes the entry: an earlier run finishing while a
+    // newer one is queued must leave the newer tail in place.
+    if (memoryWriteLocks.get(key) === tail) memoryWriteLocks.delete(key)
+  })
+}
+
+/** How many files have a live lock entry. A test seam, not a metric. */
+function memoryWriteLockCount() {
+  return memoryWriteLocks.size
+}
+
 /** Write one topic file (create or replace) and regenerate the index. */
 async function writeMemoryFile(id, input, knownFiles) {
+  return withMemoryWriteLock(memoryWriteKey(id, input.name), () =>
+    writeMemoryFileUnlocked(id, input, knownFiles),
+  )
+}
+
+/** The write itself. Callers must already hold the file's lock. */
+async function writeMemoryFileUnlocked(id, input, knownFiles) {
   const files = knownFiles || (await readMemoryFiles(id))
   const existing = files.find((file) => file.name === input.name)
   const raw = String(input.text ?? '')
@@ -1164,17 +1276,29 @@ async function writeMemoryFile(id, input, knownFiles) {
 
 /** Append text to one topic file, creating it when it does not exist yet. */
 async function appendMemoryFile(id, input) {
-  const files = await readMemoryFiles(id)
-  const existing = files.find((file) => file.name === input.name)
-  const addition = String(input.text ?? '').trim()
-  const body = existing && existing.body ? `${existing.body}\n\n${addition}` : addition
-  return writeMemoryFile(id, { ...input, text: body }, files)
+  // The whole read-modify-write runs under the file's lock: two workers
+  // appending to one topic must not both read the pre-append body.
+  return withMemoryWriteLock(memoryWriteKey(id, input.name), async () => {
+    const files = await readMemoryFiles(id)
+    const existing = files.find((file) => file.name === input.name)
+    const addition = String(input.text ?? '').trim()
+    const body = existing && existing.body ? `${existing.body}\n\n${addition}` : addition
+    // Already holding the lock: the unlocked write, never the wrapper.
+    return writeMemoryFileUnlocked(id, { ...input, text: body }, files)
+  })
 }
 
 /** Delete one topic file and regenerate the index. Exact name only. */
 async function deleteMemoryFile(id, name) {
-  const files = await readMemoryFiles(id)
   const wanted = memoryNameOf(name)
+  return withMemoryWriteLock(memoryWriteKey(id, wanted), () =>
+    deleteMemoryFileUnlocked(id, name, wanted),
+  )
+}
+
+/** The delete itself. Callers must already hold the file's lock. */
+async function deleteMemoryFileUnlocked(id, name, wanted) {
+  const files = await readMemoryFiles(id)
   const file = files.find(
     (candidate) => candidate.name === wanted || candidate.fileName === wanted,
   )
@@ -1592,6 +1716,34 @@ async function updateTask(projectId, taskId, patch) {
   if (!task) throw httpError(404, 'task_not_found')
   if (patch?.title !== undefined) task.title = text(patch.title, 200) || task.title
   if (patch?.brief !== undefined) task.brief = text(patch.brief, MAX_BRIEF)
+  // Appending is the write face for "the same task has a next stage": the brief
+  // grows instead of the board, and the next dispatch carries the addition to
+  // the worker that already ran the task. Refusing at the ceiling is deliberate:
+  // silently cutting the old brief or the new paragraph would lose work.
+  if (patch?.appendBrief !== undefined) {
+    const addition = text(patch.appendBrief, MAX_BRIEF).trim()
+    if (addition) {
+      const combined = task.brief.trim() ? `${task.brief.trimEnd()}\n\n${addition}` : addition
+      if (combined.length > MAX_BRIEF) {
+        throw httpError(
+          400,
+          `brief_too_long: the brief is at ${task.brief.length} of ${MAX_BRIEF} characters; shorten it before appending`,
+        )
+      }
+      task.brief = combined
+      // Queue it for the next dispatch: a continued session gets exactly this
+      // paragraph, so the worker that already has the rest of the brief is not
+      // asked to read it again.
+      const queued = Array.isArray(task.pendingNotes) ? task.pendingNotes : []
+      if (queued.length >= MAX_PENDING_NOTES) {
+        throw httpError(
+          400,
+          `too_many_pending_notes: ${queued.length} notes are already waiting for a dispatch; dispatch the task before appending more`,
+        )
+      }
+      task.pendingNotes = [...queued, addition]
+    }
+  }
   if (patch?.status !== undefined && STATUSES.includes(patch.status)) task.status = patch.status
   if (patch?.approved !== undefined) task.approved = patch.approved === true
   if (patch?.output !== undefined) task.output = text(patch.output, MAX_OUTPUT)
@@ -2113,7 +2265,16 @@ function languageRule(language) {
   return lines
 }
 
-function workerPrompt(project, task, memoryFiles, workdir, branch) {
+/**
+ * The worker prompt for a task that gets a brand-new session.
+ *
+ * `notes` are the instructions recorded for this dispatch (an `append_brief`
+ * paragraph, or the dispatch's own note). They only reach this prompt when there
+ * was no session to continue — the first run of the task, or a continuation the
+ * subagent service refused — so a fresh worker still gets the whole instruction
+ * instead of silently losing it.
+ */
+function workerPrompt(project, task, memoryFiles, workdir, branch, notes = []) {
   const lines = [
     `You are the worker for one task in the DSH project "${project.name}" (project_id: ${project.id}).`,
     'Do only this task, then report back. The coordinator keeps working while you run.',
@@ -2137,6 +2298,7 @@ function workerPrompt(project, task, memoryFiles, workdir, branch) {
     `Title: ${task.title}`,
   ]
   if (task.brief.trim()) lines.push('', task.brief.trim())
+  if (notes.length > 0) lines.push('', '## Follow-up note', notes.join('\n\n'))
   lines.push(
     '',
     '## How to work',
@@ -2171,7 +2333,144 @@ function workerIsLive(task) {
   return task.status === 'running' || task.status === 'resolved'
 }
 
-async function dispatchTask(ctx, exec, projectId, taskId) {
+/**
+ * The instructions a continuation has to hand over, in order.
+ *
+ * A continued session already has the brief it was created with, so it gets the
+ * paragraphs appended since (`pendingNotes`) plus this dispatch's own note. They
+ * are consumed by the dispatch that delivers them, so the same instruction never
+ * reaches the same worker twice. A fresh session needs none of `pendingNotes`:
+ * those paragraphs are already part of the brief in its prompt.
+ */
+function continuationNotes(task, note) {
+  const pending = Array.isArray(task.pendingNotes) ? task.pendingNotes.filter(Boolean) : []
+  return note ? [...pending, note] : pending
+}
+
+/**
+ * The task-level route overrides a worker session is pinned to.
+ *
+ * Only the task's own overrides are recorded: the project default is a default
+ * for new work, and an existing session keeping the route it was created under
+ * is the expected behavior, not a stale setting.
+ */
+function taskRoute(task) {
+  return {
+    model: task.model || '',
+    agentPreset: task.agentPreset || '',
+    effort: task.reasoningEffort || '',
+  }
+}
+
+/** Whether the task's own route overrides changed since its session was created. */
+function routeChanged(task) {
+  const recorded = task.childRoute
+  if (!recorded) return false
+  const wanted = taskRoute(task)
+  return recorded.model !== wanted.model
+    || recorded.agentPreset !== wanted.agentPreset
+    || recorded.effort !== wanted.effort
+}
+
+/**
+ * The message that continues a task in the worker session that already ran it.
+ *
+ * Deliberately short: the child keeps its own session, so it still has the
+ * original prompt, the files it read and the decisions it made. Repeating the
+ * whole brief would read like a brand-new task and invite redoing finished work,
+ * so only the undelivered instructions are sent, plus the working rules that
+ * must survive into the new turn.
+ */
+function continuationPrompt(project, task, workdir, notes) {
+  const language = replyLanguage(project, task)
+  const lines = [
+    `## Follow-up stage of task ${task.id}`,
+    `This is the next stage of the same task — ${task.id} "${task.title}" in project "${project.name}" (project_id: ${project.id}). You already worked on it in this session: keep that context, do not redo work you already finished, and do not repeat your earlier report.`,
+  ]
+  if (notes.length > 0) lines.push('', '## Follow-up note', notes.join('\n\n'))
+  else lines.push('', 'There is no new instruction: resume the task from where you stopped.')
+  lines.push(
+    '',
+    '## How to work',
+    workdir ? `- Work inside ${workdir}.` : '- Work in the directory you already have.',
+    '- Keep changes scoped to this stage; do not rewrite unrelated code.',
+    `- Before finishing, append what later tasks must know to the shared memory with the projects_memory tool: project_id "${project.id}", action "append", name "<topic-slug>", description "<one line>".`,
+    '- Do not change the task status; the runner records your final message as the task output.',
+    '- If the task cannot be completed, say what blocked it and what a human must decide.',
+    '- Finish with a short report: what you changed, where, and how you verified it.',
+    language === 'zh'
+      ? '- 用中文回复（任务说明是中文）。'
+      : language === 'en'
+        ? '- Reply in English.'
+        : '- Reply in the language the human wrote the task brief in.',
+  )
+  return lines.join('\n')
+}
+
+/**
+ * Continue a task in its existing worker session instead of starting a new one.
+ *
+ * `ctx.subagents.sendMessage` is the same seam the model-facing `send_message`
+ * tool uses: it steers one message to another member of the caller's subagent
+ * tree, an idle target starts a turn, and a cold target is resumed under the
+ * live tree root. That is exactly "the same task, next stage": the worker keeps
+ * the context it built, and the task keeps its id and its recorded session.
+ *
+ * The task is marked live *before* the message is accepted, because a settle for
+ * this session must land on the task: `settleWorker` ignores a task that still
+ * carries the previous run's `finishedAt`. Nothing is written until delivery
+ * succeeds, so a refused continuation leaves the stored row untouched and the
+ * caller can fall back to a fresh session.
+ *
+ * @returns `{ message }` when the task was continued, `{ failed }` with the
+ *   service's reason when it could not be (a session that was archived, deleted,
+ *   or created by another coordinator session is not resumable).
+ */
+async function continueTask(ctx, exec, project, task, note) {
+  const subagents = ctx.get('subagents')
+  if (typeof subagents?.sendMessage !== 'function') {
+    return { failed: 'this host exposes no subagent sendMessage API' }
+  }
+  const notes = continuationNotes(task, note)
+  const candidate = task.worktreePath || project.workspace
+  const workdir = candidate && (await isDirectory(candidate)) ? candidate : ''
+  // The signal owns this delivery only: once the target's inbox has accepted the
+  // message, aborting it no longer stops the resumed run (the subagent service
+  // documents that boundary for `sendMessage`). Unloading the plugin therefore
+  // cancels an in-flight hand-off, not a worker that already started on it.
+  const controller = new AbortController()
+  task.status = 'running'
+  delete task.finishedAt
+  delete task.stopReason
+  task.output = ''
+  task.startedAt = Date.now()
+  task.updatedAt = Date.now()
+  project.updatedAt = Date.now()
+  let messageId
+  try {
+    messageId = await subagents.sendMessage(
+      exec.agent,
+      task.childSessionId,
+      [{ type: 'text', text: continuationPrompt(project, task, workdir, notes) }],
+      { signal: controller.signal },
+    )
+  } catch (error) {
+    return { failed: messageOf(error) }
+  }
+  controllers.set(task.id, controller)
+  // Delivered: the next continuation must not repeat these instructions.
+  delete task.pendingNotes
+  task.updatedAt = Date.now()
+  project.updatedAt = Date.now()
+  await writeProject(project)
+  const worker = task.childName || task.childSessionId
+  const stage = notes.length > 0 ? ' The follow-up instruction was delivered with it.' : ''
+  return {
+    message: `Continued task ${task.id} in worker ${worker} (session ${task.childSessionId}); the message is ${messageId}. It keeps the context of its earlier run.${stage} It runs in the background; its final message lands on the task when it settles.`,
+  }
+}
+
+async function dispatchTask(ctx, exec, projectId, taskId, note = '') {
   const subagents = ctx.get('subagents')
   if (!subagents) throw new Error('The subagent service is unavailable in this profile, so no worker can start.')
   if (!exec?.agent) throw new Error('projects_dispatch needs a calling agent (exec.agent was undefined).')
@@ -2195,6 +2494,27 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   if (running >= project.concurrency) {
     return `Concurrency limit reached (${running}/${project.concurrency} workers running). Wait for one to settle before dispatching ${task.id}.`
   }
+  // Mode A: the task already ran in a worker session. Continuing that session is
+  // the whole point of a follow-up stage — the worker keeps the files it read and
+  // the decisions it made, and the board keeps one row for one piece of work.
+  // A session that cannot be resumed (archived, deleted, or created by another
+  // coordinator session) falls through to a fresh worker below, with the reason
+  // reported, so a dispatch never fails just because continuation was refused.
+  let continueFailure = ''
+  if (task.childSessionId) {
+    if (routeChanged(task)) {
+      // The session is pinned to the route it was created with, so continuing it
+      // would silently ignore the coordinator's new model/preset/effort.
+      continueFailure = 'the task model, preset or effort changed since its last run'
+    } else {
+      const continued = await continueTask(ctx, exec, project, task, note)
+      if (continued.message) return continued.message
+      continueFailure = continued.failed
+    }
+  }
+  // A fresh session reads the whole brief, which already contains every
+  // append_brief paragraph, so only this call's note is new to it.
+  const notes = note ? [note] : []
   const memoryFiles = await readMemoryFiles(project.id)
   const controller = new AbortController()
   let cwd = project.workspace && (await isDirectory(project.workspace)) ? project.workspace : undefined
@@ -2254,7 +2574,7 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
     started = await subagents.startActivation({
       provider: 'spawn',
       label: `${project.name} · ${task.title}`.slice(0, 120),
-      prompt: [{ type: 'text', text: workerPrompt(project, task, memoryFiles, cwd, worktree?.branch) }],
+      prompt: [{ type: 'text', text: workerPrompt(project, task, memoryFiles, cwd, worktree?.branch, notes) }],
       parent: exec.agent,
       ...(cwd === undefined ? {} : { cwd }),
       ...(agentPreset ? { agentPreset } : {}),
@@ -2287,13 +2607,21 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   delete task.finishedAt
   delete task.stopReason
   task.output = ''
+  // Delivered: a later continuation must not repeat these instructions.
+  delete task.pendingNotes
+  // Remember what this session is pinned to, so a later route change starts a
+  // fresh session instead of being silently ignored.
+  task.childRoute = taskRoute(task)
   task.updatedAt = Date.now()
   project.updatedAt = Date.now()
   await writeProject(project)
   const routeNote = route === undefined ? '' : ` model=${route.provider ? `${route.provider}/` : ''}${route.model}`
   const presetNote = agentPreset ? ` preset=${agentPreset}` : ''
   const effortNote = effort ? ` effort=${effort}` : ''
-  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${effortNote}${presetNote}.${isolationNote} It runs in the background; its final message lands on the task when it settles.`
+  const fallbackNote = continueFailure
+    ? ` The earlier worker session could not be continued (${continueFailure}), so this is a fresh session without its context.`
+    : ''
+  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${effortNote}${presetNote}.${isolationNote} It runs in the background; its final message lands on the task when it settles.${fallbackNote}`
 }
 
 async function settleWorker(info) {
@@ -3029,7 +3357,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_update_task',
     description:
-      'Update one task: its status, its recorded output, its approval flag, or its model / reasoning-effort override. Status "resolved" is the human verdict — set it only when relaying the human\'s decision; "review" takes that verdict back. Use "blocked" when a human decision is needed and "queued" to retry.',
+      'Update one task: its status, its recorded output, its approval flag, its model / reasoning-effort override, or its brief. append_brief adds a paragraph to the brief without touching the status — use it for the next stage of the same task, then dispatch that task again instead of creating a new one. Status "resolved" is the human verdict — set it only when relaying the human\'s decision; "review" takes that verdict back. Use "blocked" when a human decision is needed and "queued" to retry.',
     parameters: {
       type: 'object',
       properties: {
@@ -3043,6 +3371,11 @@ function registerTools(ctx) {
         },
         output: { type: 'string', description: 'Summary to record on the task (kept to 4000 characters).' },
         approved: { type: 'boolean', description: 'Approval flag for autonomy=manual projects.' },
+        append_brief: {
+          type: 'string',
+          description:
+            'Append one paragraph to the task brief, leaving the status alone, and queue it for the next dispatch. A continued session receives only this paragraph (it already has the rest of the brief); a fresh session receives the whole brief.',
+        },
         model: {
           type: 'string',
           description:
@@ -3069,6 +3402,7 @@ function registerTools(ctx) {
         ...(args?.status === undefined ? {} : { status: args.status }),
         ...(args?.output === undefined ? {} : { output: args.output }),
         ...(args?.approved === undefined ? {} : { approved: args.approved }),
+        ...(args?.append_brief === undefined ? {} : { appendBrief: args.append_brief }),
         ...(args?.model === undefined ? {} : { model: args.model }),
         ...(args?.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
         ...(args?.agentPreset === undefined ? {} : { agentPreset: args.agentPreset }),
@@ -3076,7 +3410,8 @@ function registerTools(ctx) {
       const { task } = await updateTask(String(args?.project_id || ''), String(args?.task_id || ''), patch)
       const route = task.model ? ` model=${task.model}` : ''
       const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
-      return `Task ${task.id} is now ${task.status}${task.approved ? ' (approved)' : ''}${route}${effort}.`
+      const brief = args?.append_brief === undefined ? '' : ` brief=${task.brief.length} characters`
+      return `Task ${task.id} is now ${task.status}${task.approved ? ' (approved)' : ''}${route}${effort}${brief}.`
     },
   })
 
@@ -3170,19 +3505,30 @@ function registerTools(ctx) {
   register({
     name: 'projects_dispatch',
     description:
-      'Dispatch one queued task to a worker subagent. The worker gets the project instructions, an index of the shared memory and the task brief, runs in the project workspace (or in its own git worktree when worktreeIsolation is on), and reports its final message back onto the task. Returns immediately: the coordinator stays free.',
+      'Dispatch one task to a worker subagent. A task that already has a worker session is continued in that same session — the follow-up message keeps its context and the task keeps its id; a task that never ran gets a fresh worker with the project instructions, an index of the shared memory and the task brief. Either way the worker reports its final message back onto the task, in the project workspace (or in its own git worktree when worktreeIsolation is on). Returns immediately: the coordinator stays free.',
     parameters: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project id.' },
         task_id: { type: 'string', description: 'Task id to dispatch.' },
+        note: {
+          type: 'string',
+          description:
+            'Follow-up instruction for this dispatch, for the next stage of the same task. A task with an existing worker session receives it in that session (context kept); a task without one gets it in the fresh worker prompt. Record durable additions in the brief with projects_update_task append_brief instead.',
+        },
       },
       required: ['project_id', 'task_id'],
       additionalProperties: false,
     },
     output: TEXT_OUTPUT,
     execute: async (args, exec) =>
-      dispatchTask(ctx, exec, String(args?.project_id || ''), String(args?.task_id || '')),
+      dispatchTask(
+        ctx,
+        exec,
+        String(args?.project_id || ''),
+        String(args?.task_id || ''),
+        text(args?.note, MAX_NOTE).trim(),
+      ),
   })
 }
 
@@ -3235,3 +3581,11 @@ export function apply(ctx) {
  * Nothing in the plugin calls this export.
  */
 export { compactMemory }
+
+/**
+ * Test seams for the per-file memory write lock. A lock is only observable
+ * through timing, so the tests need the primitive itself to prove that one file
+ * queues while another runs, and that a failed write releases its slot instead
+ * of leaving an entry behind. Nothing in the plugin calls these exports.
+ */
+export { memoryWriteKey, memoryWriteLockCount, withMemoryWriteLock }

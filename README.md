@@ -10,25 +10,76 @@ with its own context, and its final message lands on the task for review.
 The package is a DSH bundle. `package.json` declares `dsh.bundle.patch`
 (`cordis.patch.yml` inserts the Host plugin row) and `dsh.client` (the Client
 module is discovered from the same package), so one installation provides both
-halves.
+halves. Install it into a profile in one of three ways.
 
-Install it into a profile with the plugin manager: `plugin_manager` →
-`install_bundle` takes this package's directory or a published spec, installs
-the package and selects the bundle. The profile then lists
-`@fatwang2/dsh-projects` in `dsh.profile.bundles` and links the package in its
-`dependencies`:
+### From GitHub (recommended)
+
+Ask the agent to run `plugin_manager` with `action: "install_bundle"` and
+`target` set to the repository spec:
+
+- `github:fatwang2/dsh-projects` — the default branch's current commit.
+- `github:fatwang2/dsh-projects#v0.1.0` — a release tag. Pin a tag to lock the
+  version.
+
+There is no clone and no build step: the Host installs the package and selects
+the bundle. The profile then lists `@fatwang2/dsh-projects` in
+`dsh.profile.bundles` and records the spec in its `dependencies`:
 
 ```json
 {
   "dsh": { "profile": { "bundles": ["@fatwang2/dsh-projects"] } },
-  "dependencies": { "@fatwang2/dsh-projects": "link:/path/to/projects-plugin" }
+  "dependencies": {
+    "@fatwang2/dsh-projects": "github:fatwang2/dsh-projects#v0.1.0"
+  }
 }
 ```
 
-A directory install links the checkout rather than packing it, so `files` does
-not filter what runs — edit the sources in place. A newly installed Client module
-needs one page refresh before the **Projects** entry appears. Disabling or
-removing the bundle leaves every project on disk.
+### From a local directory
+
+Clone the repository, then pass the checkout's absolute path as `target`
+instead of a spec:
+
+```sh
+git clone https://github.com/fatwang2/dsh-projects.git
+```
+
+A directory install is a `link:` dependency, so `files` does not filter what
+runs: edit the sources in place and the next reload picks the changes up.
+
+### From the Plugins page
+
+Open **Plugins**, choose **Add plugin** → **Install a third-party plugin**, and
+paste the same spec (`github:fatwang2/dsh-projects#v0.1.0`) or the absolute
+path of a local checkout.
+
+A newly installed Client module needs one page refresh before the **Projects**
+entry appears. Disabling or removing the bundle leaves every project on disk.
+
+## Update
+
+A git install is pinned to the ref it was given: `#v0.1.0` stays that release
+until you ask for another one, and a spec with no ref follows the default
+branch's current commit. To upgrade:
+
+1. Install the newer ref — the same `plugin_manager` → `install_bundle` call
+   with the new tag in place of the old one:
+
+   ```
+   target: "github:fatwang2/dsh-projects#v0.2.0"
+   ```
+
+   `v0.2.0` stands for the release you want; passing `#main` follows the branch
+   instead of a tag. The Plugins page's **Update** action does the same when it
+   is offered for a git install.
+2. If the profile reports that the bundle is already installed, remove it
+   first — `plugin_manager` → `remove_bundle` with
+   `target: "@fatwang2/dsh-projects"` — then install the new ref.
+
+`plugin_manager` → `list_plugins` shows what is installed. After an upgrade,
+reload the plugin when the Host half changed (the Plugins page asks for a
+restart when the profile has no hot reload) and refresh the page when the
+Client half changed. Projects, tasks and shared memory are not touched by an
+install, an upgrade or a removal: they live in `$DSH_HOME/projects/<projectId>/`.
 
 ## Where it lives
 

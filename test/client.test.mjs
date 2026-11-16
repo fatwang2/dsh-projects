@@ -3335,7 +3335,7 @@ test('the panel buckets tasks by status, so resolved is one bucket', async (t) =
   )
 })
 
-test('the five group glyphs are pairwise distinct, and review is a radio ring not an eye or a check', async (t) => {
+test('the five group glyphs are pairwise distinct, and review is a thick still arc not a radio ring', async (t) => {
   const project = {
     ...SAMPLE_PROJECT,
     tasks: [
@@ -3419,37 +3419,6 @@ test('the five group glyphs are pairwise distinct, and review is a radio ring no
     }
   }
 
-  // Ready-for-review is a radio button: a ring around a solid dot. It is not
-  // the eye it used to be (no almond outline) and not a check (no straight
-  // stroke, and the only path-shaped glyphs are Working's arc and Resolved's
-  // check).
-  const review = glyphs.review
-  assert.match(review.props.className, /pj-thread-review/, 'the review colour rule still applies')
-  assert.equal(review.children.length, 2, 'a ring and one dot')
-  assert.equal(
-    review.children.filter((child) => child.type === 'path').length,
-    0,
-    'the eye and the check are both gone: the glyph is circles only',
-  )
-  const [ring, dot] = review.children
-  assert.equal(ring.type, 'circle')
-  assert.equal(ring.props.cx, 8)
-  assert.equal(ring.props.cy, 8)
-  assert.equal(ring.props.stroke, 'currentColor')
-  assert.equal(ring.props.fill, undefined, 'the ring is stroked, not filled')
-  assert.ok(ring.props.strokeWidth >= 1.5, `the ring holds at 14px: ${ring.props.strokeWidth}`)
-  assert.equal(dot.type, 'circle')
-  assert.equal(dot.props.cx, 8)
-  assert.equal(dot.props.cy, 8)
-  assert.equal(dot.props.fill, 'currentColor')
-  assert.equal(dot.props.stroke, undefined, 'the dot is filled, not stroked')
-  // A radio dot, not a pupil: big enough to read as a filled centre at 14px,
-  // small enough to leave a clear gap to the ring.
-  assert.ok(dot.props.r >= 2 && dot.props.r <= 3, `the dot survives 14px: r=${dot.props.r}`)
-  const gap = ring.props.r - ring.props.strokeWidth / 2 - dot.props.r
-  assert.ok(gap >= 1.2, `the ring and the dot stay apart: gap=${gap}`)
-  assert.ok(ring.props.r + ring.props.strokeWidth / 2 <= 8, 'the ring fits the grid')
-
   // Working is an open arc: one stroked path, curves only, and no closing
   // command, so the circle stays visibly unfinished while it spins.
   const running = glyphs.running
@@ -3472,6 +3441,98 @@ test('the five group glyphs are pairwise distinct, and review is a radio ring no
   assert.ok(arcBox.minX >= 0 && arcBox.maxX <= 16, `the arc fits the grid: ${JSON.stringify(arcBox)}`)
   assert.ok(arcBox.minY >= 0 && arcBox.maxY <= 16, `the arc fits the grid: ${JSON.stringify(arcBox)}`)
   assert.ok(arcBox.width > 11 && arcBox.height > 11, `the arc is not a speck: ${JSON.stringify(arcBox)}`)
+
+  // Ready-for-review is the same open-arc idea, told apart from Working by
+  // weight and by stillness: a thick band, three quarters of a ring, with a 90°
+  // bite in the top-right quadrant and no spin. At 14px the band reads as a
+  // filled ring with a hole, and the bite stays clear of the round caps.
+  const review = glyphs.review
+  assert.match(review.props.className, /pj-thread-review/, 'the review colour rule still applies')
+  assert.doesNotMatch(
+    review.props.className,
+    /pj-thread-spinner/,
+    'review is static: only Working carries the spin class',
+  )
+  assert.equal(review.children.length, 1, 'one arc, not a ring plus a dot')
+  const reviewArc = review.children[0]
+  assert.equal(reviewArc.type, 'path')
+  assert.equal(reviewArc.props.stroke, 'currentColor')
+  assert.equal(reviewArc.props.fill, undefined, 'the arc is stroked, never filled')
+  assert.equal(reviewArc.props.strokeLinecap, 'round')
+  assert.ok(
+    reviewArc.props.strokeWidth >= 3.2 && reviewArc.props.strokeWidth <= 3.6,
+    `the band is thick enough to read as a filled ring: ${reviewArc.props.strokeWidth}`,
+  )
+  assert.doesNotMatch(reviewArc.props.d, /[zZ]/, 'the arc is open')
+  assert.doesNotMatch(reviewArc.props.d, /[lLhHvVaA]/, 'the arc is drawn from curves only')
+
+  // The bite: measure both ends against the centre. The arc runs clockwise from
+  // 3 o'clock (0°) to 12 o'clock (270°), so it covers 270° and the missing 90°
+  // sits at 315° — the top-right quadrant, where Working's bite is not.
+  const angleOf = (point) => ((Math.atan2(point[1] - 8, point[0] - 8) * 180) / Math.PI + 360) % 360
+  const reviewPoints = pathPoints(reviewArc.props.d)
+  const reviewStart = reviewPoints[0]
+  const reviewEnd = reviewPoints[reviewPoints.length - 1]
+  const reviewStartAngle = angleOf(reviewStart)
+  const reviewEndAngle = angleOf(reviewEnd)
+  assert.ok(Math.abs(reviewStartAngle - 0) < 1, `the arc starts at 3 o'clock: ${reviewStartAngle}`)
+  assert.ok(Math.abs(reviewEndAngle - 270) < 1, `the arc ends at 12 o'clock: ${reviewEndAngle}`)
+  const reviewSweep = (reviewEndAngle - reviewStartAngle + 360) % 360
+  assert.ok(Math.abs(reviewSweep - 270) < 2, `the arc is three quarters of the ring: ${reviewSweep}`)
+  const reviewBite = 360 - reviewSweep
+  assert.ok(reviewBite >= 80 && reviewBite <= 100, `the missing quarter is about 90°: ${reviewBite}`)
+  const reviewBiteMid = (reviewStartAngle + reviewSweep + reviewBite / 2) % 360
+  assert.ok(Math.abs(reviewBiteMid - 315) < 2, `the bite sits in the top-right quadrant: ${reviewBiteMid}`)
+
+  // One centre, one radius: every sampled point is on the ring.
+  const bandRadius = Math.hypot(reviewStart[0] - 8, reviewStart[1] - 8)
+  for (const [x, y] of reviewPoints) {
+    assert.ok(Math.abs(Math.hypot(x - 8, y - 8) - bandRadius) < 0.05, `the arc is a circle: ${x},${y}`)
+  }
+
+  // 14px: the hole survives, and so does the bite between the round caps.
+  const scale14 = 14 / 16
+  const hole = 2 * (bandRadius - reviewArc.props.strokeWidth / 2) * scale14
+  assert.ok(hole >= 5, `the band keeps a hole at 14px: ${hole.toFixed(2)}px`)
+  const capClear =
+    (Math.hypot(reviewEnd[0] - reviewStart[0], reviewEnd[1] - reviewStart[1]) -
+      reviewArc.props.strokeWidth) *
+    scale14
+  assert.ok(capClear >= 3, `the bite clears the caps at 14px: ${capClear.toFixed(2)}px`)
+
+  // The grid: the band's ink stays inside the 16 box.
+  const reviewBox = inkBox(reviewArc.props.d, reviewArc.props.strokeWidth)
+  assert.ok(
+    reviewBox.minX >= 0 && reviewBox.maxX <= 16,
+    `the band fits the grid: ${JSON.stringify(reviewBox)}`,
+  )
+  assert.ok(
+    reviewBox.minY >= 0 && reviewBox.maxY <= 16,
+    `the band fits the grid: ${JSON.stringify(reviewBox)}`,
+  )
+  assert.ok(
+    reviewBox.width > 12 && reviewBox.height > 12,
+    `the band is not a speck: ${JSON.stringify(reviewBox)}`,
+  )
+
+  // Working and Ready-for-review share a silhouette, so the pair is told apart
+  // by the two things the eye reads at 14px — the band's weight (thin vs thick)
+  // and whether it moves — and their bites sit in different quadrants.
+  assert.ok(
+    reviewArc.props.strokeWidth - arc.props.strokeWidth >= 1.5,
+    `review is visibly heavier than Working: ${reviewArc.props.strokeWidth} vs ${arc.props.strokeWidth}`,
+  )
+  assert.notEqual(reviewArc.props.d, arc.props.d, 'the two arcs are not the same path')
+  const workingPoints = pathPoints(arc.props.d)
+  const workingStartAngle = angleOf(workingPoints[0])
+  const workingEndAngle = angleOf(workingPoints[workingPoints.length - 1])
+  const workingSweep = (workingEndAngle - workingStartAngle + 360) % 360
+  const workingBiteMid = (workingStartAngle + workingSweep + (360 - workingSweep) / 2) % 360
+  assert.ok(Math.abs(workingBiteMid - 225) < 2, `Working's bite is top-left: ${workingBiteMid}`)
+  assert.ok(
+    Math.abs(reviewBiteMid - workingBiteMid) > 45,
+    `the two bites sit in different quadrants: Working ${workingBiteMid}, review ${reviewBiteMid}`,
+  )
 
   // Idle is a ring of dots: eight filled dots on one radius, nothing stroked.
   const idle = glyphs.idle
@@ -3528,12 +3589,17 @@ test('the five group glyphs are pairwise distinct, and review is a radio ring no
   assert.equal(waiting.children[1].type, 'path')
   assert.equal(waiting.children[2].props.fill, 'currentColor')
 
-  // The colours are the theme's, not the glyphs': review is the success ring,
+  // The colours are the theme's, not the glyphs': review is the success band,
   // resolved the muted fill, idle the tertiary ring.
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   assert.match(source, /\.pj-thread-review\{color:var\(--dsw-alias-state-success-primary\)\}/)
   assert.match(source, /\.pj-thread-resolved\{color:var\(--dsw-alias-label-secondary\)\}/)
   assert.match(source, /\.pj-thread-idle\{color:var\(--dsw-alias-label-tertiary\)\}/)
+  // Only Working moves: the spin lives on the spinner class, and the review
+  // rule is a colour and nothing else, so the thick arc never animates.
+  assert.match(source, /\.pj-thread-spinner\{animation:pj-spin/)
+  assert.doesNotMatch(source, /\.pj-thread-review\{[^}]*animation/)
+  assert.doesNotMatch(source, /\.pj-thread-review\{[^}]*transform/)
   // No literal colour sneaks into the glyph code either.
   const iconStart = source.indexOf('function ThreadIcon')
   const iconBlock = source.slice(iconStart, source.indexOf('function ProjectsDispatchRow', iconStart))

@@ -1929,18 +1929,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
     ]
 
     /**
-     * The group glyph: open arc, radio ring, warning ring, dotted ring, filled
-     * check disc.
+     * The group glyph: thin open arc, thick open arc, warning ring, dotted
+     * ring, filled check disc.
      *
      * The five follow the reference Threads panel, and each silhouette is
-     * different on purpose: an open arc (Working, and it spins), a ring around
-     * a solid dot (Ready-for-review — the radio-button shape, because the work
-     * is finished but not accepted and so waits on a human pick), a ring around
-     * a bar (Waiting), a ring of dots (Idle), a filled disc with a knocked-out
-     * check (Resolved, the one glyph that means accepted). All five sit on the
-     * same 16 grid at the same stroke weight, so they read as one family at
-     * 14px; only the ink is drawn, and every colour is `currentColor` or a
-     * `--dsw-*` token, so the theme owns the palette.
+     * different on purpose: a thin open arc that spins (Working), a thick open
+     * arc that stands still (Ready-for-review — the work is done but not
+     * accepted, so the ring is nearly closed and the bite says "not turned all
+     * the way round yet"), a ring around a bar (Waiting), a ring of dots
+     * (Idle), a filled disc with a knocked-out check (Resolved, the one glyph
+     * that means accepted). All five sit on the same 16 grid, so they read as
+     * one family at 14px; only the ink is drawn, and every colour is
+     * `currentColor` or a `--dsw-*` token, so the theme owns the palette.
      */
     function ThreadIcon({ kind }) {
       if (kind === 'spinner') {
@@ -1966,8 +1966,13 @@ ${SHARED_CSS}${DISPATCH_RULES}
         )
       }
       if (kind === 'review') {
-        // A radio button waiting to be picked: ring plus a solid centre dot,
-        // with the dot close enough to the ring to read as one control at 14px.
+        // Three quarters of a ring, drawn thick (3.4) so it reads as a filled
+        // band rather than a hairline, and still — the work is finished, the
+        // ring just has not turned all the way round. The 90° bite sits in the
+        // top-right quadrant (from 3 o'clock round to 12 o'clock), which keeps
+        // it apart from Working's thin arc, whose bite is at the top-left and
+        // which spins. Cubics only, so the arc has no straight segment to catch
+        // the eye at 14px.
         return h(
           'svg',
           {
@@ -1978,8 +1983,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
             fill: 'none',
             'aria-hidden': true,
           },
-          h('circle', { cx: 8, cy: 8, r: 5.6, stroke: 'currentColor', strokeWidth: 1.8 }),
-          h('circle', { cx: 8, cy: 8, r: 2.5, fill: 'currentColor' }),
+          h('path', {
+            d: 'M13.5 8C13.5 11.04 11.04 13.5 8 13.5C4.96 13.5 2.5 11.04 2.5 8C2.5 4.96 4.96 2.5 8 2.5',
+            stroke: 'currentColor',
+            strokeWidth: 3.4,
+            strokeLinecap: 'round',
+          }),
         )
       }
       if (kind === 'waiting') {

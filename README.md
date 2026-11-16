@@ -51,9 +51,11 @@ with its own context, and its final message lands on the task for review.
 - **Manual** (default): a task needs human approval on the page before the
   coordinator may dispatch it. This is the approval point.
 - **Auto**: the coordinator dispatches without waiting.
-- **Parallel workers** caps how many tasks run at once (1-10). The Host's own
-  subagent pool (`maxActiveSubagents`) defaults to 8, so in practice at most 8
-  workers run at the same time until that is raised in the profile patch.
+- **Parallel workers** caps how many tasks run at once (1-8). This is
+  deliberately aligned with the Host's own subagent pool
+  (`maxActiveSubagents`, default 8), so the plugin never admits a worker the
+  Host would reject: the ninth task is refused in the plugin with
+  `Concurrency limit reached (8/8 workers running)`.
 
 ## Data and limits
 

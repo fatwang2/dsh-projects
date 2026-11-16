@@ -120,6 +120,8 @@ window.__ModuleLoader__.load({
       coordinatorRestored: 'Conversation restored.',
       collapseList: 'Collapse project list',
       expandList: 'Expand project list',
+      collapseThreads: 'Collapse threads',
+      expandThreads: 'Expand threads',
       resizeColumns: 'Resize columns',
       taskActions: 'Task actions',
       threads: 'Threads',
@@ -251,6 +253,8 @@ window.__ModuleLoader__.load({
       coordinatorRestored: '会话已恢复。',
       collapseList: '收起项目栏',
       expandList: '展开项目栏',
+      collapseThreads: '收起线程栏',
+      expandThreads: '展开线程栏',
       resizeColumns: '调整栏宽',
       taskActions: '任务操作',
       threads: '线程',
@@ -339,7 +343,12 @@ window.__ModuleLoader__.load({
     const CSS = `
 .pj-page{display:flex;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6}
 .pj-page :focus-visible{outline:var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));outline-offset:2px}
-.pj-list{display:flex;flex-direction:column;flex:0 0 264px;width:264px;min-height:0;border-right:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
+/* Three columns, one priority order. Each column owns a floor; the conversation's
+   floor is the widest, and the side columns are the only ones that shrink, so a
+   narrow window squeezes them first and can never take the conversation to zero.
+   The floors are repeated in the layout math above (LIST_MIN / EXEC_MIN /
+   MAIN_MIN), which is what keeps the drag and the fold in step with the CSS. */
+.pj-list{display:flex;flex-direction:column;flex:0 1 264px;width:264px;min-width:180px;min-height:0;border-right:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1)}
 .pj-list-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:16px 14px 10px}
 .pj-list-title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary);margin:0}
 .pj-list-scroll{flex:1;min-height:0;overflow:auto;padding:0 8px 16px}
@@ -348,8 +357,10 @@ window.__ModuleLoader__.load({
 .pj-list-item.pj-active{background:var(--dsw-alias-interactive-bg-active)}
 .pj-list-name{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pj-list-meta{font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.pj-list.pj-collapsed{flex:0 0 44px;width:44px;overflow:hidden}
+.pj-list.pj-collapsed{flex:0 0 44px;width:44px;min-width:44px;overflow:hidden}
+.pj-exec.pj-collapsed{flex:0 0 44px;width:44px;min-width:44px;overflow:hidden}
 .pj-rail{display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 0;min-height:0;overflow:auto}
+.pj-rail-count{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .pj-rail-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
 .pj-rail-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .pj-rail-btn.pj-active{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}
@@ -357,7 +368,7 @@ window.__ModuleLoader__.load({
 .pj-resizer::after{content:'';position:absolute;inset:0 -3px}
 .pj-resizer:hover,.pj-resizer:focus-visible{background:var(--dsw-alias-border-l2)}
 .pj-page.pj-resizing{cursor:col-resize;user-select:none}
-.pj-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;border-right:1px solid var(--dsw-alias-border-l2)}
+.pj-main{display:flex;flex-direction:column;flex:1 1 0;min-width:420px;min-height:0;border-right:1px solid var(--dsw-alias-border-l2)}
 .pj-main-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);box-sizing:border-box}
 [data-platform='darwin'] .pj-list-head{padding-top:calc(16px + var(--dsh-frame-top-clearance, 0px))}
 [data-platform='darwin'] .pj-rail{padding-top:calc(10px + var(--dsh-frame-top-clearance, 0px))}
@@ -375,7 +386,7 @@ window.__ModuleLoader__.load({
    column: no column-width cap and no centred gutter of its own. */
 .pj-settings{display:flex;flex-direction:column;min-width:0}
 .pj-chat-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
-.pj-exec{display:flex;flex-direction:column;flex:0 0 380px;width:380px;min-width:0;min-height:0;background:var(--dsw-alias-bg-layer-1)}
+.pj-exec{display:flex;flex-direction:column;flex:0 1 380px;width:380px;min-width:280px;min-height:0;background:var(--dsw-alias-bg-layer-1)}
 .pj-exec-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);box-sizing:border-box}
 .pj-exec-title{margin:0;font-size:14px;font-weight:600}
 .pj-exec-task{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary)}
@@ -625,6 +636,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
     const EXEC_WIDTH = 380
     const LIST_MIN = 180
     const EXEC_MIN = 280
+    // The conversation is the page's reason to exist, so its floor is the
+    // widest of the three and the side columns give way first. The rail is the
+    // folded width of a side column; the separator is the drag handle.
+    const MAIN_MIN = 420
+    const RAIL_WIDTH = 44
+    const RESIZER_WIDTH = 5
+    // A side column folds on its own once the three floors no longer fit side
+    // by side: Threads first, then the project list. An explicit press overrides
+    // the fold, which is why these are floors of the *default* state, not a
+    // hard cap on the window.
+    const EXEC_FOLD_BELOW = MAIN_MIN + LIST_MIN + EXEC_MIN + RESIZER_WIDTH * 2
+    const LIST_FOLD_BELOW = MAIN_MIN + LIST_MIN + RAIL_WIDTH + RESIZER_WIDTH
     const MENU_MARGIN = 8
 
     function readStored(key, fallback) {
@@ -670,12 +693,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
       } catch {
         return 0
       }
-    }
-
-    /** Half the viewport, so one column can never eat the other two. */
-    function maxColumnWidth() {
-      const width = viewportWidth()
-      return width > 0 ? Math.round(width * 0.5) : 720
     }
 
     /** A display-only title: the stored task title is never rewritten. */
@@ -1269,6 +1286,26 @@ ${SHARED_CSS}${DISPATCH_RULES}
       )
     }
 
+    /**
+     * The panel glyph mirrored, for the column that folds to the right.
+     *
+     * The Host's symbol set ships `panel-left-outline` and nothing for the right
+     * side, so this is that path with the divider on the other edge — same 16
+     * grid, same stroke, so the two fold controls read as one pair.
+     */
+    function PanelRightIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size, className: size === 18 ? 'pj-icon-18' : 'pj-icon-16' },
+        h('path', {
+          d: 'M13.5 1.5H2.5C1.94772 1.5 1.5 1.94772 1.5 2.5V13.5C1.5 14.0523 1.94772 14.5 2.5 14.5H13.5C14.0523 14.5 14.5 14.0523 14.5 13.5V2.5C14.5 1.94772 14.0523 1.5 13.5 1.5Z',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', { d: 'M10.5 1.5V14.5', stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
     /** `IconSettingsOutlineRegular`: the settings-dialog trigger. */
     function GearIcon({ size }) {
       return h(
@@ -1857,10 +1894,73 @@ ${SHARED_CSS}${DISPATCH_RULES}
       })
 
       // Layout preferences (page-local, persisted in localStorage).
-      const [listCollapsed, setListCollapsed] = useState(() => readStored('listCollapsed', '0') === '1')
+      //
+      // Folding a column is a three-state choice, not a boolean: `'1'` folded,
+      // `'0'` open, and the empty string (the default) means "follow the
+      // viewport". That is what lets a narrow window fold the side columns on
+      // its own while an explicit press — in either direction — always wins.
+      const [listChoice, setListChoice] = useState(() => readStored('listCollapsed', ''))
+      const [execChoice, setExecChoice] = useState(() => readStored('execCollapsed', ''))
       const [listWidth, setListWidth] = useState(() => readStoredNumber('listWidth', LIST_WIDTH))
       const [execWidth, setExecWidth] = useState(() => readStoredNumber('execWidth', EXEC_WIDTH))
+      // The window width drives the default fold, so the page tracks it.
+      const [viewport, setViewport] = useState(viewportWidth)
       const [resizing, setResizing] = useState(null)
+
+      // The conversation outranks both side columns: a column folds itself once
+      // the window is too narrow for the three floors to sit side by side.
+      const listCollapsed =
+        listChoice === '1' || (listChoice !== '0' && viewport > 0 && viewport < LIST_FOLD_BELOW)
+      const execCollapsed =
+        execChoice === '1' || (execChoice !== '0' && viewport > 0 && viewport < EXEC_FOLD_BELOW)
+
+      /**
+       * The widths the three columns actually paint with.
+       *
+       * The conversation keeps `MAIN_MIN` and the side columns give way: a
+       * stored width is capped at whatever is left after the conversation's
+       * floor, and when both are open and too wide for the room they shrink in
+       * proportion to what each holds above its own floor, the way two
+       * shrinkable flex items would. A folded column is its rail and owns no
+       * separator. With no viewport to measure (a harness, a prerender) the
+       * stored widths stand as they are.
+       */
+      const columnLayout = () => {
+        const listSpan = listCollapsed ? RAIL_WIDTH : listWidth
+        const execSpan = execCollapsed ? RAIL_WIDTH : execWidth
+        if (!(viewport > 0) || (listCollapsed && execCollapsed)) {
+          return { list: listSpan, exec: execSpan }
+        }
+        const separators = (listCollapsed ? 0 : RESIZER_WIDTH) + (execCollapsed ? 0 : RESIZER_WIDTH)
+        const room = viewport - MAIN_MIN - separators
+        if (listCollapsed) {
+          return { list: listSpan, exec: clamp(execWidth, EXEC_MIN, room - RAIL_WIDTH) }
+        }
+        if (execCollapsed) {
+          return { list: clamp(listWidth, LIST_MIN, room - RAIL_WIDTH), exec: execSpan }
+        }
+        if (listWidth + execWidth <= room) return { list: listWidth, exec: execWidth }
+        const spare = Math.max(0, room - LIST_MIN - EXEC_MIN)
+        const excess = listWidth - LIST_MIN + (execWidth - EXEC_MIN)
+        const scale = excess > 0 ? Math.min(1, spare / excess) : 0
+        const list = LIST_MIN + Math.round((listWidth - LIST_MIN) * scale)
+        return { list, exec: Math.max(EXEC_MIN, room - list) }
+      }
+
+      /**
+       * The widest one side column may get without eating the conversation's
+       * floor. This is the drag ceiling as well as the separator's
+       * `aria-valuemax`, so a drag can never squeeze the conversation to zero.
+       */
+      const columnCeiling = (which) => {
+        if (!(viewport > 0)) return 720
+        const layout = columnLayout()
+        const other = which === 'list' ? layout.exec : layout.list
+        const separators = (listCollapsed ? 0 : RESIZER_WIDTH) + (execCollapsed ? 0 : RESIZER_WIDTH)
+        const floor = which === 'list' ? LIST_MIN : EXEC_MIN
+        return Math.max(floor, Math.round(viewport - MAIN_MIN - other - separators))
+      }
+
       // The task context menu: `{ taskId, x, y }` in viewport coordinates.
       const [menu, setMenu] = useState(null)
       const menuRef = useRef(null)
@@ -1919,11 +2019,25 @@ ${SHARED_CSS}${DISPATCH_RULES}
         }
       }, [execTarget])
 
-      // Column preferences survive a reload; a bad stored value falls back to
-      // the default above.
+      // Column preferences survive a reload. The choice itself is stored, never
+      // the derived state, so a column that folded only because the window was
+      // narrow opens again on a wide one.
       useEffect(() => {
-        writeStored('listCollapsed', listCollapsed ? '1' : '0')
-      }, [listCollapsed])
+        writeStored('listCollapsed', listChoice)
+      }, [listChoice])
+      useEffect(() => {
+        writeStored('execCollapsed', execChoice)
+      }, [execChoice])
+
+      // A narrow window folds the side columns, so the page has to know its
+      // width. The listener is the only reason the state exists; the layout
+      // math reads the state, so one resize is one reflow.
+      useEffect(() => {
+        if (typeof window === 'undefined') return undefined
+        const onResize = () => setViewport(viewportWidth())
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+      }, [])
 
       // Folded thread groups survive a reload too.
       useEffect(() => {
@@ -2433,7 +2547,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
       // -------------------------------------------------------------------
       // Layout interactions
 
-      const toggleListCollapsed = () => setListCollapsed((value) => !value)
+      // A press writes the opposite of what is on screen, so pressing "expand"
+      // on a column that folded itself also pins it open for this window size.
+      const toggleListCollapsed = () => setListChoice(listCollapsed ? '0' : '1')
+      const toggleExecCollapsed = () => setExecChoice(execCollapsed ? '0' : '1')
 
       // -------------------------------------------------------------------
       // Threads panel interactions
@@ -2497,13 +2614,19 @@ ${SHARED_CSS}${DISPATCH_RULES}
       // Native pointer events, no dependency: the drag listens on the window so
       // the pointer may leave the 5px handle. Text selection is suppressed for
       // the duration of the drag.
+      //
+      // The drag starts from the width on screen (the fitted one, not the
+      // stored one) and stops at `columnCeiling`, so no drag can take the
+      // conversation below its floor.
       const startResize = (which, event) => {
         if (!event || (typeof event.button === 'number' && event.button !== 0)) return
         if (typeof event.preventDefault === 'function') event.preventDefault()
         if (typeof window === 'undefined') return
         const startX = Number(event.clientX) || 0
-        const from = which === 'list' ? listWidth : execWidth
+        const layout = columnLayout()
+        const from = which === 'list' ? layout.list : layout.exec
         const min = which === 'list' ? LIST_MIN : EXEC_MIN
+        const max = columnCeiling(which)
         let latest = from
         const body = typeof document !== 'undefined' ? document.body : null
         const previousSelect = body ? body.style.userSelect : ''
@@ -2513,7 +2636,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
           const delta = (Number(moveEvent.clientX) || 0) - startX
           // The executor column sits on the right, so dragging right narrows it.
           const raw = which === 'list' ? from + delta : from - delta
-          latest = Math.round(clamp(raw, min, maxColumnWidth()))
+          latest = Math.round(clamp(raw, min, max))
           if (which === 'list') setListWidth(latest)
           else setExecWidth(latest)
         }
@@ -2536,13 +2659,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
         const delta = event && event.key === 'ArrowLeft' ? -step : event && event.key === 'ArrowRight' ? step : 0
         if (!delta) return
         if (typeof event.preventDefault === 'function') event.preventDefault()
+        const layout = columnLayout()
         if (which === 'list') {
-          const next = Math.round(clamp(listWidth + delta, LIST_MIN, maxColumnWidth()))
+          const next = Math.round(clamp(layout.list + delta, LIST_MIN, columnCeiling('list')))
           setListWidth(next)
           writeStored('listWidth', next)
           return
         }
-        const next = Math.round(clamp(execWidth - delta, EXEC_MIN, maxColumnWidth()))
+        const next = Math.round(clamp(layout.exec - delta, EXEC_MIN, columnCeiling('exec')))
         setExecWidth(next)
         writeStored('execWidth', next)
       }
@@ -2585,9 +2709,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
         })
 
       // A task row opens its detail pane. The executor conversation is embedded
-      // underneath when the task already has a child Session.
-      const openTaskDetail = (task) =>
-        run(async () => {
+      // underneath when the task already has a child Session. Opening a task is
+      // a deliberate use of the Threads column, so the column opens with it
+      // instead of staying folded out of sight.
+      const openTaskDetail = (task) => {
+        setExecChoice('0')
+        return run(async () => {
           if (!task.childSessionId) {
             setExecTarget({ taskId: task.id, title: task.title, sessionId: '', reference: null })
             return ''
@@ -2606,6 +2733,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
           setExecTarget({ taskId: task.id, title: task.title, sessionId: task.childSessionId, reference })
           return ''
         })
+      }
 
       // The board is published for the dispatch cards in the conversation, which
       // live in another React subtree. The poll replaces the project object every
@@ -3018,6 +3146,32 @@ ${SHARED_CSS}${DISPATCH_RULES}
           ),
         )
 
+      // The collapsed Threads column: the same 44px rail as the project list,
+      // with the fold control and a tally so the strip still says something.
+      const renderExecRail = () =>
+        h(
+          'div',
+          { className: 'pj-rail' },
+          h(
+            'button',
+            {
+              className: 'pj-rail-btn',
+              type: 'button',
+              title: t('expandThreads'),
+              'aria-label': t('expandThreads'),
+              'aria-expanded': 'false',
+              onClick: toggleExecCollapsed,
+            },
+            h(PanelRightIcon, { size: 18 }),
+          ),
+          taskList.length > 0 &&
+            h(
+              'span',
+              { className: 'pj-rail-count', title: `${taskList.length} ${t('counts')}` },
+              String(taskList.length),
+            ),
+        )
+
       // The row context menu. It is `position:fixed` (see `.pj-menu`) so the
       // list's `overflow:auto` cannot clip it; the open handler stores the
       // pointer position and the effect above clamps it into the viewport.
@@ -3373,6 +3527,11 @@ ${SHARED_CSS}${DISPATCH_RULES}
         (group) => group.tasks.length > 0 && !hiddenGroups[group.key],
       )
 
+      // The widths actually painted, after the conversation's floor has taken
+      // what it needs. Both the columns and their separators read this, so the
+      // ARIA values describe the layout on screen rather than the preference.
+      const layout = columnLayout()
+
       return h(
         'div',
         { className: `pj-page${resizing ? ' pj-resizing' : ''}` },
@@ -3381,7 +3540,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
           'aside',
           {
             className: `pj-list${listCollapsed ? ' pj-collapsed' : ''}`,
-            style: listCollapsed ? undefined : { flexBasis: `${listWidth}px`, width: `${listWidth}px` },
+            style: listCollapsed ? undefined : { flexBasis: `${layout.list}px`, width: `${layout.list}px` },
           },
           listCollapsed
             ? renderListRail()
@@ -3480,9 +3639,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
               role: 'separator',
               'aria-orientation': 'vertical',
               'aria-label': t('resizeColumns'),
-              'aria-valuenow': listWidth,
+              'aria-valuenow': layout.list,
               'aria-valuemin': LIST_MIN,
-              'aria-valuemax': maxColumnWidth(),
+              'aria-valuemax': columnCeiling('list'),
               tabIndex: 0,
               title: t('resizeColumns'),
               onPointerDown: (event) => startResize('list', event),
@@ -3577,174 +3736,200 @@ ${SHARED_CSS}${DISPATCH_RULES}
               ),
           ),
         ),
-        h('div', {
-          className: 'pj-resizer',
-          role: 'separator',
-          'aria-orientation': 'vertical',
-          'aria-label': t('resizeColumns'),
-          'aria-valuenow': execWidth,
-          'aria-valuemin': EXEC_MIN,
-          'aria-valuemax': maxColumnWidth(),
-          tabIndex: 0,
-          title: t('resizeColumns'),
-          onPointerDown: (event) => startResize('exec', event),
-          onKeyDown: (event) => nudgeWidth('exec', event),
-        }),
+        execCollapsed
+          ? null
+          : h('div', {
+              className: 'pj-resizer',
+              role: 'separator',
+              'aria-orientation': 'vertical',
+              'aria-label': t('resizeColumns'),
+              'aria-valuenow': layout.exec,
+              'aria-valuemin': EXEC_MIN,
+              'aria-valuemax': columnCeiling('exec'),
+              tabIndex: 0,
+              title: t('resizeColumns'),
+              onPointerDown: (event) => startResize('exec', event),
+              onKeyDown: (event) => nudgeWidth('exec', event),
+            }),
         h(
           'aside',
           {
-            className: 'pj-exec',
-            style: { flexBasis: `${execWidth}px`, width: `${execWidth}px` },
+            className: `pj-exec${execCollapsed ? ' pj-collapsed' : ''}`,
+            style: execCollapsed
+              ? undefined
+              : { flexBasis: `${layout.exec}px`, width: `${layout.exec}px` },
           },
-          h(
-            'header',
-            // The Threads head closes the page's top strip: same drag region as
-            // the other two heads, with its glyphs excluded by the Host.
-            { className: 'pj-exec-head', 'data-window-drag': true },
-            execTarget
-              ? h(
-                  'div',
-                  { className: 'pj-detail-head' },
-                  h(
-                    'div',
-                    { className: 'pj-detail-row' },
-                    h(
-                      'button',
-                      { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: () => setExecTarget(null) },
-                      `← ${t('threads')}`,
-                    ),
-                    h('span', { className: 'pj-exec-task', title: execTitle }, shortTitle(execTitle)),
-                    h('span', { className: 'pj-spacer' }),
-                    execTask && h(StatusPill, { status: execTask.status, t }),
-                    execTask &&
-                      h(
-                        'button',
-                        {
-                          className: `pj-icon-btn${execAccepted ? ' pj-on' : ''}`,
-                          type: 'button',
-                          disabled: busy,
-                          title: execAccepted ? t('unresolve') : t('resolve'),
-                          'aria-label': execAccepted ? t('unresolve') : t('resolve'),
-                          'aria-pressed': execAccepted ? 'true' : 'false',
-                          onClick: () => void toggleResolved(execTask),
-                        },
-                        h(ResolveIcon, { done: execAccepted }),
-                      ),
-                    execTask &&
-                      project &&
-                      project.autonomy === 'manual' &&
-                      !execTask.approved &&
-                      execTask.status !== 'running' &&
-                      h(
-                        'button',
-                        {
-                          className: 'pj-btn',
-                          type: 'button',
-                          disabled: busy || project.archived,
-                          onClick: () => void approveTask(execTask),
-                        },
-                        t('approve'),
-                      ),
-                  ),
-                  (execTask || execTarget.sessionId) &&
-                    h(
-                      'div',
-                      { className: 'pj-detail-meta' },
-                      execMeta &&
-                        h('span', { className: 'pj-detail-meta-text', title: execMetaTitle }, execMeta),
-                      execTask?.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
-                      execAccepted && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
-                      h('span', { className: 'pj-spacer' }),
-                      execTarget.sessionId &&
+          execCollapsed
+            ? renderExecRail()
+            : [
+                h(
+                  'header',
+                  // The Threads head closes the page's top strip: same drag region as
+                  // the other two heads, with its glyphs excluded by the Host.
+                  { className: 'pj-exec-head', 'data-window-drag': true },
+                  execTarget
+                    ? h(
+                        'div',
+                        { className: 'pj-detail-head' },
                         h(
-                          'button',
-                          {
-                            className: 'pj-btn pj-btn-ghost',
-                            type: 'button',
-                            onClick: () => openInWorkspace(execTarget.sessionId),
-                          },
-                          t('openInWorkspace'),
+                          'div',
+                          { className: 'pj-detail-row' },
+                          h(
+                            'button',
+                            { className: 'pj-btn pj-btn-ghost', type: 'button', onClick: () => setExecTarget(null) },
+                            `← ${t('threads')}`,
+                          ),
+                          h('span', { className: 'pj-exec-task', title: execTitle }, shortTitle(execTitle)),
+                          h('span', { className: 'pj-spacer' }),
+                          execTask && h(StatusPill, { status: execTask.status, t }),
+                          execTask &&
+                            h(
+                              'button',
+                              {
+                                className: `pj-icon-btn${execAccepted ? ' pj-on' : ''}`,
+                                type: 'button',
+                                disabled: busy,
+                                title: execAccepted ? t('unresolve') : t('resolve'),
+                                'aria-label': execAccepted ? t('unresolve') : t('resolve'),
+                                'aria-pressed': execAccepted ? 'true' : 'false',
+                                onClick: () => void toggleResolved(execTask),
+                              },
+                              h(ResolveIcon, { done: execAccepted }),
+                            ),
+                          execTask &&
+                            project &&
+                            project.autonomy === 'manual' &&
+                            !execTask.approved &&
+                            execTask.status !== 'running' &&
+                            h(
+                              'button',
+                              {
+                                className: 'pj-btn',
+                                type: 'button',
+                                disabled: busy || project.archived,
+                                onClick: () => void approveTask(execTask),
+                              },
+                              t('approve'),
+                            ),
                         ),
-                    ),
-                )
-              : h('h2', { className: 'pj-exec-title' }, t('threads')),
-            // The panel head is two glyphs at the right edge: search and the
-            // group filter. The 4s poll keeps the cards current, so there is no
-            // refresh control to press.
-            execTarget || !project
-              ? null
-              : h(
-                  'div',
-                  { className: 'pj-actions' },
-                  h(
-                    'button',
-                    {
-                      className: `pj-icon-btn${searchOpen ? ' pj-active' : ''}`,
-                      type: 'button',
-                      title: t('searchThreads'),
-                      'aria-label': t('searchThreads'),
-                      'aria-expanded': searchOpen ? 'true' : 'false',
-                      onClick: toggleSearch,
-                    },
-                    h(SearchIcon, { size: 16 }),
-                  ),
+                        (execTask || execTarget.sessionId) &&
+                          h(
+                            'div',
+                            { className: 'pj-detail-meta' },
+                            execMeta &&
+                              h('span', { className: 'pj-detail-meta-text', title: execMetaTitle }, execMeta),
+                            execTask?.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
+                            execAccepted && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
+                            h('span', { className: 'pj-spacer' }),
+                            execTarget.sessionId &&
+                              h(
+                                'button',
+                                {
+                                  className: 'pj-btn pj-btn-ghost',
+                                  type: 'button',
+                                  onClick: () => openInWorkspace(execTarget.sessionId),
+                                },
+                                t('openInWorkspace'),
+                              ),
+                          ),
+                      )
+                    : h('h2', { className: 'pj-exec-title' }, t('threads')),
+                  // The head's right edge is glyphs: search and the group filter on
+                  // the panel, and the fold control in both views, so the column can
+                  // always be put away. The 4s poll keeps the cards current, so there
+                  // is no refresh control to press.
                   h(
                     'div',
-                    { className: 'pj-filter' },
+                    { className: 'pj-actions' },
+                    execTarget || !project
+                      ? null
+                      : [
+                          h(
+                            'button',
+                            {
+                              key: 'search',
+                              className: `pj-icon-btn${searchOpen ? ' pj-active' : ''}`,
+                              type: 'button',
+                              title: t('searchThreads'),
+                              'aria-label': t('searchThreads'),
+                              'aria-expanded': searchOpen ? 'true' : 'false',
+                              onClick: toggleSearch,
+                            },
+                            h(SearchIcon, { size: 16 }),
+                          ),
+                          h(
+                            'div',
+                            { key: 'filter', className: 'pj-filter' },
+                            h(
+                              'button',
+                              {
+                                className: `pj-icon-btn${anyGroupHidden ? ' pj-active' : ''}`,
+                                type: 'button',
+                                ref: filterTrigger,
+                                title: t('filterThreads'),
+                                'aria-label': t('filterThreads'),
+                                'aria-haspopup': 'menu',
+                                'aria-expanded': filterOpen ? 'true' : 'false',
+                                onClick: () => setFilterOpen((open) => !open),
+                              },
+                              h(FilterIcon, { size: 16 }),
+                            ),
+                            renderFilterMenu(),
+                          ),
+                        ],
+                    // The mirror of the project column's fold control: same 28px seat,
+                    // same glyph weight, the panel on the other side.
                     h(
                       'button',
                       {
-                        className: `pj-icon-btn${anyGroupHidden ? ' pj-active' : ''}`,
+                        className: 'pj-icon-btn',
                         type: 'button',
-                        ref: filterTrigger,
-                        title: t('filterThreads'),
-                        'aria-label': t('filterThreads'),
-                        'aria-haspopup': 'menu',
-                        'aria-expanded': filterOpen ? 'true' : 'false',
-                        onClick: () => setFilterOpen((open) => !open),
+                        title: t('collapseThreads'),
+                        'aria-label': t('collapseThreads'),
+                        'aria-expanded': 'true',
+                        onClick: toggleExecCollapsed,
                       },
-                      h(FilterIcon, { size: 16 }),
+                      h(PanelRightIcon, { size: 16 }),
                     ),
-                    renderFilterMenu(),
                   ),
                 ),
-          ),
-          // The search field unfolds under the head; the filter popover carries
-          // the fold-all action, so neither needs a row of its own.
-          !execTarget && project && searchOpen
-            ? h(
-                'div',
-                { className: 'pj-exec-tools' },
-                h(
-                  'div',
-                  { className: 'pj-search' },
-                  h('span', { className: 'pj-search-icon', 'aria-hidden': true }, h(SearchIcon, null)),
-                  h('input', {
-                    ref: searchInputRef,
-                    type: 'search',
-                    value: query,
-                    placeholder: t('searchThreads'),
-                    'aria-label': t('searchThreads'),
-                    onChange: (event) => setQuery(event.target.value),
-                  }),
-                ),
-              )
-            : null,
-          !project
-            ? null
-            : execTarget
-              ? execTask
-                ? renderTaskDetail()
-                : h('div', { className: 'pj-empty' }, t('noTask'))
-              : h(
-                  'div',
-                  { className: 'pj-exec-scroll' },
-                  taskList.length === 0
-                    ? h('div', { className: 'pj-empty' }, t('emptyTasks'))
-                    : shownGroups.length === 0
-                      ? h('div', { className: 'pj-empty' }, t('noMatches'))
-                      : shownGroups.map(renderThreadGroup),
-                ),
+                // The search field unfolds under the head; the filter popover carries
+                // the fold-all action, so neither needs a row of its own.
+                !execTarget && project && searchOpen
+                  ? h(
+                      'div',
+                      { className: 'pj-exec-tools' },
+                      h(
+                        'div',
+                        { className: 'pj-search' },
+                        h('span', { className: 'pj-search-icon', 'aria-hidden': true }, h(SearchIcon, null)),
+                        h('input', {
+                          ref: searchInputRef,
+                          type: 'search',
+                          value: query,
+                          placeholder: t('searchThreads'),
+                          'aria-label': t('searchThreads'),
+                          onChange: (event) => setQuery(event.target.value),
+                        }),
+                      ),
+                    )
+                  : null,
+                !project
+                  ? null
+                  : execTarget
+                    ? execTask
+                      ? renderTaskDetail()
+                      : h('div', { className: 'pj-empty' }, t('noTask'))
+                    : h(
+                        'div',
+                        { className: 'pj-exec-scroll' },
+                        taskList.length === 0
+                          ? h('div', { className: 'pj-empty' }, t('emptyTasks'))
+                          : shownGroups.length === 0
+                            ? h('div', { className: 'pj-empty' }, t('noMatches'))
+                            : shownGroups.map(renderThreadGroup),
+                      ),
+            ],
         ),
         renderTaskMenu(),
         // Both project-level surfaces are dialogs, rendered last so they paint

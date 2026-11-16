@@ -12,6 +12,8 @@ import { before, test } from 'node:test'
 
 let registration
 let plugin
+/** The width the fake window starts with; a viewport harness puts it back. */
+let pristineWindowWidth
 
 /**
  * The module under test captures this object once, at factory time
@@ -138,6 +140,7 @@ before(async () => {
   await import('../client/index.js')
   assert.ok(registration, 'the module registers itself with __ModuleLoader__')
   plugin = registration.factory(fakeRequire)
+  pristineWindowWidth = globalThis.window.innerWidth
 })
 
 test('declares the module id and its services', () => {
@@ -835,9 +838,12 @@ test('the delete confirmation offers archiving as an explicit second action', ()
 test('the columns collapse and resize, and the widths persist', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
 
-  // Collapsed rail: a 44px strip that still shows every project by initial.
+  // Collapsed rail: a 44px strip that still shows every project by initial, and
+  // the same strip for the Threads column.
   assert.match(source, /\.pj-list\.pj-collapsed\{[^}]*44px/)
+  assert.match(source, /\.pj-exec\.pj-collapsed\{[^}]*44px/)
   assert.match(source, /const renderListRail/)
+  assert.match(source, /const renderExecRail/)
   assert.match(source, /pj-rail-btn/)
   assert.match(source, /initialOf\(entry\.name\)/)
   assert.match(source, /aria-expanded/)
@@ -859,15 +865,209 @@ test('the columns collapse and resize, and the widths persist', () => {
   // Preferences are page-local and prefixed.
   assert.match(source, /projects\.\$\{key\}/)
   assert.match(source, /writeStored\('listCollapsed'/)
+  assert.match(source, /writeStored\('execCollapsed'/)
   assert.match(source, /writeStored\('listWidth'/)
   assert.match(source, /writeStored\('execWidth'/)
   assert.match(source, /readStoredNumber\('listWidth'/)
   assert.match(source, /readStoredNumber\('execWidth'/)
 
-  // Bounds: a 180px floor for the list and half the viewport as the ceiling.
+  // Every column owns a floor, the conversation's is the widest, and the CSS
+  // floors are the same numbers the layout math uses.
   assert.match(source, /const LIST_MIN = 180/)
   assert.match(source, /const EXEC_MIN = 280/)
-  assert.match(source, /Math\.round\(width \* 0\.5\)/)
+  assert.match(source, /const MAIN_MIN = 420/)
+  assert.match(source, /const RAIL_WIDTH = 44/)
+  assert.match(source, /const RESIZER_WIDTH = 5/)
+  assert.match(source, /\.pj-list\{[^}]*min-width:180px/)
+  assert.match(source, /\.pj-main\{[^}]*min-width:420px/)
+  assert.match(source, /\.pj-exec\{[^}]*min-width:280px/)
+  assert.ok(
+    Number(/const MAIN_MIN = (\d+)/.exec(source)[1]) >
+      Number(/const LIST_MIN = (\d+)/.exec(source)[1]),
+    'the conversation floor outranks the project list floor',
+  )
+  assert.ok(
+    Number(/const MAIN_MIN = (\d+)/.exec(source)[1]) >
+      Number(/const EXEC_MIN = (\d+)/.exec(source)[1]),
+    'the conversation floor outranks the Threads floor',
+  )
+
+  // The ceiling is no longer "half the viewport": it is whatever is left after
+  // the conversation's floor, so one column can never eat the conversation.
+  assert.match(source, /const columnCeiling = \(which\) => \{/)
+  assert.match(source, /viewport - MAIN_MIN - other - separators/)
+  assert.doesNotMatch(source, /maxColumnWidth/)
+
+  // A side column folds itself once the three floors no longer fit side by side.
+  assert.match(source, /const EXEC_FOLD_BELOW = MAIN_MIN \+ LIST_MIN \+ EXEC_MIN \+ RESIZER_WIDTH \* 2/)
+  assert.match(source, /const LIST_FOLD_BELOW = MAIN_MIN \+ LIST_MIN \+ RAIL_WIDTH \+ RESIZER_WIDTH/)
+  assert.match(source, /addEventListener\('resize', onResize\)/)
+})
+
+// ---------------------------------------------------------------------------
+// Responsive three-column layout
+//
+// The page paints three columns, and the conversation outranks both side
+// columns: the widths below are the ones the real component tree hands the
+// browser, so the arithmetic is the layout the browser would compute.
+
+/** The width a column paints with, read off its inline style. */
+function paintedWidth(page, className) {
+  const node = page.byClass(className)[0]
+  assert.ok(node, `${className} is on the page`)
+  const style = node.props.style || {}
+  return Number(String(style.width || '0').replace('px', ''))
+}
+
+/** Whether a column is showing its 44px rail. */
+function isFolded(page, className) {
+  const node = page.byClass(className)[0]
+  assert.ok(node, `${className} is on the page`)
+  return /(^|\s)pj-collapsed(\s|$)/.test(String(node.props.className))
+}
+
+test('the conversation keeps its floor and the side columns give way', async (t) => {
+  const project = { ...SAMPLE_PROJECT }
+  const detail = { project, memory: SAMPLE_MEMORY }
+
+  // 1200px: both side columns keep their stored widths and the conversation
+  // takes the rest, which is more than its floor.
+  const wide = await mountPage({ projects: [project], detail, viewport: 1200 })
+  t.after(() => wide.unmount())
+  assert.equal(paintedWidth(wide, 'pj-list'), 264)
+  assert.equal(paintedWidth(wide, 'pj-exec'), 380)
+  assert.equal(wide.byClass('pj-resizer').length, 2)
+  const wideShare = 1200 - paintedWidth(wide, 'pj-list') - paintedWidth(wide, 'pj-exec') - 2 * 5
+  assert.ok(wideShare > 420, 'the conversation gets more than its floor')
+  assert.equal(wide.byClass('pj-main').length, 1)
+  assert.equal(wide.byClass('pj-chat-body').length, 1, 'the conversation is mounted')
+
+  // 900px: the pair no longer fits beside a 420px conversation, so both columns
+  // shrink — and the conversation lands exactly on its floor, never below it.
+  const tight = await mountPage({ projects: [project], detail, viewport: 900 })
+  t.after(() => tight.unmount())
+  const list = paintedWidth(tight, 'pj-list')
+  const exec = paintedWidth(tight, 'pj-exec')
+  assert.ok(list >= 180 && exec >= 280, 'both columns stay above their own floors')
+  assert.ok(list < 264 && exec < 380, 'both columns gave way')
+  assert.equal(900 - list - exec - 10, 420, 'the conversation keeps its floor')
+  assert.equal(tight.byClass('pj-chat-body').length, 1, 'the conversation is still mounted')
+
+  // 700px: the three floors no longer fit side by side, so the Threads column
+  // folds itself to the rail and the conversation keeps its floor.
+  const narrow = await mountPage({ projects: [project], detail, viewport: 700 })
+  t.after(() => narrow.unmount())
+  assert.ok(isFolded(narrow, 'pj-exec'), 'Threads folded itself')
+  assert.ok(!isFolded(narrow, 'pj-list'), 'the project list is still open')
+  assert.equal(narrow.byClass('pj-resizer').length, 1, 'a folded column takes its separator with it')
+  assert.equal(paintedWidth(narrow, 'pj-list'), 231)
+  const narrowShare = 700 - paintedWidth(narrow, 'pj-list') - 44 - 5
+  assert.equal(narrowShare, 420, 'the conversation still owns its floor')
+  assert.equal(narrow.byLabel('展开线程栏').length, 1)
+  assert.equal(narrow.byClass('pj-chat-body').length, 1, 'the conversation is still mounted')
+
+  // 600px: the project list folds too, and the conversation gets the rest.
+  const tiny = await mountPage({ projects: [project], detail, viewport: 600 })
+  t.after(() => tiny.unmount())
+  assert.ok(isFolded(tiny, 'pj-list'), 'the project list folded itself')
+  assert.ok(isFolded(tiny, 'pj-exec'))
+  assert.equal(tiny.byClass('pj-resizer').length, 0)
+  assert.ok(600 - 44 - 44 > 420, 'the conversation gets every pixel the rails do not need')
+})
+
+test('the Threads column folds to a rail and comes back', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [{ id: 't1', title: '写测试', brief: '', output: '', status: 'review' }],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+    viewport: 1200,
+  })
+  t.after(() => page.unmount())
+
+  // The head carries the fold control, the mirror of the project column's.
+  assert.equal(page.byLabel('收起线程栏').length, 1)
+  assert.equal(page.byClass('pj-resizer').length, 2)
+
+  page.click(page.byLabel('收起线程栏')[0])
+  const rail = page.byClass('pj-exec')[0]
+  assert.match(String(rail.props.className), /pj-collapsed/)
+  assert.equal(rail.props.style, undefined, 'the rail owns its own 44px width')
+  assert.equal(page.byClass('pj-resizer').length, 1, 'the folded column takes its separator with it')
+  assert.equal(page.byClass('pj-exec-scroll').length, 0, 'the panel is gone, not hidden')
+  assert.equal(page.byLabel('展开线程栏').length, 1)
+  assert.equal(
+    page.textOf(page.byClass('pj-rail-count')[0]),
+    '1',
+    'the rail still tallies the threads',
+  )
+
+  page.click(page.byLabel('展开线程栏')[0])
+  assert.doesNotMatch(String(page.byClass('pj-exec')[0].props.className), /pj-collapsed/)
+  assert.equal(page.byClass('pj-resizer').length, 2)
+  assert.equal(page.byClass('pj-rail-count').length, 0)
+})
+
+test('a drag stops at the conversation floor, so it can never reach zero', async (t) => {
+  const project = { ...SAMPLE_PROJECT }
+  const detail = { project, memory: SAMPLE_MEMORY }
+  const mount = () => mountPage({ projects: [project], detail, viewport: 1200 })
+
+  // The project separator: the ceiling is what is left after the conversation's
+  // floor and the Threads column, not half the viewport.
+  const listPage = await mount()
+  t.after(() => listPage.unmount())
+  const listHandle = () => listPage.byClass('pj-resizer')[0]
+  assert.equal(listHandle().props['aria-valuenow'], 264)
+  assert.equal(listHandle().props['aria-valuemax'], 390)
+  for (let press = 0; press < 8; press += 1) {
+    listHandle().props.onKeyDown({ key: 'ArrowRight', shiftKey: true, preventDefault() {} })
+  }
+  const listNow = listHandle().props['aria-valuenow']
+  assert.equal(listNow, 390, 'the list stops at the ceiling')
+  assert.equal(1200 - listNow - 380 - 10, 420, 'and the conversation still owns its floor')
+  assert.equal(listPage.byClass('pj-main').length, 1)
+
+  // The Threads separator has the mirror ceiling: dragging it left widens the
+  // column until only the conversation floor is left.
+  const execPage = await mount()
+  t.after(() => execPage.unmount())
+  const execHandle = () => execPage.byClass('pj-resizer')[1]
+  assert.equal(execHandle().props['aria-valuenow'], 380)
+  assert.equal(execHandle().props['aria-valuemax'], 506)
+  for (let press = 0; press < 8; press += 1) {
+    execHandle().props.onKeyDown({ key: 'ArrowLeft', shiftKey: true, preventDefault() {} })
+  }
+  assert.equal(execHandle().props['aria-valuenow'], 506, 'Threads stops at the ceiling')
+  assert.equal(1200 - 264 - 506 - 10, 420, 'and the conversation still owns its floor')
+})
+
+test('an explicit fold choice outranks the width, and the conversation still keeps its floor', async (t) => {
+  const project = { ...SAMPLE_PROJECT }
+  const detail = { project, memory: SAMPLE_MEMORY }
+
+  // On a 700px window Threads folds itself; pressing expand is a deliberate
+  // choice, so the column opens and the layout squeezes the pair instead of
+  // silently ignoring the press.
+  const page = await mountPage({ projects: [project], detail, viewport: 700 })
+  t.after(() => page.unmount())
+  assert.ok(isFolded(page, 'pj-exec'))
+  page.click(page.byLabel('展开线程栏')[0])
+  assert.ok(!isFolded(page, 'pj-exec'), 'the press wins over the width')
+  assert.equal(paintedWidth(page, 'pj-list'), 180, 'the project list drops to its floor')
+  assert.equal(paintedWidth(page, 'pj-exec'), 280, 'Threads drops to its floor')
+  // Both side columns are at their floors, so the conversation keeps the CSS
+  // floor it is guaranteed (420) and the page overflows instead of squeezing it.
+  assert.equal(page.byClass('pj-main').length, 1)
+
+  // Pressing fold on a wide window is the other direction: it sticks.
+  const wide = await mountPage({ projects: [project], detail, viewport: 1200 })
+  t.after(() => wide.unmount())
+  assert.ok(!isFolded(wide, 'pj-exec'))
+  wide.click(wide.byLabel('收起线程栏')[0])
+  assert.ok(isFolded(wide, 'pj-exec'), 'the press folds it even though the window is wide')
 })
 
 test('the detail column is a plain flex stack with no overlap', () => {
@@ -1029,19 +1229,21 @@ test('relative times come from the Host stamps and degrade to a date', () => {
   assert.match(block, /delta < 7 \* day/)
 })
 
-test('the threads head is two glyphs, and the fold-all action lives in the filter', () => {
+test('the threads head is glyphs, and the fold-all action lives in the filter', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
 
   // The column is titled Threads, and the detail page returns to it.
   assert.match(source, /t\('threads'\)/)
   assert.doesNotMatch(source, /t\('executors'\)/)
 
-  // The head carries a search glyph and a filter glyph, both at the Host's
-  // 16px seat, and neither is a text button.
+  // The head carries a search glyph, a filter glyph and the fold control, all at
+  // the Host's 16px seat, and none of them is a text button.
   assert.match(source, /h\(SearchIcon, \{ size: 16 \}\)/)
   assert.match(source, /h\(FilterIcon, \{ size: 16 \}\)/)
+  assert.match(source, /h\(PanelRightIcon, \{ size: 16 \}\)/)
   assert.match(source, /t\('searchThreads'\)/)
   assert.match(source, /t\('filterThreads'\)/)
+  assert.match(source, /t\('collapseThreads'\)/)
   assert.match(source, /'aria-expanded': searchOpen \? 'true' : 'false'/)
   assert.match(source, /'aria-haspopup': 'menu'/)
 
@@ -1754,7 +1956,7 @@ const SAMPLE_MODELS = {
   presetsEnumerable: false,
 }
 
-function createPageHarness({ projects = [], detail = null } = {}) {
+function createPageHarness({ projects = [], detail = null, viewport = 0 } = {}) {
   const slots = []
   const cleanups = []
   let cursor = 0
@@ -1763,6 +1965,9 @@ function createPageHarness({ projects = [], detail = null } = {}) {
   let rendering = false
   let dirty = false
   let root = null
+  // The page reads `window.innerWidth` for its layout math, so a test that cares
+  // about a narrow window sets it here; `unmount` puts the file's own value back.
+  if (viewport > 0 && globalThis.window) globalThis.window.innerWidth = viewport
 
   const flatten = (value, out = []) => {
     if (Array.isArray(value)) {
@@ -1945,6 +2150,10 @@ function createPageHarness({ projects = [], detail = null } = {}) {
       cleanups.length = 0
       globalThis.fetch = originalFetch
       reactImpl = DEFAULT_REACT
+      // The fake window is shared by every mount in the file, so the width goes
+      // back to the value the file started with rather than to whatever the
+      // previous mount left behind.
+      if (globalThis.window) globalThis.window.innerWidth = pristineWindowWidth
     },
     tree: () => tree,
     /** Every `/projects-api` call the page made, in order: `{ method, path, body }`. */

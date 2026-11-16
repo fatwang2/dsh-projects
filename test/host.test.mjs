@@ -134,6 +134,7 @@ test('registers the route and every tool', () => {
       'projects_get',
       'projects_list',
       'projects_memory',
+      'projects_update',
       'projects_update_task',
     ],
   )
@@ -1088,4 +1089,372 @@ test('a write past the hard ceiling is reported, not swallowed', async () => {
   const written = await call('projects_memory', { project_id: projectId, action: 'write', text: 'z'.repeat(200_001) })
   assert.match(written, /hit the 200000-character write ceiling and the tail was cut/)
   assert.equal((await call('projects_memory', { project_id: projectId })).length, 200_000)
+})
+
+// ---------------------------------------------------------------------------
+// Worker output language
+//
+// The prompt was English-only, so a Chinese brief still came back in English and
+// that English showed up as the thread subtitle and the embedded conversation.
+// The fix is a hard rule near the top of the prompt, plus a concrete directive
+// derived from the language the human actually wrote in.
+
+/**
+ * Dispatch one task in a fresh auto project and return the prompt its worker
+ * received. Every call gets its own project so the concurrency guard and the
+ * running-task bookkeeping of earlier tests cannot interfere.
+ */
+async function promptFor({ goal, brief, title = 'Task', name = 'Language probe' }) {
+  const created = await call('projects_create', { name, goal, autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', {
+    project_id: projectId,
+    title,
+    ...(brief === undefined ? {} : { brief }),
+  })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.match(dispatched, /Dispatched task/)
+  return activations[activations.length - 1].prompt[0].text
+}
+
+/** The language section of a prompt, cut at its closing blank line. */
+function languageBlock(prompt) {
+  const start = prompt.indexOf('## Language (hard rule)')
+  assert.ok(start >= 0, 'the prompt states the language rule')
+  return prompt.slice(start, prompt.indexOf('\n\n', start))
+}
+
+test('the worker prompt names the language to answer in', async () => {
+  const zh = await promptFor({ name: '中文项目', goal: '发布营销站点。', brief: '写三个标题变体。' })
+  const zhBlock = languageBlock(zh)
+  assert.match(zhBlock, /Write your entire reply in Chinese \(中文\)/)
+  // The rule must not be a suggestion, and it must name what cannot override it.
+  assert.match(zhBlock, /This prompt being in English is not a reason to answer in English/)
+  assert.match(zhBlock, /tool names, code, file paths or the shared project memory/)
+  assert.match(zhBlock, /follow the language of the project instructions instead/)
+  assert.match(zhBlock, /if the two disagree, follow the brief/)
+
+  const en = await promptFor({ name: 'English project', goal: 'Ship the marketing site.', brief: 'Write three headline variants.' })
+  const enBlock = languageBlock(en)
+  assert.match(enBlock, /Write your entire reply in English/)
+  assert.doesNotMatch(enBlock, /Chinese/)
+
+  // "Near the top" is part of the contract: the model settles its answer
+  // language from the first screen, and everything below is English.
+  assert.ok(zh.indexOf('## Language (hard rule)') > zh.indexOf('Do only this task'))
+  assert.ok(zh.indexOf('## Language (hard rule)') < zh.indexOf('## Project instructions'))
+  assert.ok(zh.indexOf('## Language (hard rule)') < zh.indexOf('## Your task'))
+})
+
+test('an empty brief falls back to the project instructions language', async () => {
+  const zh = await promptFor({ name: '中文目标', goal: '把这个仓库的文档补齐。' })
+  assert.match(languageBlock(zh), /Write your entire reply in Chinese \(中文\)/)
+
+  const en = await promptFor({ name: 'English goal', goal: 'Fill in the missing docs.' })
+  assert.match(languageBlock(en), /Write your entire reply in English/)
+
+  // Neither language is present: state the rule without guessing one.
+  const neither = await promptFor({ name: 'Numbers', goal: '1234', brief: '5678' })
+  const block = languageBlock(neither)
+  assert.match(block, /Write your entire reply in the language the human wrote the task brief in/)
+  assert.doesNotMatch(block, /Write your entire reply in (Chinese|English)/)
+})
+
+test('language detection follows the human, not the Latin identifiers in a brief', async () => {
+  // A real Chinese brief is full of Latin identifiers; counting scripts and
+  // taking the majority would call this English.
+  const mixed = await promptFor({
+    name: '混合项目',
+    goal: '修复 workerPrompt 的硬编码英文。',
+    brief: '改 host/index.js 的 workerPrompt()，让 task.output 跟随 brief 语言。不要碰 client/index.js。',
+  })
+  assert.match(languageBlock(mixed), /Write your entire reply in Chinese \(中文\)/)
+
+  // Japanese also uses Han, so guessing Chinese there would be worse than
+  // saying nothing: no concrete directive, the general rule still applies.
+  const ja = await promptFor({
+    name: '日本語プロジェクト',
+    goal: 'マーケティングサイトを公開する。',
+    brief: '見出しのバリエーションを三つ書いてください。',
+  })
+  const jaBlock = languageBlock(ja)
+  assert.doesNotMatch(jaBlock, /Write your entire reply in (Chinese|English)/)
+  assert.match(jaBlock, /Write your entire reply in the language the human wrote the task brief in/)
+
+  // The Host has no locale service to consult, so the plugin must not depend on
+  // one. `locale` is provided by the Client half of dsh-client-locale only.
+  assert.deepEqual(plugin.inject, ['webServer', 'tools'])
+})
+
+// ---------------------------------------------------------------------------
+// Automatic memory compaction
+//
+// The memory is an append-only log, so it only grows. Once it crosses the
+// project's budget the host archives its oldest whole sections into
+// `memory-archive.md` and keeps the rest — deterministic, no LLM, nothing
+// summarised away. These tests drive that through both write paths (the tool and
+// the page's HTTP route) and pin the safety rails: a backup, a rollback when the
+// rewrite is not shorter, and single-flight per project.
+
+function projectDirOf(projectId) {
+  return join(home, 'projects', projectId)
+}
+
+async function readFileOr(file, fallback = '') {
+  try {
+    return await readFile(file, 'utf8')
+  } catch {
+    return fallback
+  }
+}
+
+async function memoryOf(projectId) {
+  return readFileOr(join(projectDirOf(projectId), 'memory.md'))
+}
+
+async function archiveOf(projectId) {
+  return readFileOr(join(projectDirOf(projectId), 'memory-archive.md'))
+}
+
+async function backupOf(projectId) {
+  return readFileOr(join(projectDirOf(projectId), 'memory.bak.md'))
+}
+
+async function storedProject(projectId) {
+  return JSON.parse(await readFileOr(join(projectDirOf(projectId), 'project.json'), '{}'))
+}
+
+/** A memory of `count` sections of roughly `size` characters each. */
+function memoryWithSections(count, size, tag = 'S') {
+  const sections = []
+  for (let index = 1; index <= count; index += 1) {
+    sections.push(`## ${tag}${index} durable fact\n\n${'x'.repeat(size)}`)
+  }
+  return sections.join('\n\n')
+}
+
+async function newProject(name, extra = {}) {
+  const created = await call('projects_create', { name, ...extra })
+  return created.match(/p-[0-9a-f]{8}/)[0]
+}
+
+test('a memory under its budget is not compacted', async () => {
+  const projectId = await newProject('Small memory', { memoryBudget: 4_000 })
+  const written = await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    text: memoryWithSections(2, 900),
+  })
+  assert.doesNotMatch(written, /Auto-compacted/)
+  assert.equal(await archiveOf(projectId), '')
+  assert.equal(await backupOf(projectId), '')
+  assert.equal((await storedProject(projectId)).lastCompaction, undefined)
+  // And the ordinary budget warning is gone too: nothing is over budget.
+  assert.doesNotMatch(written, /WARNING/)
+})
+
+test('a memory over its budget archives its oldest sections automatically', async () => {
+  const projectId = await newProject('Fat memory', { memoryBudget: 4_000, autonomy: 'auto' })
+  const original = memoryWithSections(6, 1_000)
+  assert.ok(original.length > 4_000, 'the fixture is over budget')
+
+  const written = await call('projects_memory', { project_id: projectId, action: 'write', text: original })
+  assert.match(written, /Auto-compacted the shared memory: \d+ → \d+ characters \(4 section\(s\) moved to memory-archive\.md\)/)
+
+  const memory = await memoryOf(projectId)
+  const archive = await archiveOf(projectId)
+  const backup = await backupOf(projectId)
+
+  // The newest two sections survive; the oldest four moved out verbatim.
+  assert.match(memory, /## S6 durable fact/)
+  assert.match(memory, /## S5 durable fact/)
+  assert.doesNotMatch(memory, /## S4 durable fact/)
+  assert.ok(memory.length <= 4_000, 'the remaining memory fits the budget')
+
+  assert.match(archive, /^## Compaction \d{4}-\d{2}-\d{2}T/)
+  assert.match(archive, /Moved 4 section\(s\): S1 durable fact \| S2 durable fact \| S3 durable fact \| S4 durable fact/)
+  assert.match(archive, /## S1 durable fact/)
+  assert.match(archive, /## S4 durable fact/)
+  assert.doesNotMatch(archive, /## S5 durable fact/)
+  // Nothing was lost: every archived section's body is present in full.
+  for (let index = 1; index <= 4; index += 1) {
+    assert.ok(archive.includes(`## S${index} durable fact\n\n${'x'.repeat(1_000)}`), `S${index} moved verbatim`)
+  }
+
+  // The pre-compaction text is kept as a manual recovery point.
+  assert.equal(backup, original)
+
+  const record = (await storedProject(projectId)).lastCompaction
+  assert.equal(record.before, original.length)
+  assert.equal(record.after, memory.length)
+  assert.equal(record.archived, 4)
+  assert.ok(record.at > 0)
+
+  // The compaction is visible where a human/coordinator looks, and the index
+  // reflects the compacted file rather than the archived sections.
+  const detail = await call('projects_get', { project_id: projectId })
+  assert.match(detail, /memory: budget 4000, auto-compaction on · last compaction \d+ → \d+ characters at /)
+  assert.match(detail, /- S6 durable fact \(\d+ chars\)/)
+  assert.doesNotMatch(detail, /S1 durable fact/)
+
+  // The dispatch prompt carries the same index, so a worker cannot be handed
+  // text that only exists in the archive.
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Read the memory' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  const prompt = activations[activations.length - 1].prompt[0].text
+  assert.match(prompt, /- S6 durable fact \(\d+ chars\)/)
+  assert.doesNotMatch(prompt, /S1 durable fact/)
+})
+
+test('compaction is single-flight per project', async () => {
+  // Compaction off from the start, so the setup write cannot compact and the two
+  // direct calls below are the only compactions in play.
+  const projectId = await newProject('Single flight', { memoryBudget: 4_000, autoCompact: false })
+  await call('projects_memory', { project_id: projectId, action: 'write', text: memoryWithSections(6, 1_000) })
+  assert.ok((await memoryOf(projectId)).length > 4_000)
+
+  // The first call takes the flag synchronously, before its first await, so the
+  // second call in the same tick must be refused rather than racing it.
+  const first = plugin.compactMemory(projectId)
+  const second = await plugin.compactMemory(projectId)
+  assert.equal(second.skipped, 'in_flight')
+
+  const firstResult = await first
+  assert.equal(firstResult.skipped, null)
+  assert.equal(firstResult.archived, 4)
+
+  // One run, one archive header: the refused call archived nothing.
+  const archive = await archiveOf(projectId)
+  assert.equal(archive.match(/^## Compaction /gm).length, 1)
+
+  // The flag is released, so a later write can compact again.
+  const again = await plugin.compactMemory(projectId)
+  assert.equal(again.skipped, 'under_budget')
+})
+
+test('a failed compaction leaves the memory intact and clears the flag', async () => {
+  const projectId = await newProject('Broken archive', { memoryBudget: 4_000 })
+  await call('projects_update', { project_id: projectId, autoCompact: false })
+  const original = memoryWithSections(6, 1_000)
+  await call('projects_memory', { project_id: projectId, action: 'write', text: original })
+
+  // A directory where the archive file belongs makes the archive write fail
+  // after the backup was taken — exactly the "half-way through" case.
+  await mkdir(join(projectDirOf(projectId), 'memory-archive.md'), { recursive: true })
+  const failed = await plugin.compactMemory(projectId)
+  assert.equal(failed.skipped, 'error')
+  assert.match(failed.reason, /EISDIR|ENOTDIR|EPERM|EACCES|illegal operation/i)
+  // The memory was never replaced, and no compaction is recorded.
+  assert.equal(await memoryOf(projectId), original)
+  assert.equal((await storedProject(projectId)).lastCompaction, undefined)
+
+  // The in-flight flag is gone: once the obstacle is removed the next attempt
+  // compacts normally instead of being told a run is still going.
+  await rm(join(projectDirOf(projectId), 'memory-archive.md'), { recursive: true, force: true })
+  const retried = await plugin.compactMemory(projectId)
+  assert.equal(retried.skipped, null)
+  assert.ok((await memoryOf(projectId)).length < original.length)
+  assert.match(await archiveOf(projectId), /## S1 durable fact/)
+})
+
+test('a single oversized section is never split, so nothing is archived', async () => {
+  const projectId = await newProject('One section', { memoryBudget: 4_000 })
+  const written = await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    text: memoryWithSections(1, 5_000),
+  })
+  assert.match(written, /nothing safe to archive: a single section is never split/)
+  assert.equal(await archiveOf(projectId), '')
+  assert.equal((await memoryOf(projectId)).length, 5_000 + '## S1 durable fact\n\n'.length)
+})
+
+test('autoCompact false keeps the memory append-only', async () => {
+  const projectId = await newProject('Manual memory', { memoryBudget: 4_000, autoCompact: false })
+  const original = memoryWithSections(6, 1_000)
+  const written = await call('projects_memory', { project_id: projectId, action: 'write', text: original })
+  assert.match(written, /Auto-compaction is off for this project/)
+  assert.equal(await memoryOf(projectId), original)
+  assert.equal(await archiveOf(projectId), '')
+  assert.equal((await storedProject(projectId)).lastCompaction, undefined)
+
+  // The coordinator can turn it back on, and the next write compacts.
+  const updated = await call('projects_update', { project_id: projectId, autoCompact: true, memoryBudget: 5_000 })
+  assert.match(updated, /memory=5000 autoCompact=true/)
+  const appended = await call('projects_memory', { project_id: projectId, action: 'append', text: '## S7 later finding\n\nshort' })
+  assert.match(appended, /Auto-compacted the shared memory/)
+  assert.match(await archiveOf(projectId), /## S1 durable fact/)
+})
+
+test('the page memory editor compacts too, and the settings round-trip', async () => {
+  const projectId = await newProject('Page memory', { memoryBudget: 4_000 })
+  const original = memoryWithSections(6, 1_000)
+  const saved = await request('POST', `/projects-api/projects/${projectId}/memory`, { text: original })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.body.saved, true)
+  assert.match(saved.body.compaction, /Auto-compacted the shared memory/)
+  assert.match(await archiveOf(projectId), /## S1 durable fact/)
+
+  // The GET still returns the current (compacted) text the editor edits.
+  const read = await request('GET', `/projects-api/projects/${projectId}/memory`)
+  assert.equal(read.status, 200)
+  assert.equal(read.body.memory, await memoryOf(projectId))
+  assert.doesNotMatch(read.body.memory, /## S1 durable fact/)
+
+  // Project settings are visible on the project payload the page already reads.
+  const patched = await request('PATCH', `/projects-api/projects/${projectId}`, { autoCompact: false, memoryBudget: 9_000 })
+  assert.equal(patched.status, 200)
+  assert.equal(patched.body.project.autoCompact, false)
+  assert.equal(patched.body.project.memoryBudget, 9_000)
+  assert.ok(patched.body.project.lastCompaction.at > 0)
+
+  // A string "false" must not silently disable compaction: only a real boolean
+  // flips it, so the setting stays on.
+  const restored = await request('PATCH', `/projects-api/projects/${projectId}`, { autoCompact: true })
+  assert.equal(restored.body.project.autoCompact, true)
+  const sneaky = await request('PATCH', `/projects-api/projects/${projectId}`, { autoCompact: 'false' })
+  assert.equal(sneaky.body.project.autoCompact, true)
+  // Out-of-range budgets are clamped, not rejected.
+  const clamped = await request('PATCH', `/projects-api/projects/${projectId}`, { memoryBudget: 1 })
+  assert.equal(clamped.body.project.memoryBudget, 4_000)
+})
+
+test('an archived section is still readable, and the index says so', async () => {
+  const projectId = await newProject('Archive reading', { memoryBudget: 4_000 })
+  await call('projects_memory', { project_id: projectId, action: 'write', text: memoryWithSections(6, 1_000) })
+
+  // S1 moved out of memory.md, but reading it by title still works and says
+  // where it came from.
+  const archived = await call('projects_memory', { project_id: projectId, action: 'read', section: 'S1 durable fact' })
+  assert.match(archived, /^## S1 durable fact/)
+  assert.match(archived, /x{1000}/)
+  assert.match(archived, /\(Archived: compaction moved this section out of memory\.md/)
+
+  // A live section is returned without the archive note.
+  const live = await call('projects_memory', { project_id: projectId, action: 'read', section: 'S6 durable fact' })
+  assert.match(live, /^## S6 durable fact/)
+  assert.doesNotMatch(live, /Archived:/)
+
+  // The tool's index lists what was archived, so it stays discoverable...
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /2 section\(s\), \d+ characters/)
+  assert.match(index, /4 archived section\(s\) in memory-archive\.md/)
+  assert.match(index, /- S1 durable fact \(\d+ chars\)/)
+  assert.ok(index.indexOf('archived section(s)') > index.indexOf('2 section(s)'), 'the live index comes first')
+  // ...while the worker prompt's index does not (workers act on current memory).
+  const added = await call('projects_add_task', { project_id: projectId, title: 'probe' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  const prompt = activations[activations.length - 1].prompt[0].text
+  assert.match(prompt, /- S6 durable fact/)
+  assert.doesNotMatch(prompt, /S1 durable fact/)
+  assert.doesNotMatch(prompt, /memory-archive\.md/)
+
+  // A miss names both stores.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'read', section: 'no such section' }),
+    /Archived sections are searchable too/,
+  )
 })

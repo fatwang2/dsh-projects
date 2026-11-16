@@ -45,6 +45,15 @@ const MEMORY_BUDGET = 64_000
  * current size would also make the memory editor unsaveable.
  */
 const MAX_MEMORY = 200_000
+/** Bounds for the per-project `memoryBudget` override. */
+const MEMORY_BUDGET_MIN = 4_000
+const MEMORY_BUDGET_MAX = MAX_MEMORY
+/**
+ * Compaction aims *below* the budget rather than at it, so a project does not
+ * re-compact on the very next append. 60% of the budget leaves room for roughly
+ * a dozen normal-sized sections.
+ */
+const MEMORY_TARGET_RATIO = 0.6
 /**
  * Hard cap on the memory index injected into a worker prompt. The prompt has to
  * stay small no matter how large the memory grows, so the index is truncated
@@ -80,6 +89,14 @@ const HUMAN_TASK_FIELDS = ['resolved']
 const AUTONOMY = ['manual', 'auto']
 /** Live dispatch controllers, so unloading the plugin stops its workers. */
 const controllers = new Map()
+/**
+ * Projects whose memory is being compacted right now. Compaction is
+ * single-flight per project: a second append that lands mid-run must not start a
+ * second pass over the same file (two passes would archive the same sections
+ * twice and could interleave their writes). The entry is cleared in a `finally`,
+ * so a failed run never wedges the project.
+ */
+const compacting = new Set()
 
 // ---------------------------------------------------------------------------
 // Paths and small helpers
@@ -102,6 +119,20 @@ function projectFile(id) {
 
 function memoryFile(id) {
   return join(projectDir(id), 'memory.md')
+}
+
+/**
+ * Sections moved out of `memory.md` by auto-compaction. Append-only and never
+ * injected anywhere: it is the "nothing is lost" half of compaction, so a human
+ * can still read what was summarised away.
+ */
+function memoryArchiveFile(id) {
+  return join(projectDir(id), 'memory-archive.md')
+}
+
+/** The memory as it was just before the last compaction, for manual recovery. */
+function memoryBackupFile(id) {
+  return join(projectDir(id), 'memory.bak.md')
 }
 
 function newId(prefix) {
@@ -240,6 +271,21 @@ function normalizeProject(raw) {
     model: modelValue(raw.model),
     agentPreset: presetValue(raw.agentPreset),
     reasoningEffort: effortValue(raw.reasoningEffort),
+    // Automatic memory compaction: on by default, because an unbounded memory
+    // file is the failure mode this feature exists to prevent. `memoryBudget` is
+    // the per-project threshold; the module default applies when it is absent.
+    autoCompact: raw.autoCompact !== false,
+    memoryBudget: intIn(raw.memoryBudget, MEMORY_BUDGET_MIN, MEMORY_BUDGET_MAX, MEMORY_BUDGET),
+    ...(raw.lastCompaction && typeof raw.lastCompaction === 'object'
+      ? {
+        lastCompaction: {
+          at: Number(raw.lastCompaction.at) || 0,
+          before: Number(raw.lastCompaction.before) || 0,
+          after: Number(raw.lastCompaction.after) || 0,
+          archived: Number(raw.lastCompaction.archived) || 0,
+        },
+      }
+      : {}),
     ...(typeof raw.coordinatorSessionId === 'string' && raw.coordinatorSessionId
       ? { coordinatorSessionId: raw.coordinatorSessionId }
       : {}),
@@ -388,20 +434,280 @@ function findMemorySection(memory, needle) {
 }
 
 /** A warning suffix for memory writes, or '' when everything is fine. */
-function memoryWarning({ length, truncated }) {
+function memoryWarning({ length, truncated }, budget = MEMORY_BUDGET) {
   const notes = []
   if (truncated) {
     notes.push(
       `WARNING: the memory hit the ${MAX_MEMORY}-character write ceiling and the tail was cut (only the tail: nothing before it was dropped).`,
     )
   }
-  if (length > MEMORY_BUDGET) {
+  if (length > budget) {
     notes.push(
-      `WARNING: the shared memory is now ${length} characters, ${length - MEMORY_BUDGET} over the ${MEMORY_BUDGET}-character budget. ` +
+      `WARNING: the shared memory is now ${length} characters, ${length - budget} over the ${budget}-character budget. ` +
         'Workers only receive an index, but the file should be compressed: read it with action "index", then replace it with a condensed version using action "write".',
     )
   }
   return notes.length ? ` ${notes.join(' ')}` : ''
+}
+
+// ---------------------------------------------------------------------------
+// Automatic memory compaction
+//
+// The memory is an append-only log, so it only ever grows. Workers get an index
+// (never the text) and the coordinator reads sections, so a fat file is not
+// fatal — but it does mean the project's durable knowledge is buried in a
+// changelog, and every "read the whole memory" eventually costs a context
+// window. So the host compacts on its own once the file crosses the budget.
+//
+// This is deliberately *deterministic archiving*, not an LLM summarisation pass:
+//
+//  - A compaction worker cannot be started from most write paths. `startActivation`
+//    needs `parent: Agent`, and the page's `POST /projects/:id/memory` has no
+//    calling agent at all; a worker appending its findings is itself a depth-1
+//    child, and the subagent runtime's `maxDepth` defaults to 1, so its child
+//    would be refused (`subagent depth 2 exceeds maxDepth 1`). Those are exactly
+//    the two paths that grow the memory.
+//  - `delivery: 'parent'` is fire-and-forget: the compacted text would only come
+//    back on `subagent/end`, i.e. after the write path returned, so it could not
+//    be validated or rolled back inline and appends landing meanwhile would race.
+//  - Archiving whole sections cannot lose a fact: the moved text is kept verbatim
+//    in `memory-archive.md`. A model rewrite can, and silently.
+//
+// So: whole oldest sections move to `memory-archive.md` until the remaining file
+// fits the target. Nothing is summarised, split or dropped.
+
+/** The per-project budget, clamped so a hand-edited project.json cannot disable it. */
+function memoryBudgetOf(project) {
+  return intIn(project?.memoryBudget, MEMORY_BUDGET_MIN, MEMORY_BUDGET_MAX, MEMORY_BUDGET)
+}
+
+/**
+ * Split the memory into preamble + `## ` sections, keeping each section's text
+ * verbatim (the index/read paths only need titles and sizes, but archiving has to
+ * move the original bytes). A `## ` line inside a body splits it, exactly like
+ * `memorySections`, so the two views never disagree about what a section is.
+ */
+function memoryBlocks(memory) {
+  const source = String(memory ?? '')
+  if (!source.trim()) return []
+  const starts = []
+  const heading = /^## /gm
+  let match
+  while ((match = heading.exec(source)) !== null) starts.push(match.index)
+  if (starts.length === 0) return [{ title: null, body: source }]
+  const blocks = []
+  const preamble = source.slice(0, starts[0])
+  if (preamble.trim()) blocks.push({ title: null, body: preamble })
+  for (let index = 0; index < starts.length; index += 1) {
+    const end = index + 1 < starts.length ? starts[index + 1] : source.length
+    const chunk = source.slice(starts[index], end)
+    const newline = chunk.indexOf('\n')
+    const title = (newline === -1 ? chunk.slice(3) : chunk.slice(3, newline)).trim()
+    blocks.push({ title, body: chunk })
+  }
+  return blocks
+}
+
+/**
+ * Decide what to move. Keeps the newest sections that fit `target` and archives
+ * the older ones; the newest section is always kept even when it alone exceeds
+ * the target, because splitting a section would corrupt it. Returns null when
+ * there is nothing safe to move (no sections, or only one).
+ */
+function planArchive(memory, target) {
+  const blocks = memoryBlocks(memory)
+  const preamble = blocks.length > 0 && blocks[0].title === null ? blocks[0] : null
+  const sections = preamble ? blocks.slice(1) : blocks
+  if (sections.length <= 1) return null
+  const kept = []
+  let used = preamble ? preamble.body.length : 0
+  for (let index = sections.length - 1; index >= 0; index -= 1) {
+    const section = sections[index]
+    if (kept.length > 0 && used + section.body.length > target) break
+    kept.unshift(section)
+    used += section.body.length
+  }
+  const moved = sections.slice(0, sections.length - kept.length)
+  if (moved.length === 0) return null
+  const remaining = [preamble ? preamble.body.trimEnd() : '', ...kept.map((section) => section.body.trimEnd())]
+    .filter((part) => part)
+    .join('\n\n')
+  return {
+    remaining: `${remaining}\n`,
+    moved,
+    archivedChars: moved.reduce((total, section) => total + section.body.length, 0),
+  }
+}
+
+/** The archive's run header plus the moved sections, verbatim. */
+function archiveRunBlock(plan, before, budget) {
+  const stamp = new Date().toISOString()
+  const titles = plan.moved.map((section) => section.title || '(preamble)').join(' | ')
+  return [
+    `## Compaction ${stamp} — ${before.length} → ${plan.remaining.length} characters, budget ${budget}`,
+    `Moved ${plan.moved.length} section(s): ${titles}`,
+    '',
+    ...plan.moved.map((section) => section.body.trimEnd()),
+    '',
+  ].join('\n')
+}
+
+async function readMemoryArchive(id) {
+  try {
+    return await readFile(memoryArchiveFile(id), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * A bounded list of what compaction moved out, appended to the tool's index so
+ * an archived section stays discoverable. Deliberately *not* part of the worker
+ * prompt's index: workers act on current knowledge, and archived history is
+ * something the coordinator looks up on purpose.
+ */
+function archiveSummary(archive, limit = 2_000) {
+  const sections = memorySections(archive).filter((section) => !section.title.startsWith('Compaction '))
+  if (sections.length === 0) return ''
+  const header =
+    `${sections.length} archived section(s) in memory-archive.md — moved out by compaction, not injected into prompts. ` +
+    'Read one with action "read", section:"<title>".'
+  const lines = [header]
+  let used = header.length
+  for (const section of sections) {
+    const entry = `- ${section.title} (${section.chars} chars)`
+    if (used + entry.length + 1 > limit) {
+      lines.push(`- …and ${sections.length - (lines.length - 1)} more archived section(s) not listed.`)
+      break
+    }
+    lines.push(entry)
+    used += entry.length + 1
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Compact one project's memory down to `MEMORY_TARGET_RATIO` of its budget.
+ *
+ * Order matters: back up → append the archive → write the shorter memory →
+ * verify the write. The memory is only replaced after the archive holds the
+ * moved text, and a rewrite that does not actually shrink the file (or that
+ * comes back empty) is discarded rather than applied. Any failure after the
+ * memory write restores the pre-compaction text, so a compaction can never be
+ * the thing that loses memory.
+ *
+ * @returns a result object; `skipped` is null on success.
+ */
+async function compactMemory(projectId) {
+  const id = String(projectId)
+  if (compacting.has(id)) return { skipped: 'in_flight' }
+  compacting.add(id)
+  let before = ''
+  let budget = MEMORY_BUDGET
+  let wrote = false
+  try {
+    const project = await readProject(id)
+    budget = memoryBudgetOf(project)
+    before = await readMemory(id)
+    if (before.length <= budget) {
+      return { skipped: 'under_budget', before: before.length, after: before.length, budget }
+    }
+    const target = Math.max(1, Math.floor(budget * MEMORY_TARGET_RATIO))
+    const plan = planArchive(before, target)
+    if (!plan) {
+      return { skipped: 'nothing_to_archive', before: before.length, after: before.length, budget }
+    }
+    if (!plan.remaining.trim() || plan.remaining.length >= before.length) {
+      return {
+        skipped: 'rolled_back',
+        before: before.length,
+        after: before.length,
+        budget,
+        reason: 'the archived result was empty or not shorter than the original',
+      }
+    }
+    await writeFileAtomic(memoryBackupFile(id), before)
+    await writeFileAtomic(memoryArchiveFile(id), `${await readMemoryArchive(id)}${archiveRunBlock(plan, before, budget)}`)
+    await writeFileAtomic(memoryFile(id), plan.remaining)
+    wrote = true
+    const check = await readMemory(id)
+    if (check !== plan.remaining) {
+      await writeFileAtomic(memoryFile(id), before)
+      wrote = false
+      return {
+        skipped: 'rolled_back',
+        before: before.length,
+        after: before.length,
+        budget,
+        reason: 'the rewritten memory did not read back identically',
+      }
+    }
+    const record = {
+      at: Date.now(),
+      before: before.length,
+      after: plan.remaining.length,
+      archived: plan.moved.length,
+    }
+    // Re-read before saving: compaction can run while a task settles, and a stale
+    // copy would undo that write.
+    const latest = await readProject(id)
+    latest.lastCompaction = record
+    latest.updatedAt = Date.now()
+    await writeProject(latest)
+    return { skipped: null, ...record, budget }
+  } catch (error) {
+    if (wrote) {
+      try {
+        await writeFileAtomic(memoryFile(id), before)
+      } catch {
+        // The backup on disk is still the pre-compaction text.
+      }
+    }
+    return { skipped: 'error', before: before.length, after: before.length, budget, reason: messageOf(error) }
+  } finally {
+    compacting.delete(id)
+  }
+}
+
+/** Human/agent-facing sentence for a compaction result, or '' when nothing happened. */
+function compactionNote(result) {
+  if (!result) return ''
+  if (!result.skipped) {
+    const still = result.after > result.budget
+      ? ` It is still over the ${result.budget}-character budget: the remaining sections are each too large to split.`
+      : ''
+    return ` Auto-compacted the shared memory: ${result.before} → ${result.after} characters (${result.archived} section(s) moved to memory-archive.md).${still}`
+  }
+  if (result.skipped === 'in_flight') {
+    return ' A compaction is already running for this project; it will finish on its own.'
+  }
+  if (result.skipped === 'under_budget') return ''
+  if (result.skipped === 'nothing_to_archive') {
+    return ` The memory is ${result.before} characters, over its ${result.budget}-character budget, but there is nothing safe to archive: a single section is never split.`
+  }
+  if (result.skipped === 'rolled_back') {
+    return ` Auto-compaction was rolled back (${result.reason}); the memory is unchanged at ${result.before} characters.`
+  }
+  return ` Auto-compaction failed (${result.reason}); the memory is unchanged at ${result.before} characters.`
+}
+
+/**
+ * The one hook every memory write goes through: warn, then compact if the file
+ * is over budget and the project allows it. Never throws — a write that already
+ * landed must not be reported as failed because housekeeping could not run.
+ */
+async function afterMemoryWrite(project, written) {
+  const budget = memoryBudgetOf(project)
+  const warning = memoryWarning(written, budget)
+  if (written.length <= budget) return warning
+  if (project.autoCompact === false) {
+    return `${warning} Auto-compaction is off for this project, so the file stays over budget.`
+  }
+  try {
+    return `${warning}${compactionNote(await compactMemory(project.id))}`
+  } catch (error) {
+    return `${warning} Auto-compaction failed (${messageOf(error)}); the memory is unchanged.`
+  }
 }
 
 function counts(tasks) {
@@ -418,6 +724,9 @@ function summarize(project) {
     autonomy: project.autonomy,
     concurrency: project.concurrency,
     archived: project.archived,
+    autoCompact: project.autoCompact !== false,
+    memoryBudget: memoryBudgetOf(project),
+    ...(project.lastCompaction ? { lastCompaction: project.lastCompaction } : {}),
     updatedAt: project.updatedAt,
     counts: counts(project.tasks),
   }
@@ -437,6 +746,8 @@ async function createProject(input) {
     model: input?.model,
     agentPreset: input?.agentPreset,
     reasoningEffort: input?.reasoningEffort,
+    autoCompact: input?.autoCompact,
+    memoryBudget: input?.memoryBudget,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     tasks: [],
@@ -458,6 +769,13 @@ async function updateProject(id, patch) {
   if (patch?.model !== undefined) project.model = modelValue(patch.model)
   if (patch?.agentPreset !== undefined) project.agentPreset = presetValue(patch.agentPreset)
   if (patch?.reasoningEffort !== undefined) project.reasoningEffort = effortValue(patch.reasoningEffort)
+  // Memory compaction settings are project settings, not task state, so the page
+  // and the coordinator tool may both retune them. Only a real boolean flips
+  // `autoCompact`; a string "false" must not silently turn it off.
+  if (typeof patch?.autoCompact === 'boolean') project.autoCompact = patch.autoCompact
+  if (patch?.memoryBudget !== undefined) {
+    project.memoryBudget = intIn(patch.memoryBudget, MEMORY_BUDGET_MIN, MEMORY_BUDGET_MAX, project.memoryBudget)
+  }
   if (patch?.coordinatorSessionId !== undefined) {
     const value = text(patch.coordinatorSessionId, 128)
     if (value) project.coordinatorSessionId = value
@@ -574,10 +892,76 @@ function blocksToText(blocks) {
   return parts.join('\n').trim()
 }
 
+/**
+ * Characters that identify the language the human actually writes in.
+ *
+ * Han is checked before Latin on purpose: a Chinese brief is full of Latin
+ * identifiers (`workerPrompt`, `host/index.js`), so counting the two scripts and
+ * taking the majority would misread most Chinese tasks as English. Latin alone
+ * is a reliable English signal because English text never contains Han.
+ * Kana is checked first and suppresses the directive entirely: Japanese uses
+ * Han too, so guessing `zh` there would be worse than saying nothing.
+ */
+const KANA = /[\u3040-\u30ff\u31f0-\u31ff]/u
+const HAN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u
+const LATIN = /[A-Za-z]/u
+
+/**
+ * The language a worker should answer in, derived from the human's own words.
+ *
+ * The Host has no locale service to consult: `locale` is provided by the
+ * *Client* half of `dsh-client-locale` (`src/client/index.ts`, `ctx.provide`),
+ * and its Host half only declares a settings namespace. The preference is
+ * technically reachable through `ctx.get('settings').describe()`, but it is the
+ * wrong signal even then: it is a *UI* language, this profile pins it to `en`,
+ * and the human still writes Chinese briefs — following it would reproduce the
+ * bug this fixes. What the human wants to read is described by what the human
+ * wrote, so the brief wins and the project instructions are the fallback.
+ *
+ * @returns `'zh'`, `'en'`, or `''` when no directive is safe to state.
+ */
+function replyLanguage(project, task) {
+  const sample = task.brief.trim() || project.goal.trim()
+  if (!sample) return ''
+  if (KANA.test(sample)) return ''
+  if (HAN.test(sample)) return 'zh'
+  if (LATIN.test(sample)) return 'en'
+  return ''
+}
+
+/**
+ * The hard language rule injected into every worker prompt.
+ *
+ * Workers used to answer in English whenever the brief was Chinese, because the
+ * whole prompt is English and the model took that as the conversation language;
+ * the English output then showed up as the thread subtitle and the embedded
+ * conversation. The rule is stated as a rule, not a preference, and it names the
+ * things that must not override it (this prompt, tool names, code, the memory).
+ */
+function languageRule(language) {
+  const lines = ['## Language (hard rule)']
+  if (language === 'zh') {
+    lines.push('Write your entire reply in Chinese (中文) — the language the human wrote the task brief in.')
+  } else if (language === 'en') {
+    lines.push('Write your entire reply in English — the language the human wrote the task brief in.')
+  } else {
+    lines.push('Write your entire reply in the language the human wrote the task brief in: a Chinese brief means a Chinese reply, an English brief means an English reply.')
+  }
+  lines.push(
+    'If the brief is empty or in another language, follow the language of the project instructions instead; if the two disagree, follow the brief.',
+    'This prompt being in English is not a reason to answer in English, and neither are tool names, code, file paths or the shared project memory.',
+  )
+  return lines
+}
+
 function workerPrompt(project, task, memory) {
   const lines = [
     `You are the worker for one task in the DSH project "${project.name}" (project_id: ${project.id}).`,
     'Do only this task, then report back. The coordinator keeps working while you run.',
+    '',
+    // Near the top on purpose: the model settles its answer language from the
+    // first screen of the prompt, and the rest of this prompt is English.
+    ...languageRule(replyLanguage(project, task)),
     '',
     '## Project instructions',
     project.goal.trim() || '(none)',
@@ -942,15 +1326,22 @@ async function routeRequest(ctx, method, path, req) {
 
   // /projects/:id/memory
   if (parts.length === 3 && parts[2] === 'memory') {
-    const project = await readProject(projectId)
     if (method === 'GET') {
+      const project = await readProject(projectId)
       return { status: 200, body: { memory: await readMemory(project.id) } }
     }
     if (method === 'POST') {
+      // Read the body before touching the store: `readJson` attaches its
+      // listeners synchronously, so the request cannot lose a chunk that
+      // arrives while the project file is still being read.
       const body = await readJson(req)
       if (typeof body?.text !== 'string') throw httpError(400, 'text_required')
-      await writeMemory(project.id, body.text)
-      return { status: 200, body: { saved: true } }
+      const project = await readProject(projectId)
+      const written = await writeMemory(project.id, body.text)
+      // The page's memory editor is a write path like any other, so it compacts
+      // too. `saved` stays first so the existing page keeps working unchanged.
+      const compaction = await afterMemoryWrite(project, written)
+      return { status: 200, body: { saved: true, length: written.length, compaction } }
     }
     throw httpError(405, 'method_not_allowed')
   }
@@ -1018,12 +1409,20 @@ const TEXT_OUTPUT = {
   ],
 }
 
+/** " · last compaction 77824 → 38000 at <iso>", or '' before the first run. */
+function formatCompaction(project) {
+  const last = project.lastCompaction
+  if (!last || !last.at) return ''
+  return ` · last compaction ${last.before} → ${last.after} characters at ${new Date(last.at).toISOString()}`
+}
+
 function formatProject(project, memory) {
   const lines = [
     `Project ${project.id} — ${project.name}`,
     `workspace: ${project.workspace || '(inherited)'}`,
     `autonomy: ${project.autonomy}, concurrency: ${project.concurrency}${project.archived ? ', ARCHIVED' : ''}`,
     `worker model: ${project.model || '(host default)'}${project.reasoningEffort ? `, effort: ${project.reasoningEffort}` : ''}${project.agentPreset ? `, preset: ${project.agentPreset}` : ''}`,
+    `memory: budget ${memoryBudgetOf(project)}, auto-compaction ${project.autoCompact === false ? 'off' : 'on'}${formatCompaction(project)}`,
     '',
     '## Instructions',
     project.goal.trim() || '(none)',
@@ -1110,6 +1509,15 @@ function registerTools(ctx) {
           type: 'string',
           description: 'Default worker agent preset id. Omit or leave empty to inherit the parent composition.',
         },
+        autoCompact: {
+          type: 'boolean',
+          description:
+            'Compact the shared memory automatically once it exceeds memoryBudget. Defaults to true; turn it off to keep the memory append-only.',
+        },
+        memoryBudget: {
+          type: 'integer',
+          description: `Shared-memory size that triggers auto-compaction, ${MEMORY_BUDGET_MIN}-${MEMORY_BUDGET_MAX}; defaults to ${MEMORY_BUDGET}.`,
+        },
       },
       required: ['name'],
       additionalProperties: false,
@@ -1118,6 +1526,55 @@ function registerTools(ctx) {
     execute: async (args) => {
       const project = await createProject(args)
       return `Created project ${project.id} "${project.name}". autonomy=${project.autonomy} concurrency=${project.concurrency}.`
+    },
+  })
+
+  register({
+    name: 'projects_update',
+    description:
+      'Update one project\'s settings: its name, goal, workspace, autonomy, concurrency, or its memory compaction settings (autoCompact / memoryBudget). Task status and the human verdict are not touched here — use projects_update_task for a task.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project id.' },
+        name: { type: 'string', description: 'Short project name.' },
+        goal: { type: 'string', description: 'Standing instructions every worker receives, up to 16000 characters.' },
+        workspace: { type: 'string', description: 'Absolute directory workers run in. Empty inherits the coordinator session directory.' },
+        autonomy: {
+          type: 'string',
+          enum: ['manual', 'auto'],
+          description: 'manual: a task needs human approval before dispatch. auto: dispatch without waiting.',
+        },
+        concurrency: { type: 'integer', description: 'Maximum workers running at once, 1-8.' },
+        autoCompact: {
+          type: 'boolean',
+          description:
+            'Compact the shared memory automatically once it exceeds memoryBudget. Defaults to true; false keeps the memory append-only.',
+        },
+        memoryBudget: {
+          type: 'integer',
+          description: `Shared-memory size that triggers auto-compaction, ${MEMORY_BUDGET_MIN}-${MEMORY_BUDGET_MAX}; defaults to ${MEMORY_BUDGET}.`,
+        },
+      },
+      required: ['project_id'],
+      additionalProperties: false,
+    },
+    output: TEXT_OUTPUT,
+    execute: async (args) => {
+      // Deliberately narrow: the worker route (model / reasoningEffort /
+      // agentPreset) keeps its existing write paths, so this tool cannot become a
+      // second, subtly different way to change how workers are dispatched.
+      const patch = {
+        ...(args?.name === undefined ? {} : { name: args.name }),
+        ...(args?.goal === undefined ? {} : { goal: args.goal }),
+        ...(args?.workspace === undefined ? {} : { workspace: args.workspace }),
+        ...(args?.autonomy === undefined ? {} : { autonomy: args.autonomy }),
+        ...(args?.concurrency === undefined ? {} : { concurrency: args.concurrency }),
+        ...(args?.autoCompact === undefined ? {} : { autoCompact: args.autoCompact }),
+        ...(args?.memoryBudget === undefined ? {} : { memoryBudget: args.memoryBudget }),
+      }
+      const project = await updateProject(String(args?.project_id || ''), patch)
+      return `Updated project ${project.id} "${project.name}". autonomy=${project.autonomy} concurrency=${project.concurrency} memory=${memoryBudgetOf(project)} autoCompact=${project.autoCompact !== false}${formatCompaction(project)}.`
     },
   })
 
@@ -1260,18 +1717,29 @@ function registerTools(ctx) {
       const project = await readProject(String(args?.project_id || ''))
       const action = args?.action || 'read'
       const memory = await readMemory(project.id)
-      if (action === 'index') return memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT)
+      if (action === 'index') {
+        const live = memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT)
+        const archived = archiveSummary(await readMemoryArchive(project.id))
+        return archived ? `${live}\n\n${archived}` : live
+      }
       if (action === 'read') {
         const wanted = typeof args?.section === 'string' ? args.section.trim() : ''
         if (wanted) {
           const section = findMemorySection(memory, wanted)
-          if (!section) {
-            const titles = memorySections(memory).map((candidate) => candidate.title)
-            throw new Error(
-              `No memory section matches "${wanted}". ${titles.length ? `Sections: ${titles.join(' | ')}` : 'The memory has no "## " sections.'}`,
-            )
+          if (section) {
+            return section.body ? `## ${section.title}\n\n${section.body}` : `## ${section.title}\n\n(empty section)`
           }
-          return section.body ? `## ${section.title}\n\n${section.body}` : `## ${section.title}\n\n(empty section)`
+          // Compaction moves sections out of memory.md, not out of reach: the
+          // archive is still searchable, and the answer says where it came from
+          // so nobody mistakes archived history for live memory.
+          const archived = findMemorySection(await readMemoryArchive(project.id), wanted)
+          if (archived) {
+            return `## ${archived.title}\n\n${archived.body}\n\n(Archived: compaction moved this section out of memory.md. It is no longer part of the memory workers see.)`
+          }
+          const titles = memorySections(memory).map((candidate) => candidate.title)
+          throw new Error(
+            `No memory section matches "${wanted}". ${titles.length ? `Sections: ${titles.join(' | ')}` : 'The memory has no "## " sections.'} Archived sections are searchable too (memory-archive.md).`,
+          )
         }
         return memory.trim() ? memory.trim() : 'Shared memory is empty.'
       }
@@ -1279,11 +1747,11 @@ function registerTools(ctx) {
       if (!value) throw new Error('text is required for append or write')
       if (action === 'write') {
         const written = await writeMemory(project.id, value)
-        return `Replaced the shared memory of ${project.id} (${written.length} characters).${memoryWarning(written)}`
+        return `Replaced the shared memory of ${project.id} (${written.length} characters).${await afterMemoryWrite(project, written)}`
       }
       const next = memory.trim() ? `${memory.trimEnd()}\n\n${value}\n` : `${value}\n`
       const written = await writeMemory(project.id, next)
-      return `Appended ${value.length} characters to the shared memory of ${project.id}.${memoryWarning(written)}`
+      return `Appended ${value.length} characters to the shared memory of ${project.id}.${await afterMemoryWrite(project, written)}`
     },
   })
 
@@ -1347,3 +1815,11 @@ export function apply(ctx) {
     }
   }
 }
+
+/**
+ * Test seam. Compaction is otherwise reachable only through a memory write, and
+ * two writes cannot be interleaved deterministically from outside the module —
+ * which is exactly what the single-flight guard has to be tested against.
+ * Nothing in the plugin calls this export.
+ */
+export { compactMemory }

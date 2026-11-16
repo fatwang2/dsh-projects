@@ -54,7 +54,7 @@ function applyWithFakes() {
     slots: {
       inject(key, callback) {
         assert.ok(
-          ['sidebar.panellist', 'main', 'projects.conversation'].includes(key),
+          ['sidebar.panellist', 'main', 'projects.conversation', 'tool.call.toolview'].includes(key),
           `unexpected slot ${key}`,
         )
         return callback()
@@ -97,7 +97,7 @@ test('registers the sidebar entry and the main page', () => {
   assert.equal(dictionaries[0].namespace, 'projects')
   assert.ok(dictionaries[0].dicts.zh && dictionaries[0].dicts.en)
 
-  assert.equal(registrations.length, 3)
+  assert.equal(registrations.length, 4)
   const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
   assert.ok(sidebar)
   assert.equal(sidebar.options.id, 'projects')
@@ -116,6 +116,18 @@ test('registers the sidebar entry and the main page', () => {
   const conversation = registrations.find((entry) => entry.options.name === 'projects.conversation')
   assert.ok(conversation)
   assert.equal(typeof conversation.component, 'function')
+
+  // The dispatch call gets its own keyed Tool view, so a subtask card appears
+  // in the conversation the moment the coordinator dispatches it.
+  const dispatch = registrations.find((entry) => entry.options.name === 'tool.call.toolview')
+  assert.ok(dispatch, 'the dispatch tool view is registered')
+  assert.equal(dispatch.options.key, 'projects_dispatch')
+  assert.equal(dispatch.options.locale, 'projects')
+  assert.equal(typeof dispatch.component, 'function')
+  assert.equal(typeof dispatch.options.inject, 'function')
+  const injected = dispatch.options.inject()
+  assert.equal(typeof injected.translate, 'function')
+  assert.equal(typeof injected.activeLocale, 'function')
 })
 
 test('both dictionaries carry the same keys and no add-task surface', () => {
@@ -880,5 +892,113 @@ test('no user-facing string is hardcoded in English', () => {
     assert.equal(typeof zh[key], 'string', `ZH ${key} is not a string`)
     assert.ok(en[key].length > 0, `EN ${key} is empty`)
     assert.ok(zh[key].length > 0, `ZH ${key} is empty`)
+  }
+})
+
+test('a dispatch call renders a card that opens its task', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const { registrations } = applyWithFakes()
+  const main = registrations.find((entry) => entry.options.name === 'main')
+  const translate = main.component({}).props.translate
+  const dispatch = registrations.find((entry) => entry.options.name === 'tool.call.toolview')
+  const row = (props) =>
+    dispatch.component({ translate, activeLocale: () => 'zh', ...props })
+
+  const args = (values) => ({ text: (name) => values[name] })
+  // The card root is a wrapper that carries its own style block, so the card
+  // renders outside the board too; the button is the interactive cell.
+  const cardOf = (tree) =>
+    tree.children.find((child) => child && child.props && child.props.className === 'pj-dispatch')
+  const resultBlock = (text, isError = false) => ({
+    content: [{ type: 'text', text }],
+    isError,
+  })
+
+  // Preparing: the arguments may still be streaming, so the card shows the id
+  // it already knows and the queued pill instead of throwing.
+  const preparing = row({ phase: 'preparing', block: { args: args({ project_id: 'p1', task_id: 't-1' }) } })
+  assert.equal(cardOf(preparing).props.className, 'pj-dispatch')
+  assert.equal(cardOf(preparing).props.disabled, false)
+  assert.equal(cardOf(preparing).children.length, 3, 'glyph, title, pill — no time without a task')
+  assert.equal(cardOf(preparing).children[0].props.kind, 'idle')
+  assert.equal(cardOf(preparing).children[1].props.className, 'pj-dispatch-name')
+  assert.equal(cardOf(preparing).children[1].children[0], 't-1')
+  assert.equal(cardOf(preparing).children[2].props.status, 'queued')
+
+  // A preparing call whose arguments are still empty degrades to the label and
+  // is not clickable.
+  const empty = row({ phase: 'preparing', block: { args: args({}) } })
+  assert.equal(cardOf(empty).props.disabled, true)
+  assert.equal(cardOf(empty).children[1].children[0], '派发中…')
+  assert.equal(cardOf(empty).children.length, 3)
+
+  // Start: the worker is running.
+  const started = row({ phase: 'start', block: { args: args({ project_id: 'p1', task_id: 't-1' }) } })
+  assert.equal(cardOf(started).children[0].props.kind, 'spinner')
+  assert.equal(cardOf(started).children[2].props.status, 'running')
+
+  // Result: a real dispatch means running; a refusal keeps the task queued; an
+  // error means failed. The result text is the only evidence available.
+  const dispatched = row({
+    phase: 'result',
+    block: { ...resultBlock('Dispatched task t-1 to worker w (session s).'), args: args({ project_id: 'p1', task_id: 't-1' }) },
+  })
+  assert.equal(cardOf(dispatched).children[2].props.status, 'running')
+  const refused = row({
+    phase: 'result',
+    block: {
+      ...resultBlock('Task t-1 needs human approval first: project autonomy is "manual".'),
+      args: args({ project_id: 'p1', task_id: 't-1' }),
+    },
+  })
+  assert.equal(cardOf(refused).children[2].props.status, 'queued')
+  const errored = row({
+    phase: 'result',
+    block: { ...resultBlock('boom', true), args: args({ project_id: 'p1', task_id: 't-1' }) },
+  })
+  assert.equal(cardOf(errored).children[2].props.status, 'failed')
+  assert.equal(cardOf(errored).children[0].props.kind, 'waiting')
+
+  // Clicking asks the board to open the task; with no board bound (a Session
+  // outside the page) it is a silent no-op rather than a crash.
+  assert.equal(typeof cardOf(dispatched).props.onClick, 'function')
+  assert.doesNotThrow(() => cardOf(dispatched).props.onClick())
+  assert.doesNotThrow(() => cardOf(empty).props.onClick())
+
+  // The card is one button with no nested control and no status write.
+  const cardStart = source.indexOf('function ProjectsDispatchRow')
+  const cardEnd = source.indexOf('/** Contain a failing embedded conversation', cardStart)
+  assert.ok(cardStart > 0 && cardEnd > cardStart, 'the card component was located')
+  const card = source.slice(cardStart, cardEnd)
+  assert.equal([...card.matchAll(/h\(\s*'button'/g)].length, 1, 'the card nests no control')
+  assert.doesNotMatch(card, /patchTask|api\(|method: 'PATCH'|method: 'POST'/, 'the card only reads')
+  assert.match(card, /requestOpenTask\(projectId, taskId\)/)
+  assert.match(card, /useStoreValue\(projectSnapshot\)/)
+  assert.match(card, /props\.phase === 'result'/)
+  assert.match(card, /typeof args\.text === 'function'/)
+
+  // Registration and the cross-subtree bridge.
+  assert.match(source, /ctx\.slots\.inject\('tool\.call\.toolview'/)
+  assert.match(source, /key: 'projects_dispatch'/)
+  assert.match(source, /openTaskRequest\.subscribe/)
+  assert.match(source, /projectSnapshot\.set/)
+  assert.match(source, /projectSnapshot\.set\(null\)/, 'the page unbinds the cards on unmount')
+  // No Host package is imported and no dependency was added.
+  assert.doesNotMatch(source, /from '@deepseek-ai|require\('@deepseek-ai/)
+
+  // The card's styles use theme tokens only.
+  const dispatchRules = [...source.matchAll(/\n\.pj-dispatch[^{]*\{[^}]*\}/g)].map((match) => match[0])
+  assert.ok(dispatchRules.length >= 4, 'the card rules were found')
+  for (const rule of dispatchRules) {
+    assert.doesNotMatch(rule, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, `literal colour: ${rule.trim()}`)
+  }
+  assert.match(source, /\.pj-dispatch\{[^}]*--dsw-/)
+
+  // The three new labels exist in both languages.
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  for (const key of ['dispatchCard', 'dispatchPreparing', 'dispatchOpenHint']) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
   }
 })

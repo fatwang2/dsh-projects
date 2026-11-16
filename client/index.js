@@ -114,6 +114,9 @@ window.__ModuleLoader__.load({
       groupIdle: 'Idle',
       groupResolved: 'Resolved',
       justNow: 'just now',
+      dispatchCard: 'Dispatched task',
+      dispatchPreparing: 'Dispatching…',
+      dispatchOpenHint: 'Open this task',
       execution: 'Execution',
       executionHint:
         'Default model and reasoning effort for every worker in this project. A task may override them.',
@@ -226,6 +229,9 @@ window.__ModuleLoader__.load({
       groupIdle: '空闲',
       groupResolved: '已解决',
       justNow: '刚刚',
+      dispatchCard: '派发的任务',
+      dispatchPreparing: '派发中…',
+      dispatchOpenHint: '打开这个任务',
       execution: '执行',
       executionHint: '本项目所有执行者的默认模型与思考程度；单个任务可以覆盖。',
       model: '模型',
@@ -251,6 +257,42 @@ window.__ModuleLoader__.load({
 
     // ---------------------------------------------------------------------
     // Styles (theme tokens only; the element unmounts with the page)
+
+    // Rules the dispatch card shares with the board: the group glyph, the
+    // status pill and the chip. The card can render outside the board — the
+    // coordinator Session opened as a normal conversation, where the page's
+    // <style> is not mounted — so it carries its own copy of exactly these
+    // rules. The page sheet interpolates the same constants, so there is one
+    // source of truth for both surfaces.
+    const SHARED_CSS = `
+.pj-thread-icon{grid-area:icon;align-self:start;margin-top:3px;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:0 0 auto}
+.pj-thread-review{color:var(--dsw-alias-state-success-primary)}
+.pj-thread-waiting{color:var(--dsw-alias-state-warn-primary)}
+.pj-thread-idle{color:var(--dsw-alias-label-tertiary)}
+.pj-thread-spinner{width:12px;height:12px;box-sizing:border-box;border-radius:999px;border:2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 25%, transparent);border-top-color:var(--dsw-alias-state-business-primary);animation:pj-spin .9s linear infinite}
+.pj-thread-idle-dot{width:10px;height:10px;box-sizing:border-box;border-radius:999px;border:1.5px dashed currentColor}
+@keyframes pj-spin{to{transform:rotate(360deg)}}
+.pj-chip{display:inline-flex;align-items:center;max-width:100%;height:18px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pj-pill{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
+.pj-pill-queued{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
+.pj-pill-running{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);color:var(--dsw-alias-state-business-primary)}
+.pj-pill-review{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, transparent);color:var(--dsw-alias-state-warn-primary)}
+.pj-pill-failed{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);color:var(--dsw-alias-state-error-primary)}
+.pj-pill-blocked{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);color:var(--dsw-alias-state-warn-primary);border:1px dashed color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)}
+`
+
+    /** The dispatch card's own rules; the board sheet interpolates them too. */
+    const DISPATCH_RULES = `
+.pj-dispatch{display:flex;align-items:center;gap:8px;width:100%;margin:2px 0;padding:6px 10px;border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.pj-dispatch:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-dispatch:disabled{cursor:default;opacity:.7}
+.pj-dispatch .pj-thread-icon{margin-top:0}
+.pj-dispatch-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-primary)}
+.pj-dispatch-time{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+`
+
+    /** Everything a dispatch card needs to render on its own. */
+    const DISPATCH_CSS = `${SHARED_CSS}${DISPATCH_RULES}`
 
     const CSS = `
 .pj-page{display:flex;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6}
@@ -319,13 +361,6 @@ window.__ModuleLoader__.load({
 .pj-group-title:hover{color:var(--dsw-alias-label-primary)}
 .pj-group-chevron{display:inline-block;width:10px;flex:0 0 auto;font-size:11px;line-height:1;color:var(--dsw-alias-label-tertiary)}
 .pj-group-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pj-thread-icon{grid-area:icon;align-self:start;margin-top:3px;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:0 0 auto}
-.pj-thread-review{color:var(--dsw-alias-state-success-primary)}
-.pj-thread-waiting{color:var(--dsw-alias-state-warn-primary)}
-.pj-thread-idle{color:var(--dsw-alias-label-tertiary)}
-.pj-thread-spinner{width:12px;height:12px;box-sizing:border-box;border-radius:999px;border:2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 25%, transparent);border-top-color:var(--dsw-alias-state-business-primary);animation:pj-spin .9s linear infinite}
-.pj-thread-idle-dot{width:10px;height:10px;box-sizing:border-box;border-radius:999px;border:1.5px dashed currentColor}
-@keyframes pj-spin{to{transform:rotate(360deg)}}
 .pj-start{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:100%;padding:24px;text-align:center}
 .pj-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 /* Buttons follow the Host Button primitive's sm scale and its three
@@ -393,19 +428,14 @@ window.__ModuleLoader__.load({
 .pj-thread-time{grid-area:time;justify-self:end;font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .pj-thread-sub{grid-area:sub;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .pj-thread-chips{grid-area:chips;display:flex;flex-wrap:wrap;gap:4px;min-width:0;margin-top:2px}
-.pj-chip{display:inline-flex;align-items:center;max-width:100%;height:18px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pj-pill{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
-.pj-pill-queued{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
-.pj-pill-running{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);color:var(--dsw-alias-state-business-primary)}
-.pj-pill-review{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, transparent);color:var(--dsw-alias-state-warn-primary)}
-.pj-pill-failed{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);color:var(--dsw-alias-state-error-primary)}
-.pj-pill-blocked{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);color:var(--dsw-alias-state-warn-primary);border:1px dashed color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)}
 .pj-warn{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 16px 0;padding:8px 12px;border-radius:var(--dsw-radius-sm);font-size:13px;background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, var(--dsw-alias-bg-base));color:var(--dsw-alias-state-warn-primary)}
 .pj-warn-text{min-width:0}
 .pj-notice{margin:8px 16px 0;padding:8px 12px;border-radius:var(--dsw-radius-sm);font-size:13px;background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, var(--dsw-alias-bg-base));color:var(--dsw-alias-state-success-primary)}
 .pj-error{margin:8px 16px 0;padding:8px 12px;border-radius:var(--dsw-radius-sm);font-size:13px;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-base));color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}
 .pj-empty{padding:24px 16px;color:var(--dsw-alias-label-tertiary);font-size:13px;text-align:center}
 .pj-empty-action{margin-top:12px}
+${SHARED_CSS}${DISPATCH_RULES}
+
 `
 
     // ---------------------------------------------------------------------
@@ -503,6 +533,63 @@ window.__ModuleLoader__.load({
     function initialOf(name) {
       const value = String(name || '').trim()
       return value ? value.slice(0, 1).toUpperCase() : '·'
+    }
+
+    // ---------------------------------------------------------------------
+    // Cross-subtree dispatch cards
+    //
+    // A `projects_dispatch` call renders in the conversation's Tool row, which
+    // is a different React subtree from the board page. Two module-level
+    // stores bridge them without a dependency and without a shared context:
+    // the page publishes the board it has loaded (so a card can resolve the
+    // task it dispatched), and a card publishes "open this task" requests the
+    // page consumes. Both are page-local state, never Host data.
+
+    function createStore(initial) {
+      let value = initial
+      const listeners = new Set()
+      return {
+        get: () => value,
+        set(next) {
+          if (Object.is(next, value)) return
+          value = next
+          for (const listener of [...listeners]) {
+            try {
+              listener(value)
+            } catch {
+              // One broken subscriber must not break the others.
+            }
+          }
+        },
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => {
+            listeners.delete(listener)
+          }
+        },
+      }
+    }
+
+    /** The board the page last loaded: `{ projectId, project }`, or null. */
+    const projectSnapshot = createStore(null)
+    /** The last "open this task" request: `{ projectId, taskId, seq }`. */
+    const openTaskRequest = createStore(null)
+    let openTaskSeq = 0
+
+    /** Ask the board to open one task's conversation. A no-op when unbound. */
+    function requestOpenTask(projectId, taskId) {
+      openTaskSeq += 1
+      openTaskRequest.set({ projectId, taskId, seq: openTaskSeq })
+    }
+
+    /** Read a module-level store as React state. */
+    function useStoreValue(store) {
+      const [value, setValue] = useState(store.get)
+      useEffect(() => {
+        setValue(store.get())
+        return store.subscribe(setValue)
+      }, [store])
+      return value
     }
 
     // ---------------------------------------------------------------------
@@ -706,6 +793,12 @@ window.__ModuleLoader__.load({
     function threadIconOf(task) {
       if (task.resolved) return 'none'
       const group = THREAD_GROUPS.find((entry) => entry.statuses.includes(task.status))
+      return group ? group.icon : 'none'
+    }
+
+    /** The glyph for a bare status, when no task record is loaded yet. */
+    function threadIconForStatus(status) {
+      const group = THREAD_GROUPS.find((entry) => entry.statuses.includes(status))
       return group ? group.icon : 'none'
     }
 
@@ -965,6 +1058,91 @@ window.__ModuleLoader__.load({
       }
       // The Resolved group carries no glyph, per the reference panel.
       return null
+    }
+
+    /**
+     * One `projects_dispatch` call in the conversation, as a compact card.
+     *
+     * The card is the only button and carries no other control: it shows the
+     * task the call dispatched and opens that task's conversation in the
+     * board's right column. It reads, never writes — `task.status` stays
+     * system-owned, so the pill is display-only.
+     *
+     * The call's arguments arrive lazily and may still be streaming, so every
+     * read is total: a missing `task_id` degrades to the "dispatching" label
+     * instead of throwing. The task record itself comes from the board the page
+     * publishes; without it the card falls back to the id and the phase, and a
+     * click is a no-op when no board is bound (a Session outside the page).
+     */
+    function ProjectsDispatchRow(props) {
+      const t = typeof props.translate === 'function' ? props.translate : (key) => key
+      const locale = typeof props.activeLocale === 'function' ? props.activeLocale() : undefined
+      const block = props.block
+      const args = block && block.args
+      const readArg = (name) => {
+        try {
+          return args && typeof args.text === 'function' ? String(args.text(name) || '') : ''
+        } catch {
+          // A half-streamed argument view answers undefined; never throw here.
+          return ''
+        }
+      }
+      const projectId = readArg('project_id')
+      const taskId = readArg('task_id')
+      const snapshot = useStoreValue(projectSnapshot)
+      const tasks = snapshot && snapshot.projectId === projectId ? snapshot.project.tasks || [] : []
+      const task = tasks.find((entry) => entry && entry.id === taskId) || null
+      // A dispatch that was refused (approval, concurrency, archived project)
+      // answers with prose rather than an error, so the result text is the only
+      // evidence that a worker actually started.
+      const resultText =
+        props.phase === 'result' && block && Array.isArray(block.content)
+          ? block.content
+              .filter((entry) => entry && entry.type === 'text' && typeof entry.text === 'string')
+              .map((entry) => entry.text)
+              .join('\n')
+              .trim()
+          : ''
+      const status = task
+        ? task.status
+        : props.phase === 'result'
+          ? block && block.isError
+            ? 'failed'
+            : /^Dispatched task\b/.test(resultText)
+              ? 'running'
+              : 'queued'
+          : props.phase === 'start'
+            ? 'running'
+            : 'queued'
+      const title = (task && task.title) || taskId || t('dispatchPreparing')
+      const stamp = task ? relativeTime(task, t, locale) : ''
+      const openable = Boolean(projectId && taskId)
+      const cells = [
+        h(ThreadIcon, { kind: task ? threadIconOf(task) : threadIconForStatus(status) }),
+        h('span', { className: 'pj-dispatch-name' }, title),
+        stamp ? h('span', { className: 'pj-dispatch-time' }, stamp) : null,
+        h(StatusPill, { status, t }),
+        task && task.resolved ? h('span', { className: 'pj-chip' }, t('resolvedBadge')) : null,
+      ].filter(Boolean)
+      return h(
+        'div',
+        { className: 'pj-dispatch-wrap' },
+        h('style', { dangerouslySetInnerHTML: { __html: DISPATCH_CSS } }),
+        h(
+          'button',
+          {
+            className: 'pj-dispatch',
+            type: 'button',
+            disabled: !openable,
+            'aria-label': `${t('dispatchCard')}: ${title}`,
+            title: openable ? `${title}\n${t('dispatchOpenHint')}` : title,
+            onClick: () => {
+              if (openable) requestOpenTask(projectId, taskId)
+            },
+          },
+          ...cells,
+        ),
+      )
     }
 
     /** Contain a failing embedded conversation so the board stays usable. */
@@ -1665,6 +1843,55 @@ window.__ModuleLoader__.load({
           setExecTarget({ taskId: task.id, title: task.title, sessionId: task.childSessionId, reference })
           return ''
         })
+
+      // The board is published for the dispatch cards in the conversation, which
+      // live in another React subtree. The poll replaces the project object every
+      // 4s, so a card's status and time stay current without its own fetch.
+      useEffect(() => {
+        projectSnapshot.set(
+          detail?.project ? { projectId: detail.project.id, project: detail.project } : null,
+        )
+      }, [detail])
+      // Unmounting the page unbinds the cards: a click then does nothing instead
+      // of driving a board that is no longer there.
+      useEffect(() => () => projectSnapshot.set(null), [])
+
+      // A dispatch card asks the board to open its task. When the request names
+      // another project, switch to it first and open the task once its board
+      // lands; when the project is gone, the request is dropped silently.
+      const pendingOpenRef = useRef(null)
+      useEffect(() => {
+        return openTaskRequest.subscribe((request) => {
+          if (!request) return
+          if (request.projectId && request.projectId !== selectedRef.current) {
+            if (!projects.some((entry) => entry && entry.id === request.projectId)) return
+            pendingOpenRef.current = request
+            selectedRef.current = request.projectId
+            setSelectedId(request.projectId)
+            void refresh(request.projectId).catch((failure) => setError(messageOf(failure)))
+            return
+          }
+          const loaded = detail?.project?.id === request.projectId ? detail.project.tasks || [] : []
+          const task = loaded.find((entry) => entry && entry.id === request.taskId)
+          if (task) {
+            void openTaskDetail(task)
+            return
+          }
+          // The board for that project has not landed yet: open it when it does.
+          if (detail?.project?.id !== request.projectId) pendingOpenRef.current = request
+        })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [detail, projects])
+
+      useEffect(() => {
+        const pending = pendingOpenRef.current
+        if (!pending || !detail?.project || detail.project.id !== pending.projectId) return
+        const task = (detail.project.tasks || []).find((entry) => entry && entry.id === pending.taskId)
+        if (!task) return
+        pendingOpenRef.current = null
+        void openTaskDetail(task)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [detail])
 
       const restoreCoordinator = () =>
         run(async () => {
@@ -2707,6 +2934,21 @@ window.__ModuleLoader__.load({
         )
         ctx.slots.inject('projects.conversation', () =>
           ctx.slots.register({ name: 'projects.conversation' }, EmbeddedConversation),
+        )
+        // A dispatch call renders as a compact card in the conversation itself,
+        // so the subtask appears the moment the coordinator dispatches it rather
+        // than only when its final message lands. `translate` and `activeLocale`
+        // are injected because the card reads the active locale at call time.
+        ctx.slots.inject('tool.call.toolview', () =>
+          ctx.slots.register(
+            {
+              name: 'tool.call.toolview',
+              key: 'projects_dispatch',
+              locale: NS,
+              inject: () => ({ translate, activeLocale }),
+            },
+            ProjectsDispatchRow,
+          ),
         )
       },
     }

@@ -984,7 +984,7 @@ test('the model catalog publishes the reasoning efforts each route accepts', asy
 // The shared memory is a long append-only log. Workers get an index of it and
 // pull the one section they need, so the prompt stays bounded.
 
-/** A project whose memory has two sections, each with a body-only marker. */
+/** A project whose memory has two sections, each with a description line and a body-only marker. */
 async function memoryProject(name) {
   const created = await call('projects_create', { name, goal: 'Ship it.', autonomy: 'auto' })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
@@ -993,9 +993,11 @@ async function memoryProject(name) {
     action: 'write',
     text: [
       '## Alpha decisions',
+      'Copy lives in /content.',
       'BODY-ALPHA-MARKER the copy lives in /content.',
       '',
       '## Beta gotchas',
+      'pnpm only, no npm.',
       'BODY-BETA-MARKER pnpm only, no npm.',
       '',
     ].join('\n'),
@@ -1010,16 +1012,17 @@ test('the dispatch prompt carries a memory index instead of the memory', async (
   await call('projects_dispatch', { project_id: projectId, task_id: taskId })
 
   const prompt = activations[activations.length - 1].prompt[0].text
-  // No section body leaks into the prompt.
+  // Only the one-line description leaks, never the rest of a section body.
   assert.doesNotMatch(prompt, /BODY-ALPHA-MARKER/)
   assert.doesNotMatch(prompt, /BODY-BETA-MARKER/)
-  assert.doesNotMatch(prompt, /copy lives in \/content/)
-  // The index lists both titles with their sizes, and says how to read one.
+  // The index lists both titles with a description and a size, and says how to
+  // read one or search for one.
   assert.match(prompt, /## Shared project memory\n2 section\(s\), \d+ characters\./)
-  assert.match(prompt, /- Alpha decisions \(\d+ chars\)/)
-  assert.match(prompt, /- Beta gotchas \(\d+ chars\)/)
+  assert.match(prompt, /· Alpha decisions — Copy lives in \/content\.（\d+ chars）/)
+  assert.match(prompt, /· Beta gotchas — pnpm only, no npm\.（\d+ chars）/)
   assert.match(prompt, /not its contents/)
   assert.match(prompt, /action:"read", section:"<title>"/)
+  assert.match(prompt, /action:"search", query:"<keyword>"/)
   // The closing instruction to append findings survives.
   assert.match(prompt, /action "append"/)
 })
@@ -1027,8 +1030,10 @@ test('the dispatch prompt carries a memory index instead of the memory', async (
 test('an oversized memory index is truncated and says how many sections are missing', async () => {
   const created = await call('projects_create', { name: 'Huge memory', goal: 'Ship it.', autonomy: 'auto' })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  // 200 sections: the full format, the no-description format and the title-only
+  // format all overflow 2000 characters, so the index must truncate.
   const sections = []
-  for (let index = 0; index < 60; index += 1) {
+  for (let index = 0; index < 200; index += 1) {
     sections.push(`## Long history section ${index}`, `BODY-HIDDEN-${index} ${'x'.repeat(200)}`, '')
   }
   await call('projects_memory', { project_id: projectId, action: 'write', text: sections.join('\n') })
@@ -1040,18 +1045,20 @@ test('an oversized memory index is truncated and says how many sections are miss
   const prompt = activations[activations.length - 1].prompt[0].text
   const index = prompt.split('## Shared project memory\n')[1].split('\n\nThe list above')[0]
   assert.ok(index.length <= 2000, `index is capped, got ${index.length} characters`)
-  assert.match(index, /60 section\(s\)/)
+  assert.match(index, /200 section\(s\)/)
+  assert.match(index, /truncated to fit the 2000-character index cap/)
+  assert.match(index, /· Long history section 0\n/)
   assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 2000 characters\)\./)
-  assert.match(index, /- Long history section 0 /)
+  // Truncation drops whole sections, never a description: no body leaks.
   assert.doesNotMatch(prompt, /BODY-HIDDEN-/)
 })
 
-test('projects_memory index lists titles and sizes without any body', async () => {
+test('projects_memory index lists titles, descriptions and sizes without any body', async () => {
   const projectId = await memoryProject('Index action')
   const index = await call('projects_memory', { project_id: projectId, action: 'index' })
   assert.match(index, /2 section\(s\), \d+ characters\./)
-  assert.match(index, /- Alpha decisions \(\d+ chars\)/)
-  assert.match(index, /- Beta gotchas \(\d+ chars\)/)
+  assert.match(index, /· Alpha decisions — Copy lives in \/content\.（\d+ chars）/)
+  assert.match(index, /· Beta gotchas — pnpm only, no npm\.（\d+ chars）/)
   assert.doesNotMatch(index, /BODY-ALPHA-MARKER/)
   assert.doesNotMatch(index, /BODY-BETA-MARKER/)
 })
@@ -1060,7 +1067,7 @@ test('projects_memory read with a section returns only that section', async () =
   const projectId = await memoryProject('Section read')
 
   const exact = await call('projects_memory', { project_id: projectId, action: 'read', section: 'Beta gotchas' })
-  assert.match(exact, /^## Beta gotchas\n\nBODY-BETA-MARKER pnpm only, no npm\.$/)
+  assert.match(exact, /^## Beta gotchas\n\npnpm only, no npm\.\nBODY-BETA-MARKER pnpm only, no npm\.$/)
   assert.doesNotMatch(exact, /BODY-ALPHA-MARKER/)
 
   // Matching is forgiving: case-insensitive, prefix and substring both work.
@@ -1087,11 +1094,206 @@ test('projects_memory read without a section still returns the whole file', asyn
   assert.equal(await call('projects_memory', { project_id: projectId, action: 'read' }), whole)
 })
 
+/** A project whose memory is built from `[title, body]` pairs. */
+async function projectWithMemory(name, sections) {
+  const created = await call('projects_create', { name, goal: 'Ship it.', autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const text = sections.map(([title, body]) => `## ${title}\n${body}\n`).join('\n')
+  await call('projects_memory', { project_id: projectId, action: 'write', text })
+  return projectId
+}
+
+/** `count` sections whose first body line is exactly 80 characters long. */
+function describedMemory(count, tag = 'Section') {
+  const sections = []
+  for (let index = 0; index < count; index += 1) {
+    sections.push([`${tag} ${index}`, `${'d'.repeat(80)}\nBODY-${tag}-${index}`])
+  }
+  return sections
+}
+
+/** The memory index a dispatched worker's prompt carries. */
+async function promptMemoryIndex(projectId) {
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Read the memory' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  const prompt = activations[activations.length - 1].prompt[0].text
+  return prompt.split('## Shared project memory\n')[1].split('\n\nThe list above')[0]
+}
+
+test('index descriptions are the first body line, markdown stripped and truncated', async () => {
+  const long = 'L'.repeat(120)
+  const projectId = await projectWithMemory('Described memory', [
+    ['Styled section', '- **Bold** `code` and _plain_ text\nBODY-STYLED-HIDDEN'],
+    ['Deep section', '#### Deep heading\nBODY-DEEP-HIDDEN'],
+    ['Truncated section', `${long}\nBODY-LONG-HIDDEN`],
+    ['Empty section', ''],
+    ['Dated section (2026-11-16, agent-1)', 'Dated body.'],
+  ])
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  // First non-empty line, with heading hashes, list bullets, bold and code
+  // markers stripped.
+  assert.match(index, /· Styled section — Bold code and _plain_ text（\d+ chars）/)
+  assert.match(index, /· Deep section — Deep heading（\d+ chars）/)
+  // Longer than 80 characters: cut at 80 and marked with an ellipsis.
+  assert.match(index, new RegExp(`· Truncated section — ${'L'.repeat(80)}…（\\d+ chars）`))
+  // No body, no description: the line falls back to title + size.
+  assert.match(index, /· Empty section（0 chars）/)
+  // The date in the title is carried into the index; no date means no date.
+  assert.match(index, /· Dated section \(2026-11-16, agent-1\) — Dated body\.（\d+ chars，2026-11-16）/)
+  assert.doesNotMatch(index, /· Styled section[^\n]*，20\d\d-\d\d-\d\d/)
+  // Descriptions never drag the rest of the body in.
+  assert.doesNotMatch(index, /BODY-STYLED-HIDDEN|BODY-DEEP-HIDDEN|BODY-LONG-HIDDEN/)
+})
+
+test('projects_memory search matches titles and bodies without returning bodies', async () => {
+  const projectId = await projectWithMemory('Searchable memory', [
+    ['Alpha decisions', 'The copy lives in /content.\nBODY-ALPHA-SECRET'],
+    ['Beta gotchas', 'pnpm only, no npm.\nBODY-BETA-SECRET'],
+    ['Gamma notes', 'Alpha is mentioned here too.\nBODY-GAMMA-SECRET'],
+    ['Old plan [superseded]', 'Alpha plan that was replaced.\nBODY-OLD-SECRET'],
+  ])
+
+  // A title match returns the section's title, description and size.
+  const byTitle = await call('projects_memory', { project_id: projectId, action: 'search', query: 'beta' })
+  assert.match(byTitle, /1 section\(s\) match "beta"/)
+  assert.match(byTitle, /· Beta gotchas — pnpm only, no npm\.（\d+ chars）/)
+  assert.doesNotMatch(byTitle, /BODY-BETA-SECRET/)
+
+  // A body match is case-insensitive and can return several sections; the
+  // superseded section contains the keyword too but is excluded.
+  const byBody = await call('projects_memory', { project_id: projectId, action: 'search', query: 'ALPHA' })
+  assert.match(byBody, /2 section\(s\) match "ALPHA"/)
+  assert.match(byBody, /· Alpha decisions — The copy lives in \/content\./)
+  assert.match(byBody, /· Gamma notes — Alpha is mentioned here too\./)
+  assert.doesNotMatch(byBody, /BODY-ALPHA-SECRET|BODY-GAMMA-SECRET/)
+  assert.doesNotMatch(byBody, /Old plan/)
+
+  // No match says so and points at the index.
+  const miss = await call('projects_memory', { project_id: projectId, action: 'search', query: 'zebra' })
+  assert.match(miss, /No memory section matches "zebra"/)
+  assert.match(miss, /action:"index"/)
+
+  // A missing query is a loud error, not an empty result.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'search' }),
+    /query is required for action "search"/,
+  )
+})
+
+test('search caps its result list and counts the sections left out', async () => {
+  const sections = []
+  for (let index = 0; index < 12; index += 1) {
+    sections.push([`Match ${index}`, `keyword appears in section ${index}.`])
+  }
+  const projectId = await projectWithMemory('Many matches', sections)
+  const result = await call('projects_memory', { project_id: projectId, action: 'search', query: 'keyword' })
+  assert.match(result, /12 section\(s\) match "keyword", showing the first 10/)
+  assert.match(result, /- …and 2 more section\(s\) match; narrow the query or use action:"index"\./)
+  assert.equal((result.match(/^· /gm) || []).length, 10)
+})
+
+test('stale sections leave the index and search but stay readable by name', async () => {
+  const projectId = await projectWithMemory('Stale memory', [
+    ['Live decision', 'Use pnpm.\nBODY-LIVE'],
+    ['Old decision [superseded]', 'Use npm.\nBODY-OLD'],
+    ['Ancient notes [ARCHIVED]', 'Nothing to see.\nBODY-ANCIENT'],
+  ])
+
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /1 section\(s\), \d+ characters\./)
+  assert.match(index, /· Live decision — Use pnpm\./)
+  assert.doesNotMatch(index, /· Old decision/)
+  assert.doesNotMatch(index, /· Ancient notes/)
+  // They are still named once, titles only, so a reader knows history exists.
+  assert.match(
+    index,
+    /2 section\(s\) marked stale \(superseded\/archived; still readable by name\): Old decision \[superseded\] \| Ancient notes \[ARCHIVED\]/,
+  )
+
+  const search = await call('projects_memory', { project_id: projectId, action: 'search', query: 'npm' })
+  assert.match(search, /1 section\(s\) match "npm"/)
+  assert.match(search, /· Live decision/)
+  assert.doesNotMatch(search, /Old decision|Ancient notes/)
+
+  // Read by name still works, marker included...
+  const old = await call('projects_memory', { project_id: projectId, action: 'read', section: 'Old decision' })
+  assert.match(old, /^## Old decision \[superseded\]\n\nUse npm\./)
+  assert.match(old, /BODY-OLD/)
+  // ...and a whole-file read still contains every section.
+  const whole = await call('projects_memory', { project_id: projectId })
+  assert.match(whole, /BODY-OLD/)
+  assert.match(whole, /BODY-ANCIENT/)
+
+  // The worker prompt's index drops them entirely: workers act on current
+  // knowledge, while the coordinator's index still names them above.
+  const promptIndex = await promptMemoryIndex(projectId)
+  assert.doesNotMatch(promptIndex, /Old decision|Ancient notes|marked stale/)
+})
+
+test('the index degrades in a fixed ladder when it exceeds its cap', async () => {
+  // 10 sections: the full format (title + description + size) fits 2000.
+  const small = await projectWithMemory('Ladder small', describedMemory(10))
+  const smallIndex = await promptMemoryIndex(small)
+  assert.match(smallIndex, /· Section 0 — d{80}（\d+ chars）/)
+  assert.doesNotMatch(smallIndex, /Descriptions omitted|Titles only|truncated/)
+
+  // 20 sections: descriptions no longer fit, sizes still do.
+  const medium = await projectWithMemory('Ladder medium', describedMemory(20))
+  const mediumIndex = await promptMemoryIndex(medium)
+  assert.match(mediumIndex, /Descriptions omitted to fit the 2000-character index cap\./)
+  assert.match(mediumIndex, /· Section 0（\d+ chars）/)
+  assert.doesNotMatch(mediumIndex, /· Section 0 —/)
+  assert.ok(mediumIndex.length <= 2000, `prompt index is capped, got ${mediumIndex.length}`)
+
+  // 90 sections: only titles fit 2000; the tool's 8000-character index keeps
+  // the sizes, which is the same ladder at a different threshold.
+  const large = await projectWithMemory('Ladder large', describedMemory(90))
+  const largeIndex = await promptMemoryIndex(large)
+  assert.match(largeIndex, /Titles only \(descriptions and sizes omitted\) to fit the 2000-character index cap\./)
+  assert.match(largeIndex, /· Section 0\n/)
+  assert.doesNotMatch(largeIndex, /· Section 0（/)
+  assert.ok(largeIndex.length <= 2000, `prompt index is capped, got ${largeIndex.length}`)
+  const largeToolIndex = await call('projects_memory', { project_id: large, action: 'index' })
+  assert.match(largeToolIndex, /Descriptions omitted to fit the 8000-character index cap\./)
+  assert.match(largeToolIndex, /· Section 0（\d+ chars）/)
+  assert.ok(largeToolIndex.length <= 8000, `tool index is capped, got ${largeToolIndex.length}`)
+
+  // 200 sections: even titles do not fit, so the list is truncated and counted.
+  const huge = await projectWithMemory('Ladder huge', describedMemory(200))
+  const hugeIndex = await promptMemoryIndex(huge)
+  assert.match(hugeIndex, /truncated to fit the 2000-character index cap/)
+  assert.match(hugeIndex, /- …and \d+ more section\(s\) not listed \(index capped at 2000 characters\)\./)
+  assert.ok(hugeIndex.length <= 2000, `prompt index is capped, got ${hugeIndex.length}`)
+  assert.doesNotMatch(hugeIndex, /d{80}/)
+})
+
+test('the tool index is capped at 8000 characters too', async () => {
+  // 700 sections with 80-character descriptions: the full, no-description and
+  // title-only formats all overflow 8000, so the tool's index truncates too.
+  const created = await call('projects_create', {
+    name: 'Tool cap',
+    goal: 'Ship it.',
+    autonomy: 'auto',
+    memoryBudget: 200_000,
+  })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const text = describedMemory(700)
+    .map(([title, body]) => `## ${title}\n${body}\n`)
+    .join('\n')
+  await call('projects_memory', { project_id: projectId, action: 'write', text })
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.ok(index.length <= 8000, `tool index is capped, got ${index.length}`)
+  assert.match(index, /truncated to fit the 8000-character index cap/)
+  assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 8000 characters\)\./)
+  assert.doesNotMatch(index, /d{80}/)
+})
+
 test('projects_get returns the memory index, not the memory body', async () => {
   const projectId = await memoryProject('Indexed get')
   const detail = await call('projects_get', { project_id: projectId })
   assert.match(detail, /## Shared memory\n2 section\(s\)/)
-  assert.match(detail, /- Alpha decisions \(\d+ chars\)/)
+  assert.match(detail, /· Alpha decisions — Copy lives in \/content\.（\d+ chars）/)
   assert.doesNotMatch(detail, /BODY-ALPHA-MARKER/)
 })
 
@@ -1324,7 +1526,7 @@ test('a memory over its budget archives its oldest sections automatically', asyn
   // reflects the compacted file rather than the archived sections.
   const detail = await call('projects_get', { project_id: projectId })
   assert.match(detail, /memory: budget 4000, auto-compaction on · last compaction \d+ → \d+ characters at /)
-  assert.match(detail, /- S6 durable fact \(\d+ chars\)/)
+  assert.match(detail, /· S6 durable fact — x{80}…（1000 chars）/)
   assert.doesNotMatch(detail, /S1 durable fact/)
 
   // The dispatch prompt carries the same index, so a worker cannot be handed
@@ -1333,7 +1535,7 @@ test('a memory over its budget archives its oldest sections automatically', asyn
   const taskId = added.match(/t-[0-9a-f]{8}/)[0]
   await call('projects_dispatch', { project_id: projectId, task_id: taskId })
   const prompt = activations[activations.length - 1].prompt[0].text
-  assert.match(prompt, /- S6 durable fact \(\d+ chars\)/)
+  assert.match(prompt, /· S6 durable fact — x{80}…（1000 chars）/)
   assert.doesNotMatch(prompt, /S1 durable fact/)
 })
 
@@ -1477,7 +1679,7 @@ test('an archived section is still readable, and the index says so', async () =>
   const taskId = added.match(/t-[0-9a-f]{8}/)[0]
   await call('projects_dispatch', { project_id: projectId, task_id: taskId })
   const prompt = activations[activations.length - 1].prompt[0].text
-  assert.match(prompt, /- S6 durable fact/)
+  assert.match(prompt, /· S6 durable fact — /)
   assert.doesNotMatch(prompt, /S1 durable fact/)
   assert.doesNotMatch(prompt, /memory-archive\.md/)
 

@@ -62,6 +62,20 @@ const MEMORY_TARGET_RATIO = 0.6
 const MEMORY_INDEX_LIMIT = 2_000
 /** The same index for the tool: the discovery path may be a little longer. */
 const MEMORY_INDEX_TOOL_LIMIT = 8_000
+/**
+ * The index's one-line description is a section's first non-empty body line,
+ * markdown stripped and cut at this many characters. Long enough to tell two
+ * sections apart, short enough that a full index stays cheap.
+ */
+const MEMORY_DESCRIPTION_MAX = 80
+/** Search lists at most this many sections; the rest are counted, not listed. */
+const MEMORY_SEARCH_LIMIT = 10
+/**
+ * A section title containing one of these markers is history rather than
+ * current fact. It stays readable by name, but the index and search hide it so
+ * a superseded decision cannot be mistaken for the live one.
+ */
+const MEMORY_STALE_MARKERS = ['[superseded]', '[archived]']
 const MAX_TASKS = 200
 const MAX_MODEL = 200
 const MAX_PRESET = 120
@@ -376,9 +390,59 @@ async function writeMemory(id, contents) {
 }
 
 /**
+ * Strip the markdown that would otherwise spend index characters on syntax:
+ * heading hashes, list bullets, blockquote markers, bold markers and code
+ * backticks. Deliberately shallow — a description is a hint, not a rendering.
+ */
+function plainMemoryLine(line) {
+  return String(line ?? '')
+    .replace(/^\s*>\s?/, '')
+    .replace(/^\s*#{1,6}\s*/, '')
+    .replace(/^\s*[-*+]\s+/, '')
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * The index's one-line description: the first non-empty body line, markdown
+ * stripped and capped at `MEMORY_DESCRIPTION_MAX` characters. `''` when the
+ * section has no body, so the index can fall back to a title-only line.
+ */
+function memoryDescription(body) {
+  const first = String(body ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0)
+  if (!first) return ''
+  const plain = plainMemoryLine(first)
+  if (!plain) return ''
+  return plain.length > MEMORY_DESCRIPTION_MAX
+    ? `${plain.slice(0, MEMORY_DESCRIPTION_MAX).trimEnd()}…`
+    : plain
+}
+
+/** The `YYYY-MM-DD` date a section title carries, or '' when it carries none. */
+function memoryDate(title) {
+  const match = /\b(\d{4}-\d{2}-\d{2})\b/.exec(String(title ?? ''))
+  return match ? match[1] : ''
+}
+
+/** True for a section whose title marks it as history rather than current fact. */
+function isStaleMemorySection(title) {
+  const lower = String(title ?? '').toLowerCase()
+  return MEMORY_STALE_MARKERS.some((marker) => lower.includes(marker))
+}
+
+/**
  * Split the memory into its `## ` sections. Everything before the first heading
  * is the preamble and is reported separately, so a section lookup never has to
  * guess what to do with loose text.
+ *
+ * Each section also carries what the index needs to describe it without
+ * injecting its body: a one-line `description`, the `date` in its title, and
+ * whether the title marks it `stale`.
  */
 function memorySections(memory) {
   const sections = []
@@ -393,7 +457,14 @@ function memorySections(memory) {
   }
   return sections.map((section) => {
     const body = section.lines.join('\n').trim()
-    return { title: section.title, body, chars: body.length }
+    return {
+      title: section.title,
+      body,
+      chars: body.length,
+      description: memoryDescription(body),
+      date: memoryDate(section.title),
+      stale: isStaleMemorySection(section.title),
+    }
   })
 }
 
@@ -404,39 +475,137 @@ function memoryPreamble(memory) {
   return (at === -1 ? text : text.slice(0, at)).trim()
 }
 
+/** One index line at the requested level of detail. */
+function memoryIndexEntry(section, mode) {
+  if (mode === 'titles') return `· ${section.title}`
+  const size = `${section.chars} chars`
+  const date = section.date ? `，${section.date}` : ''
+  if (mode === 'no-description' || !section.description) return `· ${section.title}（${size}${date}）`
+  return `· ${section.title} — ${section.description}（${size}${date}）`
+}
+
 /**
- * The memory as an index: one line per section with its size, never the text.
- * This is what a worker prompt gets, so the prompt stays bounded no matter how
- * much history the project accumulates. `limit` is a hard cap on the returned
- * string; when it does not fit, whole sections are dropped and counted.
+ * The "marked stale" footnote: titles only, never descriptions, because these
+ * sections are history. Bounded so a project with dozens of them cannot blow
+ * the index on its own.
  */
-function memoryIndex(memory, limit = MEMORY_INDEX_LIMIT) {
+function staleMemoryLine(stale) {
+  const titles = stale.map((section) => section.title).join(' | ')
+  let line = `- ${stale.length} section(s) marked stale (superseded/archived; still readable by name): ${titles}`
+  if (line.length > 500) line = `${line.slice(0, 500).trimEnd()}…`
+  return line
+}
+
+/**
+ * The memory as an index: one line per section with a one-line description, its
+ * size and the date in its title — never the body. This is what a worker prompt
+ * gets, so the prompt stays bounded no matter how much history accumulates.
+ *
+ * A described index is longer than a bare title list, so the format degrades in
+ * a fixed order until it fits `limit`:
+ *
+ *   1. title + description + size + date      (full)
+ *   2. title + size + date                    (descriptions dropped)
+ *   3. title only                             (sizes and dates dropped)
+ *   4. title only, truncated                  (whole sections dropped + counted)
+ *
+ * The first level whose text fits wins, and the header names the level in use.
+ * Sections whose title is marked `[superseded]`/`[archived]` are left out of the
+ * list. `listStale` adds the "marked stale" footnote (titles only) — the tool's
+ * index action asks for it so a coordinator can still find history by name; the
+ * worker prompt does not, because workers act on current knowledge.
+ */
+function memoryIndex(memory, limit = MEMORY_INDEX_LIMIT, { listStale = false } = {}) {
   const text = String(memory ?? '').trim()
   if (!text) return '(empty)'
   const sections = memorySections(text)
   if (sections.length === 0) {
     return `${text.length} characters, no "## " headings. Read it with projects_memory {action:"read"}.`
   }
+  const live = sections.filter((section) => !section.stale)
+  const stale = sections.filter((section) => section.stale)
   const header =
-    `${sections.length} section(s), ${text.length} characters. ` +
-    'Read one with projects_memory {action:"read", section:"<title>"} — do not assume you know what a section says.'
-  const entries = []
+    `${live.length} section(s), ${text.length} characters. ` +
+    'Read one with projects_memory {action:"read", section:"<title>"} — do not assume you know what a section says. ' +
+    'Find one with projects_memory {action:"search", query:"<keyword>"}.'
   const preamble = memoryPreamble(text)
-  if (preamble) entries.push(`- (preamble before the first heading) (${preamble.length} chars)`)
-  for (const section of sections) entries.push(`- ${section.title} (${section.chars} chars)`)
-  // Reserve room for the "…and N more" note so the note itself cannot push the
-  // result past the cap.
-  const room = Math.max(0, limit - header.length - 1 - 160)
+  const preambleLine = preamble ? `- (preamble before the first heading) (${preamble.length} chars)` : ''
+  const staleLine = listStale && stale.length ? staleMemoryLine(stale) : ''
+  const levels = [
+    { mode: 'full', note: '' },
+    { mode: 'no-description', note: ` Descriptions omitted to fit the ${limit}-character index cap.` },
+    {
+      mode: 'titles',
+      note: ` Titles only (descriptions and sizes omitted) to fit the ${limit}-character index cap.`,
+    },
+  ]
+  for (const level of levels) {
+    const lines = [`${header}${level.note}`]
+    if (preambleLine) lines.push(preambleLine)
+    for (const section of live) lines.push(memoryIndexEntry(section, level.mode))
+    if (staleLine) lines.push(staleLine)
+    const candidate = lines.join('\n')
+    if (candidate.length <= limit) return candidate
+  }
+  // Level 4. Reserve room for the "…and N more" note so the note itself cannot
+  // push the result past the cap; the truncated header is longer than level 3's,
+  // so this branch always drops at least one section.
+  const truncatedHeader = `${header} Titles only (descriptions and sizes omitted), truncated to fit the ${limit}-character index cap.`
+  const fixedLength =
+    truncatedHeader.length +
+    (preambleLine ? preambleLine.length + 1 : 0) +
+    (staleLine ? staleLine.length + 1 : 0)
+  const room = Math.max(0, limit - fixedLength - 2 - 200)
   const shown = []
   let used = 0
-  for (const entry of entries) {
+  for (const section of live) {
+    const entry = memoryIndexEntry(section, 'titles')
     if (used + entry.length + 1 > room) break
     shown.push(entry)
     used += entry.length + 1
   }
-  const omitted = entries.length - shown.length
-  const lines = [header, ...shown]
+  const omitted = live.length - shown.length
+  const lines = [truncatedHeader]
+  if (preambleLine) lines.push(preambleLine)
+  lines.push(...shown)
   if (omitted > 0) lines.push(`- …and ${omitted} more section(s) not listed (index capped at ${limit} characters).`)
+  if (staleLine) lines.push(staleLine)
+  return lines.join('\n')
+}
+
+/**
+ * Find sections by keyword: case-insensitive substring match over the title and
+ * the body, stale sections excluded. Returns titles, one-line descriptions and
+ * sizes — never bodies — so a search costs a fraction of a full read.
+ */
+function searchMemory(memory, query, limit = MEMORY_SEARCH_LIMIT) {
+  const needle = String(query ?? '').trim()
+  if (!needle) throw new Error('query is required for action "search"')
+  const text = String(memory ?? '').trim()
+  if (!text) return `No memory section matches "${needle}". The shared memory is empty.`
+  const sections = memorySections(text)
+  const live = sections.filter((section) => !section.stale)
+  const wanted = needle.toLowerCase()
+  const matches = live.filter(
+    (section) => section.title.toLowerCase().includes(wanted) || section.body.toLowerCase().includes(wanted),
+  )
+  if (matches.length === 0) {
+    const stale = sections.length - live.length
+    return (
+      `No memory section matches "${needle}". ${live.length} live section(s) in memory` +
+      `${stale ? `, ${stale} stale section(s) excluded` : ''} — ` +
+      'use projects_memory {action:"index"} to see them all.'
+    )
+  }
+  const shown = matches.slice(0, limit)
+  const header =
+    `${matches.length} section(s) match "${needle}"` +
+    (shown.length < matches.length ? `, showing the first ${shown.length}` : '') +
+    '. Read one with projects_memory {action:"read", section:"<title>"}.'
+  const lines = [header, ...shown.map((section) => memoryIndexEntry(section, 'full'))]
+  if (shown.length < matches.length) {
+    lines.push(`- …and ${matches.length - shown.length} more section(s) match; narrow the query or use action:"index".`)
+  }
   return lines.join('\n')
 }
 
@@ -1799,19 +1968,23 @@ function registerTools(ctx) {
   register({
     name: 'projects_memory',
     description:
-      'Read or write the shared memory of a project. The memory is a long append-only log, so read it by section: action "index" lists the section titles with their sizes, action "read" with a "section" returns just that section, and action "read" alone returns the whole file. Record durable findings, codebase knowledge and decisions here instead of repeating them in each task brief.',
+      'Read, search or write the shared memory of a project. The memory is a long append-only log, so read it by section: action "index" lists each section\'s title, one-line description and size; action "search" with a "query" finds sections by keyword without returning bodies; action "read" with a "section" returns just that section; action "read" alone returns the whole file. Record durable findings, codebase knowledge and decisions here instead of repeating them in each task brief.',
     parameters: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project id.' },
         action: {
           type: 'string',
-          enum: ['index', 'read', 'append', 'write'],
-          description: 'index (titles only), read (default; whole file, or one section with `section`), append a section, or replace all.',
+          enum: ['index', 'read', 'search', 'append', 'write'],
+          description: 'index (titles + one-line descriptions), search (keyword match over titles and bodies), read (default; whole file, or one section with `section`), append a section, or replace all.',
         },
         section: {
           type: 'string',
           description: 'For action "read": a section title, or a distinctive part of one. Case-insensitive; exact, prefix and substring matches all work.',
+        },
+        query: {
+          type: 'string',
+          description: 'For action "search": a keyword matched case-insensitively against section titles and bodies. Returns matching titles, one-line descriptions and sizes — never the bodies.',
         },
         text: { type: 'string', description: 'Text for append or write.' },
       },
@@ -1824,9 +1997,12 @@ function registerTools(ctx) {
       const action = args?.action || 'read'
       const memory = await readMemory(project.id)
       if (action === 'index') {
-        const live = memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT)
+        const live = memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT, { listStale: true })
         const archived = archiveSummary(await readMemoryArchive(project.id))
         return archived ? `${live}\n\n${archived}` : live
+      }
+      if (action === 'search') {
+        return searchMemory(memory, args?.query)
       }
       if (action === 'read') {
         const wanted = typeof args?.section === 'string' ? args.section.trim() : ''

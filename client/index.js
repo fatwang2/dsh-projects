@@ -909,28 +909,33 @@ ${SHARED_CSS}${DISPATCH_RULES}
     // Components
 
     /**
-     * The sidebar glyph: a folder with a check, drawn on the host's 24x24 grid.
-     * The path spans 2.5-21.5 on both axes (79% fill, stroke included 87%), so it
-     * reads at the same weight as the neighbouring host icons instead of the old
-     * 36-grid art, whose ink only covered 67% x 53% of its box.
+     * The sidebar glyph: a stack of cards, drawn on the host's 24x24 grid.
+     * Two centred rules (the short one on top, the long one under it) sit above
+     * a rounded card body, so the mark reads as "a pile of cards". Pure outline,
+     * no fill and no check.
+     *
+     * Geometry is tuned to the host's optical weight: the ink box (stroke
+     * included) is exactly 2..22 on both axes, i.e. 20/24 = 83.3% fill, the same
+     * as a host-shaped glyph. The three strokes are 5 units apart on the grid,
+     * which leaves 3.2 units of clear space, so at 16px the rules stay 2.13px
+     * apart and do not smear into one blob.
      */
     function ProjectsIcon({ size }) {
       const edge = typeof size === 'number' && size > 0 ? size : 18
+      const stroke = {
+        stroke: 'currentColor',
+        strokeWidth: 1.8,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }
       return h(
         'svg',
         { width: edge, height: edge, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true },
+        h('path', { d: 'M7 2.9H17', ...stroke }),
+        h('path', { d: 'M5 7.9H19', ...stroke }),
         h('path', {
-          d: 'M4.5 2.5H8.4Q9.5 2.5 10.2 3.4L11.8 6.5H19.5Q21.5 6.5 21.5 8.5V19.5Q21.5 21.5 19.5 21.5H4.5Q2.5 21.5 2.5 19.5V4.5Q2.5 2.5 4.5 2.5Z',
-          stroke: 'currentColor',
-          strokeWidth: 1.8,
-          strokeLinejoin: 'round',
-        }),
-        h('path', {
-          d: 'M8.6 14.2L11.2 16.8L16.4 11.2',
-          stroke: 'currentColor',
-          strokeWidth: 1.8,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
+          d: 'M5.9 12.9H18.1Q21.1 12.9 21.1 15.9V18.1Q21.1 21.1 18.1 21.1H5.9Q2.9 21.1 2.9 18.1V15.9Q2.9 12.9 5.9 12.9Z',
+          ...stroke,
         }),
       )
     }

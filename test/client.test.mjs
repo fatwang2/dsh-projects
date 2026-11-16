@@ -237,7 +237,7 @@ function inkBox(d, strokeWidth = 0) {
   return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY }
 }
 
-test('the sidebar icon fills its 24 grid the way the host icons do', () => {
+test('the sidebar icon is a card stack that fills its 24 grid', () => {
   const { registrations } = applyWithFakes()
   const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
 
@@ -254,36 +254,68 @@ test('the sidebar icon fills its 24 grid the way the host icons do', () => {
   assert.equal(sidebar.component({}).props.width, 18)
   assert.equal(sidebar.component({}).props.height, 18)
 
-  // Both strokes stay on the 24 grid's weight, in currentColor only.
-  assert.equal(icon.children.length, 2)
+  // Three strokes only: two rules over a rounded card body. The retired folder
+  // plus check pair is gone, so nothing here can draw a tick.
+  assert.equal(icon.children.length, 3)
   for (const child of icon.children) {
+    assert.equal(child.type, 'path')
     assert.equal(child.props.stroke, 'currentColor')
     assert.equal(child.props.fill, undefined)
+    assert.equal(child.props.strokeLinecap, 'round')
+    assert.equal(child.props.strokeLinejoin, 'round')
     assert.ok(
       child.props.strokeWidth >= 1.5 && child.props.strokeWidth <= 2,
       `strokeWidth ${child.props.strokeWidth} matches the host's 1.5-2 range`,
     )
+    // A check mark is a bent polyline; the stack is rules plus a rounded rect.
+    assert.doesNotMatch(child.props.d, /[Ll]/, `no straight-line tick segment in ${child.props.d}`)
   }
 
   const strokeWidth = icon.children[0].props.strokeWidth
-  const folder = inkBox(icon.children[0].props.d, strokeWidth)
-  const check = inkBox(icon.children[1].props.d, strokeWidth)
+  const [topRule, bottomRule, card] = icon.children.map((child) => inkBox(child.props.d, strokeWidth))
+  const cardOutline = inkBox(icon.children[2].props.d, 0)
 
-  // The path coordinates themselves sit inside 2..22, like the host grid.
-  const outline = inkBox(icon.children[0].props.d, 0)
-  assert.ok(outline.minX >= 2 && outline.maxX <= 22, `x ink ${outline.minX}..${outline.maxX}`)
-  assert.ok(outline.minY >= 2 && outline.maxY <= 22, `y ink ${outline.minY}..${outline.maxY}`)
+  // Every open path is a single horizontal rule; only the card body closes.
+  const open = icon.children.filter((child) => !/z/i.test(child.props.d))
+  assert.equal(open.length, 2, 'exactly two open paths (the rules)')
+  for (const child of open) {
+    const ys = new Set(pathPoints(child.props.d).map((point) => point[1]))
+    assert.equal(ys.size, 1, `an open path bends in y, so it could be a tick: ${child.props.d}`)
+  }
+  assert.match(icon.children[2].props.d, /Z$/)
 
-  // Measured fill: the visible box over the rendered size, on both axes.
-  const fillX = folder.width / 24
-  const fillY = folder.height / 24
+  // Stacked and centred: short rule, long rule, then the card body.
+  assert.ok(topRule.maxY < bottomRule.minY, 'the two rules do not touch')
+  assert.ok(bottomRule.maxY < card.minY, 'the bottom rule clears the card')
+  const centre = (box) => (box.minX + box.maxX) / 2
+  for (const box of [topRule, bottomRule, card]) {
+    assert.ok(Math.abs(centre(box) - 12) < 0.01, `glyph is centred on x=12, got ${centre(box)}`)
+  }
+  assert.ok(
+    topRule.width < bottomRule.width && bottomRule.width < card.width,
+    'short rule over long rule over the wider card',
+  )
+
+  // The card's own coordinates sit inside 2..22, like the host grid.
+  assert.ok(cardOutline.minX >= 2 && cardOutline.maxX <= 22, `x ink ${cardOutline.minX}..${cardOutline.maxX}`)
+  assert.ok(cardOutline.minY >= 2 && cardOutline.maxY <= 22, `y ink ${cardOutline.minY}..${cardOutline.maxY}`)
+
+  // Measured fill of the whole glyph (stroke included) over the rendered size.
+  const ink = {
+    minX: Math.min(topRule.minX, bottomRule.minX, card.minX),
+    maxX: Math.max(topRule.maxX, bottomRule.maxX, card.maxX),
+    minY: Math.min(topRule.minY, bottomRule.minY, card.minY),
+    maxY: Math.max(topRule.maxY, bottomRule.maxY, card.maxY),
+  }
+  const fillX = (ink.maxX - ink.minX) / 24
+  const fillY = (ink.maxY - ink.minY) / 24
   for (const [axis, fill] of [['x', fillX], ['y', fillY]]) {
     assert.ok(fill >= 0.75 && fill <= 0.9, `${axis} fill ${fill.toFixed(3)} lands in 0.75-0.90`)
   }
 
   // Nothing spills out of the viewBox once the stroke is drawn.
-  assert.ok(folder.minX >= 0 && folder.maxX <= 24, 'no horizontal clipping')
-  assert.ok(folder.minY >= 0 && folder.maxY <= 24, 'no vertical clipping')
+  assert.ok(ink.minX >= 0 && ink.maxX <= 24, 'no horizontal clipping')
+  assert.ok(ink.minY >= 0 && ink.maxY <= 24, 'no vertical clipping')
 
   // A host-shaped 24-grid glyph (ink 2..22) measures 83.3%; stay within 6pp of it.
   const host = inkBox('M2 4.5Q2 2 4.5 2H19.5Q22 2 22 4.5V19.5Q22 22 19.5 22H4.5Q2 22 2 19.5Z', 0)
@@ -293,9 +325,16 @@ test('the sidebar icon fills its 24 grid the way the host icons do', () => {
     `fill ${fillX.toFixed(3)}x${fillY.toFixed(3)} tracks the host's ${hostFill.toFixed(3)}`,
   )
 
-  // The check rides inside the folder, so the glyph reads as one mark.
-  assert.ok(check.minX > folder.minX && check.maxX < folder.maxX, 'check is inside horizontally')
-  assert.ok(check.minY > folder.minY && check.maxY < folder.maxY, 'check is inside vertically')
+  // 16px readability: the three horizontal strokes (two rules + the card's top
+  // edge) keep at least 2px of clear space edge to edge at the smallest size
+  // the sidebar renders, or the stack smears into one blob.
+  const scale = 16 / 24
+  const centres = [topRule.minY + strokeWidth / 2, bottomRule.minY + strokeWidth / 2, cardOutline.minY]
+  const gaps = centres.slice(1).map((y, index) => y - centres[index])
+  for (const gap of gaps) {
+    const clear = (gap - strokeWidth) * scale
+    assert.ok(clear >= 2, `16px clear gap ${clear.toFixed(3)}px is under the 2px floor`)
+  }
 
   // No literal colours sneak into the icon block.
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
@@ -305,6 +344,29 @@ test('the sidebar icon fills its 24 grid the way the host icons do', () => {
   assert.match(block, /currentColor/)
   assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/)
   assert.doesNotMatch(block, /\brgba?\(|\bhsla?\(/)
+})
+
+test('the market icon draws the same card stack in a neutral colour', () => {
+  const svg = readFileSync(new URL('../icon.svg', import.meta.url), 'utf8')
+  assert.match(svg, /viewBox="0 0 24 24"/)
+
+  // One source of truth: the static asset repeats the sidebar glyph's paths.
+  const { registrations } = applyWithFakes()
+  const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
+  const icon = sidebar.component({ size: 18 })
+  const ds = [...svg.matchAll(/\bd="([^"]+)"/g)].map((match) => match[1])
+  assert.deepEqual(ds, icon.children.map((child) => child.props.d))
+
+  // A static image needs a literal colour, but a neutral one: the retired
+  // #5B8DEF blue clashed with the currentColor strokes around the sidebar.
+  const colours = [...new Set([...svg.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((match) => match[0].toUpperCase()))]
+  assert.deepEqual(colours, ['#81858C'])
+
+  // Same weight as the live glyph, and no decoration.
+  const widths = [...svg.matchAll(/stroke-width="([\d.]+)"/g)].map((match) => Number(match[1]))
+  assert.deepEqual(widths, [1.8, 1.8, 1.8])
+  assert.doesNotMatch(svg, /gradient|filter|shadow|opacity/i)
+  assert.equal([...svg.matchAll(/fill="/g)].length, 1, 'only the root fill="none"')
 })
 
 test('both dictionaries carry the same keys and no add-task surface', () => {

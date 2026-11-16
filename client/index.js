@@ -20,7 +20,7 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-projects',
+  id: '@fatwang2/dsh-projects',
   factory(require) {
     const React = require('react')
     const h = React.createElement

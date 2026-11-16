@@ -3,4 +3,4 @@
 # from the same package through `dsh.client` in package.json.
 - insert:
     - id: projects
-      name: '@local/dsh-projects'
+      name: '@fatwang2/dsh-projects'

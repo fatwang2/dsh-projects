@@ -15,13 +15,13 @@ halves.
 Install it into a profile with the plugin manager: `plugin_manager` →
 `install_bundle` takes this package's directory or a published spec, installs
 the package and selects the bundle. The profile then lists
-`@local/dsh-projects` in `dsh.profile.bundles` and links the package in its
+`@fatwang2/dsh-projects` in `dsh.profile.bundles` and links the package in its
 `dependencies`:
 
 ```json
 {
-  "dsh": { "profile": { "bundles": ["@local/dsh-projects"] } },
-  "dependencies": { "@local/dsh-projects": "link:/path/to/projects-plugin" }
+  "dsh": { "profile": { "bundles": ["@fatwang2/dsh-projects"] } },
+  "dependencies": { "@fatwang2/dsh-projects": "link:/path/to/projects-plugin" }
 }
 ```
 

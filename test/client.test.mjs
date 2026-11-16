@@ -141,7 +141,7 @@ before(async () => {
 })
 
 test('declares the module id and its services', () => {
-  assert.equal(registration.id, '@local/dsh-projects')
+  assert.equal(registration.id, '@fatwang2/dsh-projects')
   assert.deepEqual(plugin.inject, ['slots', 'locale', 'uiWorkspace', 'sessions'])
   assert.equal(typeof plugin.apply, 'function')
 })

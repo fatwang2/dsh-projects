@@ -134,7 +134,7 @@ the final fallback is the Host default)
 
 ### Client ([client/index.js](../client/index.js))
 
-- `window.__ModuleLoader__.load({ id: '@local/dsh-projects', factory })`;
+- `window.__ModuleLoader__.load({ id: '@fatwang2/dsh-projects', factory })`;
   `factory` returns `{ inject: ['slots','locale','uiWorkspace','sessions'], apply }`.
 - `ctx.slots.inject('sidebar.panellist', ...)`: the **Projects** entry in the
   left sidebar plus a hand-drawn icon (a 24 grid, stroked, `currentColor`, a
@@ -276,6 +276,6 @@ added by forking. They need a server.**
 
 ### How to uninstall
 
-Disable or remove **Projects** (`@local/dsh-projects`) on the Plugins page. No
+Disable or remove **Projects** (`@fatwang2/dsh-projects`) on the Plugins page. No
 data is deleted — it stays under `$DSH_HOME/projects`; delete that directory by
 hand if you want it gone.

@@ -10,15 +10,40 @@ with its own context, and its final message lands on the task for review.
 The package is a DSH bundle. `package.json` declares `dsh.bundle.patch`
 (`cordis.patch.yml` inserts the Host plugin row) and `dsh.client` (the Client
 module is discovered from the same package), so one installation provides both
-halves. Install it into a profile in one of three ways.
+halves. Install it into a profile in one of four ways.
 
-### From GitHub (recommended)
+### From npm (recommended)
+
+The package is published to npm as `@fatwang2/dsh-projects`. Ask the agent to
+run `plugin_manager` with `action: "install_bundle"` and `target` set to the
+package spec:
+
+- `@fatwang2/dsh-projects` — the `latest` dist-tag, so the install takes the
+  newest release.
+- `@fatwang2/dsh-projects@0.2.0` — an exact version, when you want to lock it.
+
+A registry install is the easiest to upgrade: the Host records the version it
+installed, and the Plugins page compares it with the registry and offers
+**Update** when a newer release exists. The profile then lists
+`@fatwang2/dsh-projects` in `dsh.profile.bundles` and records the exact version
+in its `dependencies`:
+
+```json
+{
+  "dsh": { "profile": { "bundles": ["@fatwang2/dsh-projects"] } },
+  "dependencies": {
+    "@fatwang2/dsh-projects": "0.2.0"
+  }
+}
+```
+
+### From GitHub
 
 Ask the agent to run `plugin_manager` with `action: "install_bundle"` and
 `target` set to the repository spec:
 
 - `github:fatwang2/dsh-projects` — the default branch's current commit.
-- `github:fatwang2/dsh-projects#v0.1.0` — a release tag. Pin a tag to lock the
+- `github:fatwang2/dsh-projects#v0.2.0` — a release tag. Pin a tag to lock the
   version.
 
 There is no clone and no build step: the Host installs the package and selects
@@ -29,7 +54,7 @@ the bundle. The profile then lists `@fatwang2/dsh-projects` in
 {
   "dsh": { "profile": { "bundles": ["@fatwang2/dsh-projects"] } },
   "dependencies": {
-    "@fatwang2/dsh-projects": "github:fatwang2/dsh-projects#v0.1.0"
+    "@fatwang2/dsh-projects": "github:fatwang2/dsh-projects#v0.2.0"
   }
 }
 ```
@@ -49,20 +74,36 @@ runs: edit the sources in place and the next reload picks the changes up.
 ### From the Plugins page
 
 Open **Plugins**, choose **Add plugin** → **Install a third-party plugin**, and
-paste the same spec (`github:fatwang2/dsh-projects#v0.1.0`) or the absolute
-path of a local checkout.
+paste the same spec — `@fatwang2/dsh-projects@0.2.0` (or the bare name for
+`latest`) or `github:fatwang2/dsh-projects#v0.2.0` — or the absolute path of a
+local checkout.
 
 A newly installed Client module needs one page refresh before the **Projects**
 entry appears. Disabling or removing the bundle leaves every project on disk.
 
 ## Update
 
-A git install is pinned to the ref it was given: `#v0.1.0` stays that release
+A git install is pinned to the ref it was given: `#v0.2.0` stays that release
 until you ask for another one, and a spec with no ref follows the default
-branch's current commit. To upgrade:
+branch's current commit. An npm install is pinned too:
+`@fatwang2/dsh-projects@0.2.0` stays that version, and a bare name installs
+whatever `latest` was at install time. To upgrade:
 
-1. Install the newer ref — the same `plugin_manager` → `install_bundle` call
-   with the new tag in place of the old one:
+1. **npm install**: open **Plugins** and the bundle's page. Its **Versions**
+   section lists the newer releases the registry has, and **Update** replaces
+   the installed version while keeping the bundle selected — the version
+   discovery a registry install adds. Without the page, remove the bundle first
+   — `plugin_manager` → `remove_bundle` with
+   `target: "@fatwang2/dsh-projects"` — then install the new version:
+
+   ```
+   target: "@fatwang2/dsh-projects@0.2.0"
+   ```
+
+   The removal is not optional: with hot reload, `install_bundle` refuses a
+   package that is already installed (`already-installed`).
+2. **git install**: install the newer ref — the same `plugin_manager` →
+   `install_bundle` call with the new tag in place of the old one:
 
    ```
    target: "github:fatwang2/dsh-projects#v0.2.0"
@@ -70,10 +111,9 @@ branch's current commit. To upgrade:
 
    `v0.2.0` stands for the release you want; passing `#main` follows the branch
    instead of a tag. The Plugins page's **Update** action does the same when it
-   is offered for a git install.
-2. If the profile reports that the bundle is already installed, remove it
-   first — `plugin_manager` → `remove_bundle` with
-   `target: "@fatwang2/dsh-projects"` — then install the new ref.
+   is offered for a git install. If the profile reports that the bundle is
+   already installed, remove it first, as in the npm step, then install the new
+   ref.
 
 `plugin_manager` → `list_plugins` shows what is installed. After an upgrade,
 reload the plugin when the Host half changed (the Plugins page asks for a

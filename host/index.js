@@ -58,8 +58,20 @@ const MEMORY_TARGET_RATIO = 0.6
  * Hard cap on the memory index injected into a worker prompt. The prompt has to
  * stay small no matter how large the memory grows, so the index is truncated
  * rather than the prompt.
+ *
+ * 4,000, not 2,000, because the prompt index must keep its one-line
+ * descriptions: they are the only part that lets a worker tell two long,
+ * similarly named sections apart, and dropping them defeats the index. Measured
+ * on this project's real memory (16 sections, 50,797 characters, long Chinese
+ * titles): the full format is 2,618 characters, so a 2,000 cap forced the
+ * ladder down to "no description". The project's `memoryBudget` is 64,000
+ * characters; at the current average section size (~3,200 characters) a
+ * budget-full memory holds ~20 sections, whose full index is ~3,200 characters.
+ * 4,000 covers that worst case with ~25% headroom while still bounding the
+ * prompt. This is a cap, not a target: the ladder below still degrades
+ * deterministically when a memory outgrows it.
  */
-const MEMORY_INDEX_LIMIT = 2_000
+const MEMORY_INDEX_LIMIT = 4_000
 /** The same index for the tool: the discovery path may be a little longer. */
 const MEMORY_INDEX_TOOL_LIMIT = 8_000
 /**

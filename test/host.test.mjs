@@ -1028,12 +1028,19 @@ test('the dispatch prompt carries a memory index instead of the memory', async (
 })
 
 test('an oversized memory index is truncated and says how many sections are missing', async () => {
-  const created = await call('projects_create', { name: 'Huge memory', goal: 'Ship it.', autonomy: 'auto' })
+  // autoCompact off: 400 long sections would otherwise be compacted below the
+  // budget before the index is ever rendered.
+  const created = await call('projects_create', {
+    name: 'Huge memory',
+    goal: 'Ship it.',
+    autonomy: 'auto',
+    autoCompact: false,
+  })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
-  // 200 sections: the full format, the no-description format and the title-only
-  // format all overflow 2000 characters, so the index must truncate.
+  // 400 sections: the full format, the no-description format and the title-only
+  // format all overflow 4000 characters, so the index must truncate.
   const sections = []
-  for (let index = 0; index < 200; index += 1) {
+  for (let index = 0; index < 400; index += 1) {
     sections.push(`## Long history section ${index}`, `BODY-HIDDEN-${index} ${'x'.repeat(200)}`, '')
   }
   await call('projects_memory', { project_id: projectId, action: 'write', text: sections.join('\n') })
@@ -1044,11 +1051,11 @@ test('an oversized memory index is truncated and says how many sections are miss
 
   const prompt = activations[activations.length - 1].prompt[0].text
   const index = prompt.split('## Shared project memory\n')[1].split('\n\nThe list above')[0]
-  assert.ok(index.length <= 2000, `index is capped, got ${index.length} characters`)
-  assert.match(index, /200 section\(s\)/)
-  assert.match(index, /truncated to fit the 2000-character index cap/)
+  assert.ok(index.length <= 4000, `index is capped, got ${index.length} characters`)
+  assert.match(index, /400 section\(s\)/)
+  assert.match(index, /truncated to fit the 4000-character index cap/)
   assert.match(index, /· Long history section 0\n/)
-  assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 2000 characters\)\./)
+  assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 4000 characters\)\./)
   // Truncation drops whole sections, never a description: no body leaks.
   assert.doesNotMatch(prompt, /BODY-HIDDEN-/)
 })
@@ -1232,40 +1239,62 @@ test('stale sections leave the index and search but stay readable by name', asyn
 })
 
 test('the index degrades in a fixed ladder when it exceeds its cap', async () => {
-  // 10 sections: the full format (title + description + size) fits 2000.
+  // 10 sections: the full format (title + description + size) fits 4000.
   const small = await projectWithMemory('Ladder small', describedMemory(10))
   const smallIndex = await promptMemoryIndex(small)
   assert.match(smallIndex, /· Section 0 — d{80}（\d+ chars）/)
   assert.doesNotMatch(smallIndex, /Descriptions omitted|Titles only|truncated/)
 
-  // 20 sections: descriptions no longer fit, sizes still do.
-  const medium = await projectWithMemory('Ladder medium', describedMemory(20))
+  // 40 sections: descriptions no longer fit, sizes still do.
+  const medium = await projectWithMemory('Ladder medium', describedMemory(40))
   const mediumIndex = await promptMemoryIndex(medium)
-  assert.match(mediumIndex, /Descriptions omitted to fit the 2000-character index cap\./)
+  assert.match(mediumIndex, /Descriptions omitted to fit the 4000-character index cap\./)
   assert.match(mediumIndex, /· Section 0（\d+ chars）/)
   assert.doesNotMatch(mediumIndex, /· Section 0 —/)
-  assert.ok(mediumIndex.length <= 2000, `prompt index is capped, got ${mediumIndex.length}`)
+  assert.ok(mediumIndex.length <= 4000, `prompt index is capped, got ${mediumIndex.length}`)
 
-  // 90 sections: only titles fit 2000; the tool's 8000-character index keeps
+  // 200 sections: only titles fit 4000; the tool's 8000-character index keeps
   // the sizes, which is the same ladder at a different threshold.
-  const large = await projectWithMemory('Ladder large', describedMemory(90))
+  const large = await projectWithMemory('Ladder large', describedMemory(200))
   const largeIndex = await promptMemoryIndex(large)
-  assert.match(largeIndex, /Titles only \(descriptions and sizes omitted\) to fit the 2000-character index cap\./)
+  assert.match(largeIndex, /Titles only \(descriptions and sizes omitted\) to fit the 4000-character index cap\./)
   assert.match(largeIndex, /· Section 0\n/)
   assert.doesNotMatch(largeIndex, /· Section 0（/)
-  assert.ok(largeIndex.length <= 2000, `prompt index is capped, got ${largeIndex.length}`)
+  assert.ok(largeIndex.length <= 4000, `prompt index is capped, got ${largeIndex.length}`)
   const largeToolIndex = await call('projects_memory', { project_id: large, action: 'index' })
   assert.match(largeToolIndex, /Descriptions omitted to fit the 8000-character index cap\./)
   assert.match(largeToolIndex, /· Section 0（\d+ chars）/)
   assert.ok(largeToolIndex.length <= 8000, `tool index is capped, got ${largeToolIndex.length}`)
 
-  // 200 sections: even titles do not fit, so the list is truncated and counted.
-  const huge = await projectWithMemory('Ladder huge', describedMemory(200))
+  // 400 sections: even titles do not fit, so the list is truncated and counted.
+  const huge = await projectWithMemory('Ladder huge', describedMemory(400))
   const hugeIndex = await promptMemoryIndex(huge)
-  assert.match(hugeIndex, /truncated to fit the 2000-character index cap/)
-  assert.match(hugeIndex, /- …and \d+ more section\(s\) not listed \(index capped at 2000 characters\)\./)
-  assert.ok(hugeIndex.length <= 2000, `prompt index is capped, got ${hugeIndex.length}`)
+  assert.match(hugeIndex, /truncated to fit the 4000-character index cap/)
+  assert.match(hugeIndex, /- …and \d+ more section\(s\) not listed \(index capped at 4000 characters\)\./)
+  assert.ok(hugeIndex.length <= 4000, `prompt index is capped, got ${hugeIndex.length}`)
   assert.doesNotMatch(hugeIndex, /d{80}/)
+})
+
+test('the dispatch index keeps descriptions for a memory shaped like this project\'s', async () => {
+  // Regression: this project's real memory (16 sections, long Chinese titles,
+  // 80-character descriptions) overflowed the old 2000-character prompt cap and
+  // degraded to L2 — titles and sizes but no descriptions, which is the one
+  // thing the index exists to provide. The cap is 4000, so this shape stays L1.
+  const sections = []
+  for (let index = 1; index <= 16; index += 1) {
+    const title = `host：第 ${index} 个很长的中文标题（2026-11-16, agent-${index}）`
+    sections.push([title, `${'描'.repeat(80)}\nBODY-HIDDEN-${index}`])
+  }
+  const projectId = await projectWithMemory('Real-shaped memory', sections)
+  const index = await promptMemoryIndex(projectId)
+  // The fixture really does reproduce the old overflow, and the new cap holds.
+  assert.ok(index.length > 2000, `fixture must exceed the old cap, got ${index.length}`)
+  assert.ok(index.length <= 4000, `prompt index is capped, got ${index.length}`)
+  assert.match(index, /16 section\(s\)/)
+  assert.doesNotMatch(index, /Descriptions omitted|Titles only|truncated/)
+  // Every entry carries its description, size and date.
+  assert.equal((index.match(/^· .+ — .+（\d+ chars，2026-11-16）$/gm) || []).length, 16)
+  assert.doesNotMatch(index, /BODY-HIDDEN-/)
 })
 
 test('the tool index is capped at 8000 characters too', async () => {

@@ -1247,13 +1247,36 @@ ${SHARED_CSS}${DISPATCH_RULES}
     function coordinatorPrompt(project, locale) {
       const zh = String(locale || '').toLowerCase().startsWith('zh')
       const tasks = project.tasks || []
-      const taskLines = tasks.length
-        ? tasks
-            .map((task) => `- ${task.id} [${task.status}] ${task.title}`)
-            .join('\n')
-        : zh
-          ? '(还没有任务)'
-          : '(none yet)'
+      // The prompt carries the control plane only. A project that has run for a
+      // week has dozens of accepted tasks; listing them here would make every
+      // coordinator turn pay for history it never reads. The counts line still
+      // says how many are resolved, and projects_get with include_resolved: true
+      // is the way back to their output.
+      const open = tasks.filter((task) => task.status !== 'resolved')
+      const tally = {}
+      for (const task of tasks) tally[task.status] = (tally[task.status] || 0) + 1
+      // Same order and separator as the Host's `projects_get` counts line, so the
+      // prompt and the tool read identically for the same board.
+      const countsText =
+        ['running', 'review', 'queued', 'failed', 'blocked', 'resolved']
+          .filter((status) => (tally[status] || 0) > 0)
+          .map((status) => `${tally[status]} ${status}`)
+          .join(', ') || (zh ? '无' : 'none')
+      const taskLines = open.length
+        ? open.map((task) => `- ${task.id} [${task.status}] ${task.title}`).join('\n')
+        : tasks.length === 0
+          ? zh
+            ? '(还没有任务)'
+            : '(none yet)'
+          : zh
+            ? '(没有未完成的任务)'
+            : '(no open tasks)'
+      const resolvedNote =
+        tally.resolved > 0
+          ? zh
+            ? `已 resolved 的 ${tally.resolved} 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。`
+            : `${tally.resolved} resolved task(s) are not listed here; read their output with projects_get and include_resolved: true.`
+          : ''
       if (zh) {
         return [
           `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`,
@@ -1262,7 +1285,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
           project.goal?.trim() || '（未填写）',
           '',
           '## 当前任务',
+          `counts: ${countsText}`,
           taskLines,
+          ...(resolvedNote ? [resolvedNote] : []),
           '',
           '## 你的职责',
           '你只负责四件事：拆解、分派、验收、汇报。',
@@ -1292,7 +1317,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
         project.goal?.trim() || '(none)',
         '',
         '## Current tasks',
+        `counts: ${countsText}`,
         taskLines,
+        ...(resolvedNote ? [resolvedNote] : []),
         '',
         '## Your job',
         'You do four things only: split the goal, dispatch, review, report.',

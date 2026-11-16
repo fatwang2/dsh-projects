@@ -560,9 +560,78 @@ test('the tally puts every task in exactly one status bucket', async () => {
   assert.doesNotMatch(line, /review|blocked/)
 
   // The detail view carries the tally too, so the coordinator reads the same split.
+  // Resolved work is counted, not listed: the tool's default is the control plane.
   const detail = await call('projects_get', { project_id: projectId })
-  assert.match(detail, /## Tasks \(4\)\ncounts: 1 queued, 1 running, 2 resolved\n/)
+  assert.match(detail, /## Tasks \(2 of 4\)\ncounts: 1 queued, 1 running, 2 resolved\n/)
+  assert.match(detail, /2 resolved task\(s\) hidden — pass include_resolved: true/)
+  assert.doesNotMatch(detail, /\[resolved\]/)
   assert.doesNotMatch(detail, /counts: [^\n]*(review|blocked)/)
+
+  // The full board is still one argument away, and the tally is the same.
+  const full = await call('projects_get', { project_id: projectId, include_resolved: true })
+  assert.match(full, /## Tasks \(4\)\ncounts: 1 queued, 1 running, 2 resolved\n/)
+  assert.match(full, /\[resolved\] Waiting for review/)
+  assert.match(full, /\[resolved\] Needs a decision/)
+  assert.doesNotMatch(full, /hidden/)
+})
+
+// The default view is the control plane. A project that has run for a week has
+// dozens of accepted tasks; returning them (and their output) on every
+// projects_get made the coordinator pay for history it never reads. Resolved
+// work stays reachable by argument, and the page's own payload is untouched.
+test('projects_get defaults to the control plane and counts the resolved work it hides', async () => {
+  const projectId = await newProject('Control plane', { autonomy: 'auto' })
+  const add = async (title) => {
+    const added = await call('projects_add_task', { project_id: projectId, title })
+    return added.match(/t-[0-9a-f]{8}/)[0]
+  }
+  const openId = await add('Still open')
+  await call('projects_update_task', { project_id: projectId, task_id: openId, status: 'running' })
+
+  for (let index = 1; index <= 20; index += 1) {
+    const taskId = await add(`Accepted work ${index}`)
+    await call('projects_update_task', {
+      project_id: projectId,
+      task_id: taskId,
+      status: 'resolved',
+      output: `RESOLVED-OUTPUT-${index}`,
+    })
+  }
+
+  // The argument is part of the tool contract, not just the formatter.
+  assert.equal(tool('projects_get').parameters.properties.include_resolved.type, 'boolean')
+
+  const control = await call('projects_get', { project_id: projectId })
+  assert.match(control, /## Tasks \(1 of 21\)/)
+  assert.match(control, /counts: 1 running, 20 resolved/)
+  assert.match(control, /20 resolved task\(s\) hidden — pass include_resolved: true/)
+  assert.match(control, /Still open/)
+  // Not one accepted task, and not one byte of its output.
+  assert.doesNotMatch(control, /\[resolved\]/)
+  assert.doesNotMatch(control, /Accepted work/)
+  assert.doesNotMatch(control, /RESOLVED-OUTPUT/)
+
+  // The full board is still one argument away, output included.
+  const full = await call('projects_get', { project_id: projectId, include_resolved: true })
+  assert.match(full, /## Tasks \(21\)\ncounts: 1 running, 20 resolved\n/)
+  assert.match(full, /\[resolved\] Accepted work 20/)
+  assert.match(full, /output: RESOLVED-OUTPUT-20/)
+  assert.doesNotMatch(full, /hidden/)
+
+  // The page still receives the whole board: the HTTP route's payload is not
+  // narrowed, only the tool's default view is.
+  const page = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(page.status, 200)
+  assert.equal(page.body.project.tasks.length, 21)
+  assert.match(JSON.stringify(page.body.project.tasks), /RESOLVED-OUTPUT-20/)
+
+  // The point of the change: the default answer is a fraction of the full one.
+  // Real outputs are up to 300 characters each, so the gap on a long project is
+  // far wider than this floor.
+  assert.ok(
+    control.length * 3 < full.length,
+    `the control plane should be much smaller: ${control.length} vs ${full.length}`,
+  )
 })
 
 test('accepting a task is lossy: the status it came from is not recoverable', async () => {

@@ -1144,6 +1144,58 @@ test('the coordinator prompt keeps the main conversation short', () => {
   assert.match(prompt, /taskLines/)
 })
 
+test('the coordinator prompt lists open tasks and counts the resolved ones', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function coordinatorPrompt')
+  const end = source.indexOf('function ProjectsIcon', start)
+  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
+  // The function closes over nothing but its two arguments, so the test can run
+  // the real source instead of only matching it.
+  const coordinatorPrompt = new Function(`${source.slice(start, end)}; return coordinatorPrompt;`)()
+
+  const tasks = [
+    { id: 't-open', status: 'running', title: '正在跑的活' },
+    ...Array.from({ length: 20 }, (_, index) => ({
+      id: `t-done-${index + 1}`,
+      status: 'resolved',
+      title: `已验收的活 ${index + 1}`,
+    })),
+  ]
+  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks }
+
+  // The prompt carries the control plane: one open task, and a counts line that
+  // still says how much accepted work exists. Not one resolved title leaks in.
+  const zh = coordinatorPrompt(project, 'zh')
+  assert.match(zh, /## 当前任务\ncounts: 1 running, 20 resolved\n/)
+  assert.match(zh, /- t-open \[running\] 正在跑的活/)
+  assert.doesNotMatch(zh, /\[resolved\]/)
+  assert.doesNotMatch(zh, /已验收的活/)
+  assert.match(
+    zh,
+    /已 resolved 的 20 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。/,
+  )
+
+  const en = coordinatorPrompt(project, 'en')
+  assert.match(en, /## Current tasks\ncounts: 1 running, 20 resolved\n/)
+  assert.match(en, /- t-open \[running\] 正在跑的活/)
+  assert.doesNotMatch(en, /\[resolved\]/)
+  assert.doesNotMatch(en, /已验收的活/)
+  assert.match(
+    en,
+    /20 resolved task\(s\) are not listed here; read their output with projects_get and include_resolved: true\./,
+  )
+
+  // A board where everything is accepted still reports its size, and a brand new
+  // project keeps its original empty-state line.
+  const allDone = coordinatorPrompt({ ...project, tasks: tasks.slice(1) }, 'zh')
+  assert.match(allDone, /counts: 20 resolved/)
+  assert.match(allDone, /\(没有未完成的任务\)/)
+  const empty = coordinatorPrompt({ ...project, tasks: [] }, 'zh')
+  assert.match(empty, /counts: 无/)
+  assert.match(empty, /\(还没有任务\)/)
+  assert.doesNotMatch(empty, /include_resolved/)
+})
+
 test('the panel groups threads into five fixed sections in reference order', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   const start = source.indexOf('const THREAD_GROUPS')

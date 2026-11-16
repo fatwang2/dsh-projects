@@ -2754,7 +2754,21 @@ function formatCompaction(project) {
   return ` · last compaction ${last.before} → ${last.after} characters at ${new Date(last.at).toISOString()}`
 }
 
-function formatProject(project, memoryFiles) {
+/**
+ * The tool view of one project. Resolved tasks are the data plane: their output
+ * is already recorded on the board and served by the page's project route, and
+ * a project that has run for a week has dozens of them. Listing them here made
+ * every coordinator turn pay for history it never reads, so the default is the
+ * control plane only — open tasks plus a `counts:` line that still reports how
+ * many are resolved. `includeResolved` opts back into the full board.
+ */
+function formatProject(project, memoryFiles, options = {}) {
+  const includeResolved = options.includeResolved === true
+  const tally = counts(project.tasks)
+  const tasks = includeResolved
+    ? project.tasks
+    : project.tasks.filter((task) => task.status !== 'resolved')
+  const hidden = project.tasks.length - tasks.length
   const lines = [
     `Project ${project.id} — ${project.name}`,
     `workspace: ${project.workspace || '(inherited)'}`,
@@ -2765,11 +2779,18 @@ function formatProject(project, memoryFiles) {
     '## Instructions',
     project.goal.trim() || '(none)',
     '',
-    `## Tasks (${project.tasks.length})`,
-    `counts: ${formatCounts(counts(project.tasks))}`,
+    // When nothing is hidden the header keeps the plain board size, so a fresh
+    // project reads exactly as it did before.
+    `## Tasks (${hidden > 0 ? `${tasks.length} of ${project.tasks.length}` : project.tasks.length})`,
+    `counts: ${formatCounts(tally)}`,
   ]
-  if (project.tasks.length === 0) lines.push('(none)')
-  for (const task of project.tasks) {
+  if (hidden > 0) {
+    lines.push(
+      `${hidden} resolved task(s) hidden — pass include_resolved: true to list them with their output.`,
+    )
+  }
+  if (tasks.length === 0) lines.push(hidden > 0 ? '(no open tasks)' : '(none)')
+  for (const task of tasks) {
     const worker = task.childName ? ` worker=${task.childName}` : ''
     const model = task.model ? ` model=${task.model}` : ''
     const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
@@ -2940,17 +2961,26 @@ function registerTools(ctx) {
   register({
     name: 'projects_get',
     description:
-      'Read one project: instructions, workspace, autonomy, every task with its status and output, and an index of the shared memory. Use it before planning or reporting; read a memory file with projects_memory when you need its text.',
+      'Read one project: instructions, workspace, autonomy, the open tasks (queued, running, review, failed, blocked) with their status and output, a counts line covering every status including resolved, and an index of the shared memory. Resolved tasks are hidden by default; pass include_resolved: true to list them with their output. Use it before planning or reporting; read a memory file with projects_memory when you need its text.',
     parameters: {
       type: 'object',
-      properties: { project_id: { type: 'string', description: 'Project id from projects_list.' } },
+      properties: {
+        project_id: { type: 'string', description: 'Project id from projects_list.' },
+        include_resolved: {
+          type: 'boolean',
+          description:
+            'List tasks the human already accepted (status resolved) with their output. Defaults to false: the default view is the control plane, and the counts line still reports how many are resolved.',
+        },
+      },
       required: ['project_id'],
       additionalProperties: false,
     },
     output: TEXT_OUTPUT,
     execute: async (args) => {
       const project = await readProject(String(args?.project_id || ''))
-      return formatProject(project, await readMemoryFiles(project.id))
+      return formatProject(project, await readMemoryFiles(project.id), {
+        includeResolved: args?.include_resolved === true,
+      })
     },
   })
 

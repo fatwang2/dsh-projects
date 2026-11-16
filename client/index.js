@@ -40,7 +40,6 @@ window.__ModuleLoader__.load({
       projects: 'Projects',
       newProject: 'New project',
       projectName: 'Project name',
-      workspacePlaceholder: 'Workspace path (optional)',
       chooseFolder: 'Choose folder',
       chooseFolderShort: 'Choose…',
       clear: 'Clear',
@@ -61,11 +60,13 @@ window.__ModuleLoader__.load({
       memory: 'Shared memory',
       memoryHint: 'Every worker reads this before starting and can append findings to it.',
       memoryPlaceholder: 'Findings, decisions, codebase knowledge…',
+      memoryEmpty: 'The shared memory is empty.',
+      memoryEdit: 'Edit all',
+      memoryPreamble: 'Preamble',
+      memoryChars: 'chars',
+      memoryStale: 'superseded',
       save: 'Save',
       policy: 'Dispatch policy',
-      autonomy: 'Autonomy',
-      autonomyManual: 'Manual — the user approves each dispatch in the conversation',
-      autonomyAuto: 'Auto — the coordinator dispatches freely',
       concurrency: 'Parallel workers',
       workspace: 'Workspace',
       emptyTasks: 'No tasks yet. Ask the coordinator in the conversation to split the goal.',
@@ -171,7 +172,6 @@ window.__ModuleLoader__.load({
       projects: '项目',
       newProject: '新建项目',
       projectName: '项目名称',
-      workspacePlaceholder: '工作区路径（可选）',
       chooseFolder: '选择文件夹',
       chooseFolderShort: '选择…',
       clear: '清除',
@@ -192,11 +192,13 @@ window.__ModuleLoader__.load({
       memory: '共享记忆',
       memoryHint: '每个执行者开始前都会读它，也可以把结论追加进来。',
       memoryPlaceholder: '结论、决策、对代码库的了解……',
+      memoryEmpty: '共享记忆还是空的。',
+      memoryEdit: '编辑全文',
+      memoryPreamble: '前言',
+      memoryChars: '字符',
+      memoryStale: '已过时',
       save: '保存',
       policy: '派发策略',
-      autonomy: '自主程度',
-      autonomyManual: '手动 —— 每次派发都需要用户在对话里同意',
-      autonomyAuto: '自动 —— 协调者可直接派发',
       concurrency: '并行执行者',
       workspace: '工作区',
       emptyTasks: '还没有任务。在对话里让协调者拆解目标，任务由它派生。',
@@ -346,11 +348,16 @@ window.__ModuleLoader__.load({
 .pj-resizer:hover,.pj-resizer:focus-visible{background:var(--dsw-alias-border-l2)}
 .pj-page.pj-resizing{cursor:col-resize;user-select:none}
 .pj-main{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;border-right:1px solid var(--dsw-alias-border-l2)}
-.pj-main-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);min-height:56px;box-sizing:border-box}
+.pj-main-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);box-sizing:border-box}
 [data-platform='darwin'] .pj-list-head{padding-top:calc(16px + var(--dsh-frame-top-clearance, 0px))}
 [data-platform='darwin'] .pj-rail{padding-top:calc(10px + var(--dsh-frame-top-clearance, 0px))}
 [data-platform='darwin'] .pj-main-head{padding-top:calc(14px + var(--dsh-frame-top-clearance, 0px))}
 [data-platform='darwin'] .pj-exec-head{padding-top:calc(12px + var(--dsh-frame-top-clearance, 0px))}
+/* The conversation head and the Threads head share one height, the macOS top
+   clearance included. The Threads head is the denser of the two (12px padding,
+   a 14px title), so a bare 56px floor let its divider sit ~8px above the
+   conversation's once the clearance was added to both. One floor, both equal. */
+.pj-main-head,.pj-exec-head{min-height:calc(56px + var(--dsh-frame-top-clearance, 0px))}
 .pj-main-title{display:flex;align-items:center;gap:8px;min-width:0}
 .pj-title{margin:0;font-size:18px;line-height:26px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pj-main-body{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
@@ -359,7 +366,7 @@ window.__ModuleLoader__.load({
 .pj-settings{display:flex;flex-direction:column;min-width:0}
 .pj-chat-body{position:relative;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .pj-exec{display:flex;flex-direction:column;flex:0 0 380px;width:380px;min-width:0;min-height:0;background:var(--dsw-alias-bg-layer-1)}
-.pj-exec-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);min-height:56px;box-sizing:border-box}
+.pj-exec-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2);box-sizing:border-box}
 .pj-exec-title{margin:0;font-size:14px;font-weight:600}
 .pj-exec-task{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary)}
 .pj-exec-scroll{flex:1;min-height:0;overflow:auto;padding:12px 14px 32px}
@@ -376,7 +383,10 @@ window.__ModuleLoader__.load({
 .pj-detail-row{display:flex;align-items:center;gap:6px;min-width:0}
 .pj-detail-meta{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .pj-detail-meta-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pj-exec-tools{display:flex;align-items:center;gap:8px;padding:0 14px 10px}
+/* The search row sits under the Threads head, so it needs its own gap: the head
+   owns a 1px divider and nothing else, and a field flush against it reads as
+   part of the border. */
+.pj-exec-tools{display:flex;align-items:center;gap:8px;padding:12px 14px 10px}
 /* Search field, copied from the Host's SearchInput primitive: a bordered
    wrapper that owns the focus ring, a 16px leading glyph, and a borderless
    input inside it. */
@@ -483,6 +493,22 @@ window.__ModuleLoader__.load({
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
 .pj-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .pj-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+/* A chosen workspace is data, not a field: the Host input's geometry with no
+   caret and no typing, so the path reads as the value the picker produced. */
+.pj-path{display:flex;align-items:center;min-width:0;height:34px;padding:0 12px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.pj-path.pj-path-empty{color:var(--dsw-alias-label-tertiary)}
+.pj-path-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The memory is a file list, not one textarea: one row per "## " section with
+   its title, one-line description, size and date, and the body opens in a
+   dialog. */
+.pj-memory-list{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+.pj-memory-row{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.pj-memory-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-memory-row-head{display:flex;align-items:center;gap:8px;min-width:0}
+.pj-memory-row-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary)}
+.pj-memory-row-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.pj-memory-row-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.pj-memory-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-primary)}
 /* A thread card: icon in the gutter, then a title line, a one-line summary and
    optional chips. Two rows plus chips, and no controls at all — every action
    lives in the right-click menu or on the detail page. */
@@ -936,6 +962,110 @@ ${SHARED_CSS}${DISPATCH_RULES}
       }
     }
 
+    // ---------------------------------------------------------------------
+    // Shared memory
+    //
+    // The settings dialog lists the memory as files, not as one textarea. The
+    // Host splits the memory into `## ` sections for the index it injects into
+    // every worker prompt; the page mirrors that split, so a row the list shows
+    // is exactly the section `projects_memory {action:"read"}` returns.
+
+    /** The Host's cap on a one-line description (`MEMORY_DESCRIPTION_MAX`). */
+    const MEMORY_DESCRIPTION_MAX = 80
+
+    /** Titles that mark a section as history rather than current fact. */
+    const MEMORY_STALE_MARKERS = ['[superseded]', '[archived]']
+
+    /** The `YYYY-MM-DD` date a section title carries, or '' when it carries none. */
+    function memoryDate(title) {
+      const match = /\b(\d{4}-\d{2}-\d{2})\b/.exec(String(title ?? ''))
+      return match ? match[1] : ''
+    }
+
+    /** True for a section whose title marks it as history. */
+    function isStaleMemory(title) {
+      const lower = String(title ?? '').toLowerCase()
+      return MEMORY_STALE_MARKERS.some((marker) => lower.includes(marker))
+    }
+
+    /** The list's one-line description: the first body line, markdown stripped. */
+    function memoryDescription(body) {
+      const plain = plainLine(body).replace(/\s+/g, ' ')
+      if (!plain) return ''
+      return plain.length > MEMORY_DESCRIPTION_MAX
+        ? `${plain.slice(0, MEMORY_DESCRIPTION_MAX).trimEnd()}…`
+        : plain
+    }
+
+    /**
+     * Split the memory into its `## ` sections, mirroring the Host's
+     * `memorySections`. The body is kept because the page previews it; the
+     * description, size and date are what the list shows without opening it.
+     */
+    function memorySections(memory) {
+      const sections = []
+      let current = null
+      for (const line of String(memory ?? '').split('\n')) {
+        if (line.startsWith('## ')) {
+          current = { title: line.slice(3).trim(), lines: [] }
+          sections.push(current)
+          continue
+        }
+        if (current) current.lines.push(line)
+      }
+      return sections.map((section) => {
+        const body = section.lines.join('\n').trim()
+        return {
+          title: section.title,
+          body,
+          chars: body.length,
+          description: memoryDescription(body),
+          date: memoryDate(section.title),
+          stale: isStaleMemory(section.title),
+        }
+      })
+    }
+
+    /** Everything before the first `## ` heading, or '' when it starts with one. */
+    function memoryPreamble(memory) {
+      const text = String(memory ?? '')
+      if (text.startsWith('## ')) return ''
+      const at = text.indexOf('\n## ')
+      return (at === -1 ? text : text.slice(0, at)).trim()
+    }
+
+    /**
+     * The rows the settings list shows: the preamble (if any) first, then every
+     * section. A memory with no headings still gets one row, so loose text can
+     * be read instead of rendering an empty list.
+     */
+    function memoryRows(memory, t) {
+      const rows = []
+      const preamble = memoryPreamble(memory)
+      if (preamble) {
+        rows.push({
+          key: 'preamble',
+          title: t('memoryPreamble'),
+          body: preamble,
+          chars: preamble.length,
+          description: memoryDescription(preamble),
+          date: '',
+          stale: false,
+        })
+      }
+      memorySections(memory).forEach((section, index) => {
+        rows.push({ key: `section:${index}`, ...section })
+      })
+      return rows
+    }
+
+    /** The size and date line under a memory row's title. */
+    function memoryMeta(row, t) {
+      const parts = [`${row.chars} ${t('memoryChars')}`]
+      if (row.date) parts.push(row.date)
+      return parts.join(' · ')
+    }
+
     function countsLine(project, t) {
       const counts = project.counts || {}
       const parts = ['running', 'review', 'queued', 'failed', 'blocked']
@@ -1296,6 +1426,17 @@ ${SHARED_CSS}${DISPATCH_RULES}
     }
 
     /**
+     * The open dialog layers, innermost last. Two dialogs can be open at once —
+     * the settings dialog and a memory preview opened from it — so only the top
+     * layer answers Escape and traps Tab: otherwise one Escape would close both,
+     * and the outer trap would pull focus back out of the inner dialog.
+     */
+    const MODAL_LAYERS = []
+
+    /** The overflow the outermost layer found, restored by the last one out. */
+    let modalSavedOverflow = ''
+
+    /**
      * Hold one dialog open for its lifetime: move focus in, trap Tab, close on
      * Escape, lock the page scroll and hand focus back to the trigger.
      *
@@ -1318,7 +1459,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
         const target =
           node.querySelector('[data-pj-modal-autofocus]') || node.querySelector(FOCUSABLE) || node
         if (!node.contains(document.activeElement)) focusWithoutRing(target)
+        const layer = {}
+        MODAL_LAYERS.push(layer)
         const onKeyDown = (event) => {
+          // Only the innermost dialog reacts, so a preview on top of the
+          // settings dialog never closes the dialog underneath it.
+          if (MODAL_LAYERS[MODAL_LAYERS.length - 1] !== layer) return
           if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return
           if (event.ctrlKey || event.altKey || event.metaKey) return
           if (event.key === 'Escape') {
@@ -1342,13 +1488,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
         }
         document.addEventListener('keydown', onKeyDown)
         // The mask covers the viewport, but a wheel over it would still scroll
-        // the page behind: lock the body while the dialog is open.
+        // the page behind: lock the body while the outermost dialog is open, so
+        // a preview closing under the settings dialog cannot unlock it early.
         const body = document.body
-        const previousOverflow = body ? body.style.overflow : ''
-        if (body) body.style.overflow = 'hidden'
+        if (body && MODAL_LAYERS.length === 1) {
+          modalSavedOverflow = body.style.overflow
+          body.style.overflow = 'hidden'
+        }
         return () => {
           document.removeEventListener('keydown', onKeyDown)
-          if (body) body.style.overflow = previousOverflow
+          const at = MODAL_LAYERS.indexOf(layer)
+          if (at >= 0) MODAL_LAYERS.splice(at, 1)
+          if (body && MODAL_LAYERS.length === 0) body.style.overflow = modalSavedOverflow
           const trigger = returnRef.current && returnRef.current.current
           const back = trigger && trigger.isConnected ? trigger : previous
           if (back && back.isConnected) focusWithoutRing(back)
@@ -1660,9 +1811,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const [busy, setBusy] = useState(false)
       const [goalText, setGoalText] = useState('')
       const [memoryText, setMemoryText] = useState('')
-      const [workspaceText, setWorkspaceText] = useState('')
       const [goalDirty, setGoalDirty] = useState(false)
       const [memoryDirty, setMemoryDirty] = useState(false)
+      // The memory is a list of sections; one opens as a read-only preview and
+      // the whole file opens in an editor. Both are dialogs on top of settings.
+      const [memoryPreview, setMemoryPreview] = useState(null)
+      const [memoryEditorOpen, setMemoryEditorOpen] = useState(false)
       // Both project-level surfaces are dialogs now: the list header carries a
       // plus glyph and the main header a gear, and neither takes a column.
       const [showNewProject, setShowNewProject] = useState(false)
@@ -1670,7 +1824,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
         name: '',
         goal: '',
         workspace: '',
-        autonomy: 'manual',
         concurrency: 2,
       })
       const [showSettings, setShowSettings] = useState(false)
@@ -1730,7 +1883,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const selectedRef = useRef(null)
       const goalDirtyRef = useRef(false)
       const memoryDirtyRef = useRef(false)
-      const workspaceDirtyRef = useRef(false)
 
       useEffect(() => {
         selectedRef.current = selectedId
@@ -1998,12 +2150,13 @@ ${SHARED_CSS}${DISPATCH_RULES}
       useEffect(() => {
         goalDirtyRef.current = false
         memoryDirtyRef.current = false
-        workspaceDirtyRef.current = false
         setGoalDirty(false)
         setMemoryDirty(false)
         setArchiveArmed(false)
         setFilterOpen(false)
         setHiddenGroups({})
+        setMemoryPreview(null)
+        setMemoryEditorOpen(false)
         setExecTarget((current) => (current ? null : current))
         setMenu(null)
       }, [detail?.project?.id])
@@ -2012,7 +2165,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
         if (!detail) return
         if (!goalDirtyRef.current) setGoalText(detail.project?.goal || '')
         if (!memoryDirtyRef.current) setMemoryText(detail.memory || '')
-        if (!workspaceDirtyRef.current) setWorkspaceText(detail.project?.workspace || '')
       }, [detail])
 
       // A success notice is transient; an error stays until the next action.
@@ -2084,9 +2236,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
           ].join('\n')
         : ''
 
-      // The new-project dialog starts from the Host's own defaults (manual
-      // autonomy, two workers), so the two extra fields are never blank.
-      const BLANK_PROJECT = { name: '', goal: '', workspace: '', autonomy: 'manual', concurrency: 2 }
+      // The new-project dialog starts from the Host's own defaults (two
+      // workers, no folder), so the fields it does show are never blank.
+      const BLANK_PROJECT = { name: '', goal: '', workspace: '', concurrency: 2 }
 
       const openNewProject = () => {
         setNewProject(BLANK_PROJECT)
@@ -2104,15 +2256,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setShowSettings(true)
       }
 
+      // Closing the settings dialog closes whatever it opened on top: a memory
+      // preview or the editor must not outlive the surface it belongs to.
       const closeSettings = () => {
         setArchiveArmed(false)
+        setMemoryPreview(null)
+        setMemoryEditorOpen(false)
         setShowSettings(false)
       }
 
-      // One POST carries every field the dialog collects: the Host's
-      // `createProject` accepts autonomy and concurrency alongside name, goal
-      // and workspace, so the project is born with its policy rather than
-      // patched a moment later.
+      // One POST carries every field the dialog collects. Autonomy is not one of
+      // them: the Host's own default (manual) applies, and the coordinator can
+      // still change it through `projects_update`. Concurrency is.
       const createProject = () =>
         run(async () => {
           if (!newProject.name.trim()) throw new Error(t('nameRequired'))
@@ -2122,7 +2277,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
               name: newProject.name.trim(),
               goal: newProject.goal.trim(),
               workspace: newProject.workspace.trim(),
-              autonomy: newProject.autonomy,
               concurrency: Number(newProject.concurrency) || 2,
             }),
           })
@@ -2154,12 +2308,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return t('saved')
         })
 
+      // The whole-memory editor saves the buffer and closes itself; the section
+      // list behind it then re-reads the refreshed memory.
       const saveMemory = () =>
         run(async () => {
           if (!projectId) return ''
           await api(`/projects/${projectId}/memory`, { method: 'POST', body: JSON.stringify({ text: memoryText }) })
           memoryDirtyRef.current = false
           setMemoryDirty(false)
+          setMemoryEditorOpen(false)
           await refresh(projectId)
           return t('saved')
         })
@@ -2173,20 +2330,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return ''
         })
 
+      // The workspace is chosen, never typed: the picker writes the path and the
+      // page shows it read-only.
       const chooseWorkspace = () =>
         run(async () => {
           const path = await pickFolder()
           if (!path) return ''
-          setWorkspaceText(path)
-          workspaceDirtyRef.current = false
           await saveProjectPatch({ workspace: path })
           return t('saved')
         })
 
       const clearWorkspace = () =>
         run(async () => {
-          setWorkspaceText('')
-          workspaceDirtyRef.current = false
           await saveProjectPatch({ workspace: '' })
           return t('saved')
         })
@@ -2313,7 +2468,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
 
       const selectProject = (entry) => {
         if (
-          (goalDirtyRef.current || memoryDirtyRef.current || workspaceDirtyRef.current) &&
+          (goalDirtyRef.current || memoryDirtyRef.current) &&
           typeof window.confirm === 'function' &&
           !window.confirm(t('switchDiscard'))
         ) {
@@ -2501,6 +2656,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
         }
       }
 
+      // The settings list reads the saved memory, not the editor's buffer: a row
+      // is a section the workers can actually read right now.
+      const memoryList = memoryRows(detail?.memory || '', t)
+
       const renderSettings = () =>
         h(
           'div',
@@ -2540,27 +2699,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
               { className: 'pj-row' },
               h(
                 'label',
-                { className: 'pj-field pj-grow' },
-                h('span', { className: 'pj-label' }, t('autonomy')),
-                h(
-                  'span',
-                  { className: 'pj-select-wrap' },
-                  h(
-                    'select',
-                    {
-                      className: 'pj-select',
-                      value: project.autonomy,
-                      disabled: busy,
-                      onChange: (event) => void patchProject({ autonomy: event.target.value }),
-                    },
-                    h('option', { value: 'manual' }, t('autonomyManual')),
-                    h('option', { value: 'auto' }, t('autonomyAuto')),
-                  ),
-                  h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
-                ),
-              ),
-              h(
-                'label',
                 { className: 'pj-field' },
                 h('span', { className: 'pj-label' }, t('concurrency')),
                 h('input', {
@@ -2580,6 +2718,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
                   },
                 }),
               ),
+              // The workspace is chosen, never typed: the picker writes the path
+              // and this line only shows it.
               h(
                 'div',
                 { className: 'pj-field pj-grow' },
@@ -2587,21 +2727,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
                 h(
                   'div',
                   { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
-                  h('input', {
-                    className: 'pj-input pj-grow',
-                    'aria-label': t('workspace'),
-                    value: workspaceText,
-                    placeholder: t('noWorkspace'),
-                    disabled: busy,
-                    onChange: (event) => {
-                      workspaceDirtyRef.current = true
-                      setWorkspaceText(event.target.value)
+                  h(
+                    'div',
+                    {
+                      className: `pj-path pj-grow${project.workspace ? '' : ' pj-path-empty'}`,
+                      title: project.workspace || t('noWorkspace'),
                     },
-                    onBlur: (event) => {
-                      const value = event.target.value.trim()
-                      if (value !== (project.workspace || '')) void patchProject({ workspace: value })
-                    },
-                  }),
+                    h('span', { className: 'pj-path-text' }, project.workspace || t('noWorkspace')),
+                  ),
                   h(
                     'button',
                     { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseWorkspace },
@@ -2631,20 +2764,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
               h('h2', { className: 'pj-section-title' }, t('execution')),
             ),
             h('div', { className: 'pj-hint' }, t('executionHint')),
-            // Make the default that a dispatch would actually use explicit, so
-            // "which model do my workers run on" is answerable without opening a
-            // task.
-            h(
-              'div',
-              { className: 'pj-hint' },
-              `${t('effectiveModel')}: ${
-                project.model ? modelLabel(catalog, project.model) : t('modelDefault')
-              } · ${t('effortShort')}: ${
-                effortValue(project.reasoningEffort)
-                  ? effortLabel(catalog, project.model, project.reasoningEffort, t)
-                  : t('effortDefault')
-              }`,
-            ),
             h(
               'div',
               { className: 'pj-row' },
@@ -2737,24 +2856,49 @@ ${SHARED_CSS}${DISPATCH_RULES}
               'div',
               { className: 'pj-section-head' },
               h('h2', { className: 'pj-section-title' }, t('memory')),
+              // The list is for reading one section; editing the whole file is
+              // still one textarea, behind a dialog.
               h(
                 'button',
-                { className: 'pj-btn', onClick: saveMemory, disabled: busy || !memoryDirty, type: 'button' },
-                t('save'),
+                {
+                  className: 'pj-btn',
+                  type: 'button',
+                  disabled: busy,
+                  'aria-haspopup': 'dialog',
+                  onClick: () => setMemoryEditorOpen(true),
+                },
+                t('memoryEdit'),
               ),
             ),
             h('div', { className: 'pj-hint' }, t('memoryHint')),
-            h('textarea', {
-              className: 'pj-textarea',
-              'aria-label': t('memory'),
-              placeholder: t('memoryPlaceholder'),
-              value: memoryText,
-              onChange: (event) => {
-                memoryDirtyRef.current = true
-                setMemoryDirty(true)
-                setMemoryText(event.target.value)
-              },
-            }),
+            memoryList.length === 0
+              ? h('div', { className: 'pj-hint' }, t('memoryEmpty'))
+              : h(
+                  'div',
+                  { className: 'pj-memory-list' },
+                  memoryList.map((row) =>
+                    h(
+                      'button',
+                      {
+                        key: row.key,
+                        className: 'pj-memory-row',
+                        type: 'button',
+                        title: row.description || row.title,
+                        'aria-haspopup': 'dialog',
+                        onClick: () => setMemoryPreview(row),
+                      },
+                      h(
+                        'span',
+                        { className: 'pj-memory-row-head' },
+                        h('span', { className: 'pj-memory-row-title' }, row.title),
+                        row.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
+                      ),
+                      row.description &&
+                        h('span', { className: 'pj-memory-row-desc' }, row.description),
+                      h('span', { className: 'pj-memory-row-meta' }, memoryMeta(row, t)),
+                    ),
+                  ),
+                ),
           ),
           // The danger zone closes the dialog. Archiving hides the project from
           // the list, so the first press only arms it and the second one acts;
@@ -3225,7 +3369,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
             : [
                 h(
                   'div',
-                  { className: 'pj-list-head' },
+                  // The three column heads are the page's top strip. The Host's
+                  // window-region convention (`data-window-drag`, the same
+                  // attribute its own page heads and sidebar rows carry) makes
+                  // the blank part of each one drag the macOS window; the glyph
+                  // buttons inside are excluded by the Host's own stylesheet, so
+                  // they still click. Nothing here sets `-webkit-app-region`
+                  // itself: that is the frame's job, not a plugin's.
+                  { className: 'pj-list-head', 'data-window-drag': true },
                   h('span', { className: 'pj-list-title' }, t('projects')),
                   h(
                     'div',
@@ -3323,7 +3474,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
           { className: 'pj-main' },
           h(
             'header',
-            { className: 'pj-main-head' },
+            // Draggable window strip, like the Host's own conversation and
+            // plugin-page heads; the gear inside stays a no-drag control.
+            { className: 'pj-main-head', 'data-window-drag': true },
             h(
               'div',
               { className: 'pj-main-title' },
@@ -3426,7 +3579,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
           },
           h(
             'header',
-            { className: 'pj-exec-head' },
+            // The Threads head closes the page's top strip: same drag region as
+            // the other two heads, with its glyphs excluded by the Host.
+            { className: 'pj-exec-head', 'data-window-drag': true },
             execTarget
               ? h(
                   'div',
@@ -3640,16 +3795,19 @@ ${SHARED_CSS}${DISPATCH_RULES}
               'div',
               { key: 'workspace', className: 'pj-field' },
               h('span', { className: 'pj-label' }, t('workspace')),
+              // A folder is chosen, not typed: the picker is the only input and
+              // the chosen path is shown read-only beside it.
               h(
                 'div',
                 { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
-                h('input', {
-                  className: 'pj-input pj-grow',
-                  'aria-label': t('workspace'),
-                  placeholder: t('workspacePlaceholder'),
-                  value: newProject.workspace,
-                  onChange: (event) => setNewProject({ ...newProject, workspace: event.target.value }),
-                }),
+                h(
+                  'div',
+                  {
+                    className: `pj-path pj-grow${newProject.workspace ? '' : ' pj-path-empty'}`,
+                    title: newProject.workspace || t('noWorkspace'),
+                  },
+                  h('span', { className: 'pj-path-text' }, newProject.workspace || t('noWorkspace')),
+                ),
                 h(
                   'button',
                   { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseNewProjectFolder },
@@ -3660,28 +3818,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
             h(
               'div',
               { key: 'policy', className: 'pj-row' },
-              h(
-                'label',
-                { className: 'pj-field pj-grow' },
-                h('span', { className: 'pj-label' }, t('autonomy')),
-                h(
-                  'span',
-                  { className: 'pj-select-wrap' },
-                  h(
-                    'select',
-                    {
-                      className: 'pj-select',
-                      'aria-label': t('autonomy'),
-                      value: newProject.autonomy,
-                      disabled: busy,
-                      onChange: (event) => setNewProject({ ...newProject, autonomy: event.target.value }),
-                    },
-                    h('option', { value: 'manual' }, t('autonomyManual')),
-                    h('option', { value: 'auto' }, t('autonomyAuto')),
-                  ),
-                  h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
-                ),
-              ),
               h(
                 'label',
                 { className: 'pj-field' },
@@ -3721,6 +3857,77 @@ ${SHARED_CSS}${DISPATCH_RULES}
                 renderSettings(),
               ]
             : null,
+        }),
+        // A memory section opens as a read-only preview on top of the settings
+        // dialog, and the whole file opens in an editor. Both are dialogs, so
+        // each surface keeps one scroll source, and Escape closes only the top
+        // one (see `MODAL_LAYERS`).
+        h(Modal, {
+          open: Boolean(memoryPreview),
+          titleId: 'pj-memory-preview-title',
+          title: memoryPreview ? memoryPreview.title : t('memory'),
+          closeLabel: t('close'),
+          onClose: () => setMemoryPreview(null),
+          className: 'pj-modal-wide',
+          children: memoryPreview
+            ? [
+                h(
+                  'div',
+                  { key: 'meta', className: 'pj-memory-row-meta' },
+                  memoryMeta(memoryPreview, t),
+                ),
+                h('div', { key: 'body', className: 'pj-memory-body' }, memoryPreview.body),
+              ]
+            : null,
+        }),
+        h(Modal, {
+          open: memoryEditorOpen,
+          titleId: 'pj-memory-editor-title',
+          title: t('memory'),
+          closeLabel: t('close'),
+          onClose: () => setMemoryEditorOpen(false),
+          className: 'pj-modal-form',
+          footer: [
+            h(
+              'button',
+              {
+                key: 'cancel',
+                className: 'pj-btn pj-modal-action',
+                type: 'button',
+                disabled: busy,
+                onClick: () => setMemoryEditorOpen(false),
+              },
+              t('cancel'),
+            ),
+            h(
+              'button',
+              {
+                key: 'save',
+                className: 'pj-btn pj-btn-primary pj-modal-action',
+                type: 'button',
+                disabled: busy || !memoryDirty,
+                onClick: saveMemory,
+              },
+              t('save'),
+            ),
+          ],
+          children: [
+            h('div', { key: 'hint', className: 'pj-hint' }, t('memoryHint')),
+            h('textarea', {
+              key: 'text',
+              className: 'pj-textarea',
+              style: { minHeight: '260px' },
+              'aria-label': t('memory'),
+              placeholder: t('memoryPlaceholder'),
+              value: memoryText,
+              'data-pj-modal-autofocus': '',
+              onChange: (event) => {
+                memoryDirtyRef.current = true
+                setMemoryDirty(true)
+                setMemoryText(event.target.value)
+              },
+            }),
+          ],
         }),
       )
     }

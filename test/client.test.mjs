@@ -13,17 +13,34 @@ import { before, test } from 'node:test'
 let registration
 let plugin
 
+/**
+ * The module under test captures this object once, at factory time
+ * (`require('react')`), and destructures its hooks. A test that needs working
+ * hooks therefore swaps the implementation *behind* the object instead of
+ * replacing it: the defaults below are inert, and the element-tree harness
+ * installs a real one for its own duration.
+ */
+const DEFAULT_REACT = {
+  createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+  useState: () => [undefined, () => {}],
+  useEffect: () => {},
+  useRef: () => ({ current: undefined }),
+  useCallback: (fn) => fn,
+}
+
+let reactImpl = DEFAULT_REACT
+
 const React = {
   Component: class {
     constructor(props) {
       this.props = props
     }
   },
-  createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-  useState: () => [undefined, () => {}],
-  useEffect: () => {},
-  useRef: () => ({ current: undefined }),
-  useCallback: (fn) => fn,
+  createElement: (type, props, ...children) => reactImpl.createElement(type, props, ...children),
+  useState: (...args) => reactImpl.useState(...args),
+  useEffect: (...args) => reactImpl.useEffect(...args),
+  useRef: (...args) => reactImpl.useRef(...args),
+  useCallback: (...args) => reactImpl.useCallback(...args),
 }
 
 function fakeRequire(name) {
@@ -1070,9 +1087,13 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
   assert.match(settings, /defaultValue: effortValue\(project\.reasoningEffort\)/)
   assert.match(settings, /t\('effortFreeTextHint'\)/)
 
-  // The settings section states the default a dispatch would use right now.
-  assert.match(settings, /t\('effectiveModel'\)/)
-  assert.match(settings, /project\.model \? modelLabel\(catalog, project\.model\) : t\('modelDefault'\)/)
+  // The settings section no longer repeats the resolved default in a hint line:
+  // the two pickers below it already show the stored values, so the line was
+  // pure duplication. The key stays for the detail header's tooltip, which is
+  // the one place where the resolved route and its source are worth spelling
+  // out.
+  assert.doesNotMatch(settings, /t\('effectiveModel'\)/)
+  assert.doesNotMatch(settings, /modelLabel\(catalog, project\.model\)/)
 
   // Detail page: the effective route and its source are the header's one
   // secondary line. The read-only task-model picker went with the field form.
@@ -1200,18 +1221,19 @@ test('the controls copy the Host primitives instead of importing them', () => {
   assert.match(select, /\.pj-select\{[^}]*height:34px/)
   assert.match(select, /\.pj-select-chevron\{[^}]*width:12px;height:12px/)
   assert.match(select, /color:var\(--dsw-alias-menu-icon\)/)
-  // Four pickers: autonomy, model and reasoning effort in the settings dialog,
-  // plus the autonomy picker in the new-project dialog. The read-only task-model
-  // control was retired with the detail field form.
+  // Two pickers: the model and the reasoning effort in the settings dialog. The
+  // autonomy picker is gone from both dialogs (a project is always created
+  // manual and the coordinator can still change it), and the read-only
+  // task-model control was retired with the detail field form.
   assert.equal(
     [...source.matchAll(/className: 'pj-select-wrap'/g)].length,
-    4,
-    'all four pickers are wrapped',
+    2,
+    'both remaining pickers are wrapped',
   )
   assert.equal(
     [...source.matchAll(/className: 'pj-select-chevron'/g)].length,
-    4,
-    'all four pickers draw the caret',
+    2,
+    'both remaining pickers draw the caret',
   )
 
   // Form fields and section rhythm follow the Host settings form.
@@ -1522,10 +1544,22 @@ test('the two project surfaces are Host-shaped dialogs, not page regions', () =>
   assert.doesNotMatch(source, /t\('settingsTab'\)/)
 
   // Both dialogs are the same component, and both are mounted from the page.
+  // The memory preview and the whole-file editor stack on top of settings, so
+  // the page owns four dialogs in one tree.
   assert.match(source, /function Modal\(props\)/)
-  assert.equal([...source.matchAll(/h\(Modal, \{/g)].length, 2)
+  assert.equal([...source.matchAll(/h\(Modal, \{/g)].length, 4)
   assert.match(source, /titleId: 'pj-new-project-title'/)
   assert.match(source, /titleId: 'pj-settings-title'/)
+  assert.match(source, /titleId: 'pj-memory-preview-title'/)
+  assert.match(source, /titleId: 'pj-memory-editor-title'/)
+
+  // Two dialogs can be open at once, so only the innermost layer answers Escape
+  // and traps Tab: one Escape must close the preview, not the settings dialog
+  // under it.
+  assert.match(source, /const MODAL_LAYERS = \[\]/)
+  assert.match(source, /if \(MODAL_LAYERS\[MODAL_LAYERS\.length - 1\] !== layer\) return/)
+  assert.match(source, /MODAL_LAYERS\.push\(layer\)/)
+  assert.match(source, /MODAL_LAYERS\.splice\(at, 1\)/)
 
   // The Host's dialog contract: a labelled modal dialog with a mask.
   assert.match(source, /role: 'dialog'/)
@@ -1545,7 +1579,7 @@ test('the two project surfaces are Host-shaped dialogs, not page regions', () =>
   assert.match(source, /\[data-pj-modal-autofocus\]/)
   // The page behind the mask does not scroll while a dialog is open.
   assert.match(source, /body\.style\.overflow = 'hidden'/)
-  assert.match(source, /body\.style\.overflow = previousOverflow/)
+  assert.match(source, /body\.style\.overflow = modalSavedOverflow/)
 
   // The card geometry is the Host Modal primitive's, on theme tokens only.
   const modal = source.slice(source.indexOf('.pj-modal-root{'), source.indexOf('@keyframes pj-modal-enter'))
@@ -1581,12 +1615,15 @@ test('the header triggers are glyphs, and archive moved into the settings dialog
   assert.doesNotMatch(source, /'»'/)
 
   // The new-project dialog collects every field the Host's create route takes.
-  for (const field of ['name', 'goal', 'workspace', 'autonomy', 'concurrency']) {
+  // Autonomy is not one of them any more: the Host's own default (manual)
+  // applies, and the coordinator can still change it later.
+  for (const field of ['name', 'goal', 'workspace', 'concurrency']) {
     assert.match(source, new RegExp(`newProject\\.${field}`), `the dialog edits ${field}`)
   }
-  assert.match(source, /autonomy: newProject\.autonomy/)
+  assert.doesNotMatch(source, /newProject\.autonomy/)
+  assert.doesNotMatch(source, /autonomy: newProject\.autonomy/)
   assert.match(source, /concurrency: Number\(newProject\.concurrency\) \|\| 2/)
-  assert.match(source, /const BLANK_PROJECT = \{ name: '', goal: '', workspace: '', autonomy: 'manual', concurrency: 2 \}/)
+  assert.match(source, /const BLANK_PROJECT = \{ name: '', goal: '', workspace: '', concurrency: 2 \}/)
 
   // Archive is the last thing in the settings dialog, in a danger zone.
   const settings = source.slice(source.indexOf('const renderSettings = () =>'))
@@ -1638,4 +1675,408 @@ test('the header triggers are glyphs, and archive moved into the settings dialog
     assert.equal(en[key], undefined, `EN still carries ${key}`)
     assert.equal(zh[key], undefined, `ZH still carries ${key}`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// Element-tree harness
+//
+// The tests above read the source. These render the real component tree: a tiny
+// renderer implements the hook contract the page uses (state with working
+// setters, refs, memoised callbacks, effects with deps), expands every function
+// component inline, and stubs `fetch` with the Host's `/projects-api` payloads.
+// A click is then a real `onClick` call, so what is asserted is the tree the
+// browser would paint rather than a substring of the file.
+
+/** Deep equality for a hook's dependency array; no array means "every render". */
+function sameDeps(a, b) {
+  return (
+    Array.isArray(a) &&
+    Array.isArray(b) &&
+    a.length === b.length &&
+    a.every((value, index) => Object.is(value, b[index]))
+  )
+}
+
+const SAMPLE_PROJECT = {
+  id: 'p1',
+  name: '示例项目',
+  goal: '把项目页做成看板',
+  workspace: '/Users/wangding/dsh-projects',
+  autonomy: 'manual',
+  concurrency: 2,
+  model: '',
+  reasoningEffort: '',
+  archived: false,
+  coordinatorSessionId: null,
+  tasks: [],
+}
+
+const SAMPLE_MEMORY = [
+  '## 项目背景（2026-11-16）',
+  '这个项目是 DSH 的项目看板插件。',
+  '',
+  '## 已知坑',
+  '- 不要碰 host/index.js',
+  '- 弹窗要能 Esc 关闭',
+].join('\n')
+
+const SAMPLE_MODELS = {
+  models: [
+    { id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat', efforts: [{ id: 'low' }, { id: 'high' }] },
+  ],
+  enumerable: true,
+  presets: [],
+  presetsEnumerable: false,
+}
+
+function createPageHarness({ projects = [], detail = null } = {}) {
+  const slots = []
+  const cleanups = []
+  let cursor = 0
+  let pending = []
+  let tree = null
+  let rendering = false
+  let dirty = false
+  let root = null
+
+  const flatten = (value, out = []) => {
+    if (Array.isArray(value)) {
+      for (const entry of value) flatten(entry, out)
+    } else if (value !== null && value !== undefined && value !== false && value !== true) {
+      out.push(value)
+    }
+    return out
+  }
+
+  /**
+   * Render one element. A function component is called inline, while the hook
+   * cursor is live, so its hooks land in the same flat slot list on every pass.
+   * That is why the tree shape must stay stable — which it does: every dialog
+   * renders unconditionally and returns null while closed.
+   */
+  const expand = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return node
+    if (typeof node.type === 'function') {
+      // `h(Modal, { children, footer })` carries its children in props; a host
+      // element carries them as positional arguments.
+      const props = node.children.length > 0 ? { ...node.props, children: node.children } : node.props
+      return expand(node.type(props))
+    }
+    return { ...node, children: flatten(node.children).map(expand) }
+  }
+
+  const impl = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState(initial) {
+      const at = cursor++
+      if (!(at in slots)) {
+        slots[at] = { kind: 'state', value: typeof initial === 'function' ? initial() : initial }
+      }
+      const slot = slots[at]
+      return [
+        slot.value,
+        (next) => {
+          const value = typeof next === 'function' ? next(slot.value) : next
+          if (Object.is(value, slot.value)) return
+          slot.value = value
+          rerender()
+        },
+      ]
+    },
+    useRef(initial) {
+      const at = cursor++
+      if (!(at in slots)) slots[at] = { kind: 'ref', ref: { current: initial } }
+      return slots[at].ref
+    },
+    useCallback(fn, deps) {
+      const at = cursor++
+      const slot = slots[at]
+      if (slot && slot.kind === 'callback' && sameDeps(slot.deps, deps)) return slot.fn
+      slots[at] = { kind: 'callback', fn, deps }
+      return fn
+    },
+    useEffect(fn, deps) {
+      const at = cursor++
+      const slot = slots[at]
+      if (slot && slot.kind === 'effect' && sameDeps(slot.deps, deps)) return
+      slots[at] = { kind: 'effect', deps }
+      pending.push({ at, fn })
+    },
+  }
+
+  const flush = () => {
+    let guard = 0
+    do {
+      dirty = false
+      cursor = 0
+      pending = []
+      rendering = true
+      tree = expand(root())
+      for (const effect of pending) {
+        const previous = cleanups[effect.at]
+        if (typeof previous === 'function') previous()
+        const cleanup = effect.fn()
+        cleanups[effect.at] = typeof cleanup === 'function' ? cleanup : undefined
+      }
+      rendering = false
+      guard += 1
+      if (guard > 20) throw new Error('the harness re-rendered too many times')
+    } while (dirty)
+    return tree
+  }
+
+  const rerender = () => {
+    if (rendering) {
+      dirty = true
+      return
+    }
+    flush()
+  }
+
+  // The Host's read-only routes, keyed by the path the page asks for.
+  const routes = {
+    '/projects': { projects },
+    '/models': SAMPLE_MODELS,
+  }
+  if (detail) routes[`/projects/${detail.project.id}`] = detail
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const path = String(url).replace('/projects-api', '')
+    const body = routes[path]
+    if (body === undefined) return { ok: false, status: 404, json: async () => ({ error: 'not_found' }) }
+    return { ok: true, status: 200, json: async () => body }
+  }
+
+  const nodes = (from) => {
+    const out = []
+    const visit = (value) => {
+      for (const child of flatten([value])) {
+        if (child && typeof child === 'object') {
+          out.push(child)
+          visit(child.children)
+        }
+      }
+    }
+    visit(from === undefined ? tree : from)
+    return out
+  }
+
+  const textOf = (node) => {
+    if (node === null || node === undefined) return ''
+    if (typeof node === 'string') return node
+    if (typeof node === 'number') return String(node)
+    if (Array.isArray(node)) return node.map(textOf).join('')
+    if (typeof node !== 'object') return ''
+    return flatten(node.children).map(textOf).join('')
+  }
+
+  const byClass = (name, from) =>
+    nodes(from).filter((node) =>
+      String((node.props && node.props.className) || '')
+        .split(/\s+/)
+        .includes(name),
+    )
+  const byTag = (type, from) => nodes(from).filter((node) => node.type === type)
+  const byLabel = (label, from) =>
+    nodes(from).filter((node) => node.props && node.props['aria-label'] === label)
+  const byText = (text, from) =>
+    nodes(from).filter((node) => node.type === 'button' && textOf(node) === text)
+  const byDrag = (from) =>
+    nodes(from).filter((node) => node.props && node.props['data-window-drag'])
+
+  return {
+    mount(element) {
+      // The client destructured its hooks at factory time, so the swap has to
+      // happen behind the object it captured (`React` delegates here).
+      reactImpl = impl
+      root = () => element.type(element.props)
+      return flush()
+    },
+    /** Let the boot fetches and their effects settle. */
+    async settle() {
+      for (let turn = 0; turn < 4; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      return tree
+    },
+    unmount() {
+      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup()
+      cleanups.length = 0
+      globalThis.fetch = originalFetch
+      reactImpl = DEFAULT_REACT
+    },
+    tree: () => tree,
+    nodes,
+    textOf,
+    byClass,
+    byTag,
+    byLabel,
+    byText,
+    byDrag,
+    click(node) {
+      assert.equal(typeof node.props.onClick, 'function', 'the clicked node is a control')
+      node.props.onClick({ preventDefault() {}, stopPropagation() {} })
+    },
+  }
+}
+
+/** Mount the real page against the Host's stubbed routes. */
+async function mountPage(options) {
+  const { registrations } = applyWithFakes()
+  const main = registrations.find((entry) => entry.options.name === 'main')
+  const page = createPageHarness(options)
+  page.mount(main.component({}))
+  await page.settle()
+  return page
+}
+
+test('the workspace is a folder picker in both dialogs, never a text field', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  // New project: the plus glyph in the list head opens the dialog.
+  page.click(page.byLabel('新建项目')[0])
+  const created = page.byClass('pj-modal-dialog')[0]
+  assert.ok(created, 'the new-project dialog opened')
+  const createdField = page.byClass('pj-field', created).find((node) => page.textOf(node).startsWith('工作区'))
+  assert.ok(createdField, 'the dialog has a workspace field')
+  assert.equal(
+    page.nodes(createdField).filter((node) => node.type === 'input' || node.type === 'textarea').length,
+    0,
+    'the workspace has no text input',
+  )
+  const createdPath = page.byClass('pj-path', createdField)
+  assert.equal(createdPath.length, 1, 'the chosen path is shown read-only')
+  assert.equal(page.textOf(createdPath[0]), '未选择 —— 继承当前会话目录')
+  assert.equal(createdPath[0].props.title, '未选择 —— 继承当前会话目录')
+  assert.ok(
+    page.byText('选择…', createdField).length === 1,
+    'the picker is the only way to set the folder',
+  )
+  // No autonomy control and no duplicated effective-model line anywhere.
+  assert.equal(page.byTag('select', created).length, 0, 'the dialog has no picker left but the folder')
+  assert.equal(page.byLabel('自主程度', created).length, 0)
+  assert.doesNotMatch(page.textOf(created), /自主程度/)
+  assert.doesNotMatch(page.textOf(created), /生效模型/)
+  page.click(page.byText('取消', created)[0])
+
+  // Settings: the same read-only path, and the stored folder is what it shows.
+  page.click(page.byLabel('设置')[0])
+  const settings = page.byClass('pj-modal-dialog')[0]
+  assert.ok(settings, 'the settings dialog opened')
+  const settingsField = page
+    .byClass('pj-field', settings)
+    .find((node) => page.textOf(node).startsWith('工作区'))
+  assert.ok(settingsField, 'the settings dialog has a workspace field')
+  assert.equal(
+    page.nodes(settingsField).filter((node) => node.type === 'input' || node.type === 'textarea').length,
+    0,
+    'the workspace has no text input',
+  )
+  assert.equal(page.textOf(page.byClass('pj-path', settingsField)[0]), SAMPLE_PROJECT.workspace)
+  assert.ok(page.byText('选择文件夹', settingsField).length === 1)
+  assert.ok(page.byText('清除', settingsField).length === 1, 'a stored folder can be cleared')
+  // The autonomy picker is gone; the model and effort pickers remain.
+  assert.equal(page.byTag('select', settings).length, 2)
+  assert.equal(page.byLabel('自主程度', settings).length, 0)
+  assert.doesNotMatch(page.textOf(settings), /自主程度/)
+  // The "effective model: … · effort: …" line is gone: it repeated the two
+  // pickers directly below it.
+  for (const hint of page.byClass('pj-hint', settings)) {
+    assert.doesNotMatch(page.textOf(hint), /生效模型/, 'the duplicated default line is gone')
+  }
+})
+
+test('the settings memory is a section list whose rows open a preview dialog', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  const settings = page.byClass('pj-modal-dialog')[0]
+  const rows = page.byClass('pj-memory-row', settings)
+  assert.equal(rows.length, 2, 'one row per "## " section')
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), '项目背景（2026-11-16）')
+  assert.equal(
+    page.textOf(page.byClass('pj-memory-row-desc', rows[0])[0]),
+    '这个项目是 DSH 的项目看板插件。',
+  )
+  const meta = page.textOf(page.byClass('pj-memory-row-meta', rows[0])[0])
+  assert.match(meta, /字符/)
+  assert.match(meta, /2026-11-16/, 'the date in the title is shown')
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), '已知坑')
+
+  // The whole memory is no longer one textarea in the dialog.
+  assert.equal(page.byLabel('共享记忆').length, 0, 'no memory textarea in the settings dialog')
+
+  // A row opens a read-only preview of that section, stacked on the dialog.
+  page.click(rows[1])
+  const dialogs = page.byClass('pj-modal-dialog')
+  assert.equal(dialogs.length, 2, 'the preview stacks on the settings dialog')
+  const preview = dialogs[1]
+  assert.equal(page.textOf(page.byClass('pj-modal-title', preview)[0]), '已知坑')
+  const body = page.textOf(page.byClass('pj-memory-body', preview)[0])
+  assert.match(body, /不要碰 host\/index\.js/)
+  assert.match(body, /弹窗要能 Esc 关闭/)
+  assert.doesNotMatch(body, /项目背景/, 'the preview shows one section, not the file')
+
+  // Closing the preview leaves the settings dialog open.
+  page.click(page.byClass('pj-modal-close', preview)[0])
+  assert.equal(page.byClass('pj-modal-dialog').length, 1)
+
+  // Editing is still whole-file, behind one explicit entry point.
+  page.click(page.byText('编辑全文', settings)[0])
+  const editor = page.byClass('pj-modal-dialog')[1]
+  assert.ok(editor, 'the editor opened')
+  const textarea = page.byTag('textarea', editor).find((node) => node.props['aria-label'] === '共享记忆')
+  assert.ok(textarea, 'the editor is the whole memory')
+  assert.equal(textarea.props.value, SAMPLE_MEMORY)
+  assert.equal(page.byText('保存', editor)[0].props.disabled, true, 'nothing to save yet')
+})
+
+test('the page top is a window drag region, the way the Host marks its own', async (t) => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  // One drag row per column head: the page's whole top strip drags the window.
+  const heads = page.byDrag()
+  assert.deepEqual(
+    heads.map((node) => node.props.className),
+    ['pj-list-head', 'pj-main-head', 'pj-exec-head'],
+  )
+
+  // The mechanism is the Host frame's, not a private one: its stylesheet turns
+  // `data-window-drag` into a draggable region and excludes the buttons inside
+  // it, so the plugin declares the region and writes no region CSS of its own.
+  assert.doesNotMatch(source, /app-region\s*:/)
+  assert.match(source, /'data-window-drag': true/)
+  // The controls inside the region still click.
+  page.click(page.byLabel('设置')[0])
+  assert.equal(page.byClass('pj-modal-dialog').length, 1)
+})
+
+test('the two column heads share one height, and the search row clears the divider', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The Threads head is denser than the conversation head, so a bare 56px floor
+  // left its divider ~8px above the conversation's once the macOS top clearance
+  // was added to each. One floor for both, clearance included.
+  assert.match(
+    source,
+    /\.pj-main-head,\.pj-exec-head\{min-height:calc\(56px \+ var\(--dsh-frame-top-clearance, 0px\)\)\}/,
+  )
+  assert.doesNotMatch(source, /\.pj-main-head\{[^}]*min-height:56px/)
+  assert.doesNotMatch(source, /\.pj-exec-head\{[^}]*min-height:56px/)
+
+  // The search field is no longer flush against the head's bottom border.
+  assert.match(source, /\.pj-exec-tools\{[^}]*padding:12px 14px 10px\}/)
 })

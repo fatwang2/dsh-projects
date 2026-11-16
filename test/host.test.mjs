@@ -1088,6 +1088,153 @@ test('the dispatch guard admits 8 workers and refuses the ninth', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// Task dependencies. A task may declare the tasks it waits for; dispatch is the
+// gate, and "resolved" is the only dependency state that admits a worker —
+// "review" is not "done", because the human can still take the verdict back.
+
+test('depends_on is stored, deduplicated, and shown as a short count', async () => {
+  const projectId = await newProject('Dependency board')
+  assert.equal(tool('projects_add_task').parameters.properties.depends_on.type, 'array')
+  assert.equal(tool('projects_add_task').parameters.properties.depends_on.items.type, 'string')
+
+  const first = await call('projects_add_task', { project_id: projectId, title: 'First' })
+  const firstId = first.match(/t-[0-9a-f]{8}/)[0]
+  const second = await call('projects_add_task', {
+    project_id: projectId,
+    title: 'Second',
+    depends_on: [firstId, firstId, '  ', 7],
+  })
+  const secondId = second.match(/t-[0-9a-f]{8}/)[0]
+
+  // The store keeps ids only: duplicates, blanks and non-strings are dropped.
+  const stored = await storedProject(projectId)
+  assert.deepEqual(stored.tasks.find((task) => task.id === secondId).dependsOn, [firstId])
+  // A task without dependencies still carries the field as an empty array, so
+  // readers never have to handle "missing".
+  assert.deepEqual(stored.tasks.find((task) => task.id === firstId).dependsOn, [])
+
+  // The board line carries the count; the dispatch refusal names the ids.
+  const detail = await call('projects_get', { project_id: projectId })
+  assert.match(detail, new RegExp(`- ${secondId} \\[queued\\] deps: 1 Second`))
+  assert.doesNotMatch(detail, /deps: 0/)
+
+  // Over the ceiling fails at add time, loudly: a truncated list would silently
+  // reorder the board.
+  await assert.rejects(
+    call('projects_add_task', {
+      project_id: projectId,
+      title: 'Too many dependencies',
+      depends_on: Array.from({ length: 21 }, (_, index) => `t-${String(index).padStart(8, '0')}`),
+    }),
+    /too_many_dependencies: a task may depend on at most 20 tasks \(got 21\)/,
+  )
+})
+
+test('a three-task serial chain is refused until each dependency is resolved', async () => {
+  // concurrency 4: the fake worker never settles, and a resolved task with a
+  // live session still occupies its lane, so three admitted workers need three.
+  const projectId = await newProject('Serial chain', { concurrency: 4 })
+  const add = async (title, depends_on) => {
+    const added = await call('projects_add_task', {
+      project_id: projectId,
+      title,
+      ...(depends_on === undefined ? {} : { depends_on }),
+    })
+    return added.match(/t-[0-9a-f]{8}/)[0]
+  }
+  const firstId = await add('Stage one')
+  const secondId = await add('Stage two', [firstId])
+  const thirdId = await add('Stage three', [secondId])
+  const before = activations.length
+
+  // Stage one has no dependencies: it is admitted.
+  assert.match(await call('projects_dispatch', { project_id: projectId, task_id: firstId }), /Dispatched task/)
+  assert.equal(activations.length, before + 1)
+
+  // Stage two names the one task it waits for, with the state that blocks it.
+  const waitingForFirst = await call('projects_dispatch', { project_id: projectId, task_id: secondId })
+  assert.match(waitingForFirst, /waiting on 1 unresolved dependency/)
+  assert.match(waitingForFirst, new RegExp(`${firstId} \\[running\\]`))
+  assert.equal(activations.length, before + 1, 'a refused dispatch starts no worker')
+
+  // The human accepts stage one; stage two is admitted.
+  const acceptedFirst = await request('PATCH', `/projects-api/projects/${projectId}/tasks/${firstId}`, {
+    status: 'resolved',
+  })
+  assert.equal(acceptedFirst.status, 200)
+  assert.match(await call('projects_dispatch', { project_id: projectId, task_id: secondId }), /Dispatched task/)
+  assert.equal(activations.length, before + 2)
+
+  // Stage three is still blocked by stage two, which is running.
+  const waitingForSecond = await call('projects_dispatch', { project_id: projectId, task_id: thirdId })
+  assert.match(waitingForSecond, /waiting on 1 unresolved dependency/)
+  assert.match(waitingForSecond, new RegExp(`${secondId} \\[running\\]`))
+  assert.equal(activations.length, before + 2)
+
+  await request('PATCH', `/projects-api/projects/${projectId}/tasks/${secondId}`, { status: 'resolved' })
+  assert.match(await call('projects_dispatch', { project_id: projectId, task_id: thirdId }), /Dispatched task/)
+  assert.equal(activations.length, before + 3)
+})
+
+test('dispatch rejects an unknown dependency id instead of ignoring it', async () => {
+  const projectId = await newProject('Dangling dependency')
+  const added = await call('projects_add_task', {
+    project_id: projectId,
+    title: 'Waits for a ghost',
+    depends_on: ['t-deadbeef'],
+  })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  const before = activations.length
+  await assert.rejects(
+    call('projects_dispatch', { project_id: projectId, task_id: taskId }),
+    /depends on unknown task\(s\): t-deadbeef/,
+  )
+  assert.equal(activations.length, before)
+})
+
+test('dispatch rejects a task that lists itself as a dependency', async () => {
+  const projectId = await newProject('Self dependency')
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Waits for itself' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  // The tool generates the id, so a self-reference can only arrive through a
+  // hand-edited project.json; the gate must still refuse it.
+  const file = join(projectDirOf(projectId), 'project.json')
+  const stored = JSON.parse(await readFile(file, 'utf8'))
+  stored.tasks.find((task) => task.id === taskId).dependsOn = [taskId]
+  await writeFile(file, `${JSON.stringify(stored, null, 2)}\n`)
+
+  const before = activations.length
+  await assert.rejects(
+    call('projects_dispatch', { project_id: projectId, task_id: taskId }),
+    /lists itself in depends_on/,
+  )
+  assert.equal(activations.length, before)
+})
+
+test('dispatch rejects a dependency cycle, not just a self-reference', async () => {
+  const projectId = await newProject('Dependency cycle')
+  const first = await call('projects_add_task', { project_id: projectId, title: 'First half' })
+  const firstId = first.match(/t-[0-9a-f]{8}/)[0]
+  const second = await call('projects_add_task', {
+    project_id: projectId,
+    title: 'Second half',
+    depends_on: [firstId],
+  })
+  const secondId = second.match(/t-[0-9a-f]{8}/)[0]
+  const file = join(projectDirOf(projectId), 'project.json')
+  const stored = JSON.parse(await readFile(file, 'utf8'))
+  stored.tasks.find((task) => task.id === firstId).dependsOn = [secondId]
+  await writeFile(file, `${JSON.stringify(stored, null, 2)}\n`)
+
+  const before = activations.length
+  await assert.rejects(
+    call('projects_dispatch', { project_id: projectId, task_id: firstId }),
+    new RegExp(`dependency cycle \\(${firstId} → ${secondId} → ${firstId}\\)`),
+  )
+  assert.equal(activations.length, before)
+})
+
+// ---------------------------------------------------------------------------
 // Worker reasoning effort. Efforts are provider-owned opaque ids (the LLM layer
 // brands them `ReasoningEffortId` but has no global enum), so the host stores a
 // free string, resolves the task → project chain at dispatch, and publishes the

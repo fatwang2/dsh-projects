@@ -106,6 +106,12 @@ const MEMORY_SEARCH_LIMIT = 10
  */
 const MEMORY_STALE_MARKERS = ['[superseded]', '[archived]']
 const MAX_TASKS = 200
+/**
+ * How many task ids one task may depend on. A dependency list is a short
+ * ordering constraint, not a graph description: the cap keeps a pathological
+ * caller from growing project.json and keeps the board line readable.
+ */
+const MAX_DEPENDS_ON = 20
 const MAX_MODEL = 200
 const MAX_PRESET = 120
 const MAX_EFFORT = 60
@@ -360,6 +366,27 @@ async function writeFileAtomic(file, contents) {
 // ---------------------------------------------------------------------------
 // Store
 
+/**
+ * The stored dependency list: task ids only, in declaration order, deduplicated.
+ * A non-array (or an array of non-strings) normalizes to no dependencies, so a
+ * hand-edited project file cannot make dispatch crash on `undefined.includes`.
+ * A self-reference is kept on purpose: dispatch rejects it with an explanation
+ * instead of silently dropping the constraint that was written. The size ceiling
+ * is enforced by `addTask`, not here, so a list over it fails loudly instead of
+ * being truncated.
+ */
+function dependencyIds(value) {
+  if (!Array.isArray(value)) return []
+  const ids = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim()
+    if (!id || ids.includes(id)) continue
+    ids.push(id)
+  }
+  return ids
+}
+
 function normalizeTask(raw) {
   // Two legacy shapes collapse into the single status enum on read:
   //   - `status: 'done'`, the pre-status-only marker for "the human accepted it";
@@ -374,6 +401,10 @@ function normalizeTask(raw) {
     brief: text(raw.brief, MAX_BRIEF),
     status: accepted ? 'resolved' : STATUSES.includes(raw.status) ? raw.status : 'queued',
     approved: raw.approved === true,
+    // Task ids this task waits for. Dispatch refuses until every one is
+    // resolved; see `dependencyGate`. Always an array, so a caller never has to
+    // distinguish "no dependencies" from "field missing".
+    dependsOn: dependencyIds(raw.dependsOn),
     output: text(raw.output, MAX_OUTPUT),
     // Empty means "inherit the project default", which in turn may be empty and
     // mean "use the host default"; dispatch resolves the chain.
@@ -1686,12 +1717,22 @@ async function updateProject(id, patch) {
 async function addTask(id, input) {
   const project = await readProject(id)
   if (project.tasks.length >= MAX_TASKS) throw httpError(409, 'too_many_tasks')
+  // Normalized here as well as in `normalizeTask`, so the ceiling is enforced
+  // loudly: truncating a dependency list would silently reorder the board.
+  const dependsOn = dependencyIds(input?.dependsOn)
+  if (dependsOn.length > MAX_DEPENDS_ON) {
+    throw httpError(
+      400,
+      `too_many_dependencies: a task may depend on at most ${MAX_DEPENDS_ON} tasks (got ${dependsOn.length})`,
+    )
+  }
   const task = normalizeTask({
     id: newId('t'),
     title: input?.title,
     brief: input?.brief,
     status: 'queued',
     approved: input?.approved === true,
+    dependsOn,
     model: input?.model,
     agentPreset: input?.agentPreset,
     reasoningEffort: input?.reasoningEffort,
@@ -2470,6 +2511,67 @@ async function continueTask(ctx, exec, project, task, note) {
   }
 }
 
+/**
+ * The dependency gate dispatch runs before it starts a worker.
+ *
+ * A task may declare `dependsOn`; every dependency must be *resolved* first.
+ * "Review" is not "done": a worker that starts on an unaccepted result builds on
+ * a verdict the human may still take back, and the whole point of a dependency
+ * is that the next stage starts from settled work.
+ *
+ * Three failures are distinguished because they need different answers:
+ *   - an unknown id is a typo or a deleted task — an error, never silently
+ *     ignored, because dropping it would run the task out of order;
+ *   - a cycle (including a self-reference) can never become resolved — an error;
+ *   - an existing dependency that is not resolved yet is a refusal that names
+ *     each one with its status, so the coordinator knows exactly what to wait for.
+ */
+function dependencyGate(project, task) {
+  const byId = new Map(project.tasks.map((candidate) => [candidate.id, candidate]))
+  const missing = []
+  const unresolved = []
+  for (const id of task.dependsOn) {
+    const dependency = byId.get(id)
+    if (!dependency) missing.push(id)
+    else if (dependency.status !== 'resolved') unresolved.push(dependency)
+  }
+  return {
+    self: task.dependsOn.includes(task.id),
+    missing,
+    unresolved,
+    cycle: dependencyCycle(task, byId),
+  }
+}
+
+/**
+ * The first cycle reachable from `task` through `dependsOn`, as the ids on it
+ * (`a → b → a`), or null. Depth-first with the current path: reaching a node
+ * already on the path is a back edge, i.e. a cycle. Unknown ids are skipped here
+ * — `dependencyGate` reports them separately, and a missing node cannot be part
+ * of a cycle. A self-dependency falls out of the same walk, but the gate checks
+ * it first so the message can say "lists itself" instead of `a → a`.
+ */
+function dependencyCycle(task, byId) {
+  const path = []
+  const settled = new Set()
+  const walk = (current) => {
+    const at = path.indexOf(current.id)
+    if (at !== -1) return [...path.slice(at), current.id]
+    if (settled.has(current.id)) return null
+    path.push(current.id)
+    for (const id of current.dependsOn) {
+      const next = byId.get(id)
+      if (!next) continue
+      const cycle = walk(next)
+      if (cycle) return cycle
+    }
+    path.pop()
+    settled.add(current.id)
+    return null
+  }
+  return walk(task)
+}
+
 async function dispatchTask(ctx, exec, projectId, taskId, note = '') {
   const subagents = ctx.get('subagents')
   if (!subagents) throw new Error('The subagent service is unavailable in this profile, so no worker can start.')
@@ -2486,6 +2588,38 @@ async function dispatchTask(ctx, exec, projectId, taskId, note = '') {
   // same two-step the page uses to un-accept a task.
   if (task.status === 'resolved') {
     return `Task ${task.id} is resolved. Send it back to review (projects_update_task status "review") before dispatching it again.`
+  }
+  // Dependencies are a hard precondition: a worker must not start on work whose
+  // inputs the human has not accepted yet. Unknown ids and cycles are errors
+  // (they can never clear on their own); unresolved dependencies are a refusal
+  // that names the blockers, because "not yet" is a normal state to wait out.
+  if (task.dependsOn.length > 0) {
+    const gate = dependencyGate(project, task)
+    if (gate.self) {
+      throw new Error(
+        `Task ${task.id} lists itself in depends_on, so it can never be dispatched. `
+        + 'A dependency must be another task on the board.',
+      )
+    }
+    if (gate.cycle) {
+      throw new Error(
+        `Task ${task.id} is part of a dependency cycle (${gate.cycle.join(' → ')}), so it can never be dispatched. `
+        + 'A dependency graph must be acyclic.',
+      )
+    }
+    if (gate.missing.length > 0) {
+      throw new Error(
+        `Task ${task.id} depends on unknown task(s): ${gate.missing.join(', ')}. `
+        + 'A dependency id must name a task on this board; an unknown id is never ignored.',
+      )
+    }
+    if (gate.unresolved.length > 0) {
+      const blockers = gate.unresolved
+        .map((dependency) => `${dependency.id} [${dependency.status}]`)
+        .join(', ')
+      return `Task ${task.id} is waiting on ${gate.unresolved.length} unresolved dependency(ies): ${blockers}. `
+        + 'Dispatch it after the human resolves every dependency (status "resolved").'
+    }
   }
   if (project.autonomy === 'manual' && !task.approved) {
     return `Task ${task.id} needs human approval first: project autonomy is "manual". Ask the user to approve it on the Projects page, then call projects_dispatch again.`
@@ -3123,6 +3257,10 @@ function formatProject(project, memoryFiles, options = {}) {
     const model = task.model ? ` model=${task.model}` : ''
     const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
     const preset = task.agentPreset ? ` preset=${task.agentPreset}` : ''
+    // A short count, not the ids: the dispatch refusal names the blockers, and a
+    // board line has to stay one line. Zero dependencies prints nothing, so a
+    // board that never used them reads exactly as it did before.
+    const deps = task.dependsOn.length > 0 ? ` deps: ${task.dependsOn.length}` : ''
     // The retained checkout (or the reason isolation was not applied) is part of
     // the task's state a coordinator needs before re-dispatching or merging.
     const worktree = task.worktreePath
@@ -3131,7 +3269,7 @@ function formatProject(project, memoryFiles, options = {}) {
         ? ` worktree=off(${task.worktreeDegraded})`
         : ''
     lines.push(
-      `- ${task.id} [${task.status}]${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset}${worktree} ${task.title}`,
+      `- ${task.id} [${task.status}]${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset}${deps}${worktree} ${task.title}`,
     )
     if (task.worktreeNote) lines.push(`    worktree: ${task.worktreeNote}`)
     if (task.output) lines.push(`    output: ${task.output.replace(/\n+/g, ' ').slice(0, 300)}`)
@@ -3329,6 +3467,12 @@ function registerTools(ctx) {
           type: 'boolean',
           description: 'Only for autonomy=manual: mark it approved when the user already approved it in this conversation.',
         },
+        depends_on: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            `Task ids this task depends on, at most ${MAX_DEPENDS_ON}. Dispatch is refused until every one is resolved (accepted by the human); an unknown id is an error at dispatch. Omit for no dependencies.`,
+        },
         model: {
           type: 'string',
           description:
@@ -3349,7 +3493,11 @@ function registerTools(ctx) {
     },
     output: TEXT_OUTPUT,
     execute: async (args) => {
-      const { task } = await addTask(String(args?.project_id || ''), args)
+      // The tool speaks snake_case; the store speaks camelCase.
+      const { task } = await addTask(String(args?.project_id || ''), {
+        ...args,
+        dependsOn: args?.depends_on,
+      })
       return `Added task ${task.id} "${task.title}" to project ${args.project_id} (status queued).`
     },
   })
@@ -3505,7 +3653,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_dispatch',
     description:
-      'Dispatch one task to a worker subagent. A task that already has a worker session is continued in that same session — the follow-up message keeps its context and the task keeps its id; a task that never ran gets a fresh worker with the project instructions, an index of the shared memory and the task brief. Either way the worker reports its final message back onto the task, in the project workspace (or in its own git worktree when worktreeIsolation is on). Returns immediately: the coordinator stays free.',
+      'Dispatch one task to a worker subagent. A task that already has a worker session is continued in that same session — the follow-up message keeps its context and the task keeps its id; a task that never ran gets a fresh worker with the project instructions, an index of the shared memory and the task brief. Either way the worker reports its final message back onto the task, in the project workspace (or in its own git worktree when worktreeIsolation is on). A task whose depends_on list is not fully resolved is refused, and the refusal names the blockers. Returns immediately: the coordinator stays free.',
     parameters: {
       type: 'object',
       properties: {

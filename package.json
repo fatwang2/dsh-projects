@@ -1,10 +1,12 @@
 {
   "name": "@fatwang2/dsh-projects",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Project board for DeepSeek Harness: one goal, shared memory, and parallel worker agents.",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": "./host/index.js",
     "./client": "./client/index.js",

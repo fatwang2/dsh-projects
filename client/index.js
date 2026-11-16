@@ -74,8 +74,8 @@ window.__ModuleLoader__.load({
       memoryStale: 'superseded',
       memorySections: 'sections',
       save: 'Save',
-      policy: 'Dispatch policy',
-      concurrency: 'Parallel workers',
+      concurrency: 'Concurrency',
+      concurrencyHint: 'How many threads run at once.',
       workspace: 'Workspace',
       emptyTasks: 'No tasks yet. Ask the coordinator in the conversation to split the goal.',
       approve: 'Approve',
@@ -212,8 +212,8 @@ window.__ModuleLoader__.load({
       memoryStale: '已过时',
       memorySections: '节',
       save: '保存',
-      policy: '派发策略',
-      concurrency: '并行执行者',
+      concurrency: '并发',
+      concurrencyHint: '同时运行的线程数。',
       workspace: '工作区',
       emptyTasks: '还没有任务。在对话里让协调者拆解目标，任务由它派生。',
       approve: '批准',
@@ -2969,9 +2969,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
         { id: 'memory', label: t('memory'), icon: h(MemoryIcon, { size: 16 }) },
       ]
 
-      // The general group: the project's name, its instructions, the dispatch
-      // policy (the chosen workspace and how many threads run at once), the
-      // threads' defaults, and the archive action last.
+      // The general group: the project's name, its instructions, the workspace,
+      // the threads' defaults (how many run at once, their model and effort),
+      // and the archive action last.
       const renderGeneralSettings = () =>
         h(
           'div',
@@ -3029,49 +3029,73 @@ ${SHARED_CSS}${DISPATCH_RULES}
           h(
             'div',
             { className: 'pj-section' },
-            h('div', { className: 'pj-section-head' }, h('h2', { className: 'pj-section-title' }, t('policy'))),
+            h('div', { className: 'pj-section-head' }, h('h2', { className: 'pj-section-title' }, t('workspace'))),
+            // The workspace is chosen, never typed: the picker writes the path
+            // and this section only shows it. It is the only setting here — the
+            // concurrency cap belongs to the threads, not to the folder.
             h(
               'div',
-              { className: 'pj-row' },
-              // The workspace is chosen, never typed: the picker writes the path
-              // and this line only shows it.
+              { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
               h(
                 'div',
-                { className: 'pj-field pj-grow' },
-                h('span', { className: 'pj-label' }, t('workspace')),
-                h(
-                  'div',
-                  { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
-                  h(
-                    'div',
-                    {
-                      className: `pj-path pj-grow${project.workspace ? '' : ' pj-path-empty'}`,
-                      title: project.workspace || t('noWorkspace'),
-                    },
-                    h('span', { className: 'pj-path-text' }, project.workspace || t('noWorkspace')),
-                  ),
-                  h(
-                    'button',
-                    { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseWorkspace },
-                    t('chooseFolder'),
-                  ),
-                  project.workspace &&
-                    h(
-                      'button',
-                      {
-                        className: 'pj-btn pj-btn-ghost',
-                        type: 'button',
-                        disabled: busy,
-                        onClick: clearWorkspace,
-                      },
-                      t('clear'),
-                    ),
-                ),
+                {
+                  className: `pj-path pj-grow${project.workspace ? '' : ' pj-path-empty'}`,
+                  title: project.workspace || t('noWorkspace'),
+                },
+                h('span', { className: 'pj-path-text' }, project.workspace || t('noWorkspace')),
               ),
               h(
-                'label',
-                { className: 'pj-field' },
-                h('span', { className: 'pj-label' }, t('concurrency')),
+                'button',
+                { className: 'pj-btn', type: 'button', disabled: busy, onClick: chooseWorkspace },
+                t('chooseFolder'),
+              ),
+              project.workspace &&
+                h(
+                  'button',
+                  {
+                    className: 'pj-btn pj-btn-ghost',
+                    type: 'button',
+                    disabled: busy,
+                    onClick: clearWorkspace,
+                  },
+                  t('clear'),
+                ),
+            ),
+          ),
+          // The threads' defaults, then the archive action at the very end.
+          renderThreadsSection(),
+          renderArchiveSection(),
+        )
+
+      // The threads section: how many threads this project runs at once, and
+      // their default model and reasoning effort. All three are thread
+      // settings, so they live together — the workspace section above owns the
+      // folder only. The coordinator Session itself has no model or effort of
+      // its own — it follows the host default — so there is no separate
+      // Coordinator section.
+      const renderThreadsSection = () =>
+        h(
+          'div',
+          { className: 'pj-section' },
+          h(
+            'div',
+            { className: 'pj-section-head' },
+            h('h2', { className: 'pj-section-title' }, t('threads')),
+          ),
+          h('div', { className: 'pj-hint' }, t('threadsHint')),
+          h(
+            'div',
+            { className: 'pj-row' },
+            // The cap the Host enforces on this project's parallel threads. It
+            // sits on its own line so the short hint stays beside the input
+            // instead of pushing the two pickers onto a second row.
+            h(
+              'label',
+              { className: 'pj-field' },
+              h('span', { className: 'pj-label' }, t('concurrency')),
+              h(
+                'div',
+                { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
                 h('input', {
                   className: 'pj-input',
                   'aria-label': t('concurrency'),
@@ -3088,28 +3112,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
                     }
                   },
                 }),
+                h('span', { className: 'pj-hint' }, t('concurrencyHint')),
               ),
             ),
           ),
-          // The threads' defaults, then the archive action at the very end.
-          renderThreadsSection(),
-          renderArchiveSection(),
-        )
-
-      // The threads section: the default model and reasoning effort of every
-      // thread this project dispatches. The coordinator Session itself has no
-      // model or effort of its own — it follows the host default — so there is
-      // no separate Coordinator section.
-      const renderThreadsSection = () =>
-        h(
-          'div',
-          { className: 'pj-section' },
-          h(
-            'div',
-            { className: 'pj-section-head' },
-            h('h2', { className: 'pj-section-title' }, t('threads')),
-          ),
-          h('div', { className: 'pj-hint' }, t('threadsHint')),
           h(
             'div',
             { className: 'pj-row' },
@@ -4249,23 +4255,28 @@ ${SHARED_CSS}${DISPATCH_RULES}
             ),
             h(
               'div',
-              { key: 'policy', className: 'pj-row' },
+              { key: 'concurrency', className: 'pj-row' },
               h(
                 'label',
                 { className: 'pj-field' },
                 h('span', { className: 'pj-label' }, t('concurrency')),
-                h('input', {
-                  className: 'pj-input',
-                  'aria-label': t('concurrency'),
-                  type: 'number',
-                  min: 1,
-                  max: 8,
-                  value: newProject.concurrency,
-                  disabled: busy,
-                  style: { width: '88px' },
-                  onChange: (event) =>
-                    setNewProject({ ...newProject, concurrency: event.target.value }),
-                }),
+                h(
+                  'div',
+                  { className: 'pj-row', style: { flexWrap: 'nowrap', gap: '8px' } },
+                  h('input', {
+                    className: 'pj-input',
+                    'aria-label': t('concurrency'),
+                    type: 'number',
+                    min: 1,
+                    max: 8,
+                    value: newProject.concurrency,
+                    disabled: busy,
+                    style: { width: '88px' },
+                    onChange: (event) =>
+                      setNewProject({ ...newProject, concurrency: event.target.value }),
+                  }),
+                  h('span', { className: 'pj-hint' }, t('concurrencyHint')),
+                ),
               ),
             ),
           ],

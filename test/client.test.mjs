@@ -1279,16 +1279,22 @@ test('the threads head is glyphs, and the fold-all action lives in the filter', 
 
 test('the concurrency input follows the Host ceiling of eight', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
-  // The concurrency field is the general group's last policy row, before the
-  // threads section.
+  // The cap is a thread setting now: it lives in the threads section, ahead of
+  // the model and effort pickers, and no longer beside the workspace.
   const general = source.slice(
     source.indexOf('const renderGeneralSettings'),
     source.indexOf('const renderThreadsSection'),
   )
-  const input = general.slice(
-    general.indexOf("t('concurrency')"),
-    general.indexOf('renderThreadsSection()'),
+  assert.equal(general.includes("t('concurrency')"), false, 'the workspace section no longer owns the cap')
+  const threads = source.slice(
+    source.indexOf('const renderThreadsSection'),
+    source.indexOf('const renderMemorySettings'),
   )
+  const at = threads.indexOf("t('concurrency')")
+  assert.ok(at > 0, 'the threads section owns the cap')
+  assert.ok(at < threads.indexOf("t('model')"), 'the cap comes before the model picker')
+  assert.ok(threads.indexOf("t('model')") < threads.indexOf("t('reasoningEffort')"))
+  const input = threads.slice(at, threads.indexOf("t('model')"))
   assert.match(input, /max: 8,/)
   assert.doesNotMatch(source, /max: 10,/)
 })
@@ -2252,9 +2258,9 @@ test('the workspace is a folder picker in both dialogs, never a text field', asy
   const options = page.byClass('pj-settings-options', settings)[0]
   assert.ok(options, 'the settings panel has an options column')
   const settingsField = page
-    .byClass('pj-field', options)
+    .byClass('pj-section', options)
     .find((node) => page.textOf(node).startsWith('工作区'))
-  assert.ok(settingsField, 'the settings dialog has a workspace field')
+  assert.ok(settingsField, 'the settings dialog has a workspace section')
   assert.equal(
     page.nodes(settingsField).filter((node) => node.type === 'input' || node.type === 'textarea').length,
     0,
@@ -2263,6 +2269,8 @@ test('the workspace is a folder picker in both dialogs, never a text field', asy
   assert.equal(page.textOf(page.byClass('pj-path', settingsField)[0]), SAMPLE_PROJECT.workspace)
   assert.ok(page.byText('选择文件夹', settingsField).length === 1)
   assert.ok(page.byText('清除', settingsField).length === 1, 'a stored folder can be cleared')
+  // The section owns the folder only: the concurrency cap moved to the threads.
+  assert.equal(page.byLabel('并发', settingsField).length, 0)
   // The threads section lives in the same group now, so the general group owns
   // both pickers.
   assert.equal(page.byTag('select', options).length, 2)
@@ -2300,12 +2308,12 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(cells()[0].props['aria-current'], 'true')
   assert.equal(cells()[1].props['aria-current'], undefined)
 
-  // General: the project name, the instructions, the dispatch policy, the
-  // threads' defaults, and the archive action last. No memory row.
-  assert.deepEqual(titles(), ['项目', '项目指令', '派发策略', '线程', '归档项目'])
+  // General: the project name, the instructions, the workspace, the threads'
+  // defaults, and the archive action last. No memory row.
+  assert.deepEqual(titles(), ['项目', '项目指令', '工作区', '线程', '归档项目'])
   assert.equal(page.byLabel('项目名称', options()).length, 1)
   assert.equal(page.byLabel('项目指令', options()).length, 1)
-  assert.equal(page.byLabel('并行执行者', options()).length, 1)
+  assert.equal(page.byLabel('并发', options()).length, 1)
   assert.equal(page.byTag('select', options()).length, 2, 'the threads section owns the two pickers')
   assert.equal(page.byLabel('模型', options()).length, 1)
   assert.equal(page.byLabel('思考程度', options()).length, 1)
@@ -2319,12 +2327,32 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(page.textOf(page.byClass('pj-section-title', last)[0]), '归档项目')
   assert.equal(page.byText('归档', last).length, 1, 'the archive action closes the group')
 
-  // The model and effort pickers belong to the threads section, whose title is
-  // the Threads wording — not an "execution" group.
+  // The threads section owns three fields, in this order: the concurrency cap,
+  // the model and the effort. The cap is no longer a neighbour of the folder.
   const threadsSection = sections[3]
   assert.equal(page.textOf(page.byClass('pj-section-title', threadsSection)[0]), '线程')
+  assert.deepEqual(
+    page.byClass('pj-label', threadsSection).map((node) => page.textOf(node)),
+    ['并发', '模型', '思考程度'],
+  )
   assert.equal(page.byLabel('模型', threadsSection).length, 1)
   assert.equal(page.byLabel('思考程度', threadsSection).length, 1)
+  const cap = page.byLabel('并发', threadsSection)[0]
+  assert.equal(cap.props.type, 'number')
+  assert.equal(cap.props.max, 8)
+  assert.equal(cap.props.defaultValue, SAMPLE_PROJECT.concurrency)
+  // The short hint says what the number means: the threads running at once.
+  assert.ok(
+    page
+      .byClass('pj-hint', threadsSection)
+      .some((node) => page.textOf(node) === '同时运行的线程数。'),
+    'the cap carries its own hint',
+  )
+  // The workspace section holds the folder only: no cap beside it.
+  const workspaceSection = sections[2]
+  assert.equal(page.textOf(page.byClass('pj-section-title', workspaceSection)[0]), '工作区')
+  assert.equal(page.byLabel('并发', workspaceSection).length, 0)
+  assert.equal(page.byTag('input', workspaceSection).length, 0)
 
   // There is no Coordinator section: the coordinator Session has no model or
   // effort of its own, so only the threads' defaults are configurable here.
@@ -2582,7 +2610,17 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   // The labels exist in both languages; the retired group keys are gone.
   const { dictionaries } = applyWithFakes()
   const { en, zh } = dictionaries[0].dicts
-  for (const key of ['general', 'project', 'settingsNav', 'threads', 'threadsHint', 'archiveSection']) {
+  for (const key of [
+    'general',
+    'project',
+    'settingsNav',
+    'threads',
+    'threadsHint',
+    'concurrency',
+    'concurrencyHint',
+    'workspace',
+    'archiveSection',
+  ]) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
   }
@@ -2591,6 +2629,18 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   assert.equal(zh.threads, '线程')
   assert.equal(en.threads, 'Threads')
   assert.equal(zh.archiveSection, '归档项目')
+  // The concurrency cap is a thread setting, and its label says so plainly: the
+  // old "parallel workers" wording is gone from both dictionaries and the file.
+  assert.equal(zh.concurrency, '并发')
+  assert.equal(en.concurrency, 'Concurrency')
+  assert.match(zh.concurrencyHint, /同时运行的线程数/)
+  assert.match(en.concurrencyHint, /threads? run at once/)
+  assert.doesNotMatch(source, /并行执行者|Parallel workers/)
+  // The workspace section replaced the "dispatch policy" heading: the cap left
+  // it, so the heading names the one setting it still owns.
+  assert.equal(en.policy, undefined, 'EN still carries the retired policy heading')
+  assert.equal(zh.policy, undefined, 'ZH still carries the retired policy heading')
+  assert.doesNotMatch(source, /t\('policy'\)/)
   // The threads hint says the coordinator follows the host default: the page has
   // no coordinator model or effort to configure, which is why the group has no
   // Coordinator section.

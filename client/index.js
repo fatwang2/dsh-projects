@@ -68,11 +68,18 @@ window.__ModuleLoader__.load({
       memoryHint: 'Every worker reads this before starting and can append findings to it.',
       memoryPlaceholder: 'Findings, decisions, codebase knowledge…',
       memoryEmpty: 'The shared memory is empty.',
-      memoryEdit: 'Edit all',
-      memoryPreamble: 'Preamble',
+      memoryFiles: 'files',
       memoryChars: 'chars',
       memoryStale: 'superseded',
-      memorySections: 'sections',
+      memoryArchived: 'Archived',
+      memoryArchivedHint:
+        'Compaction moved this file out of the live memory. It stays in memory/archive/ and is read-only here.',
+      memoryLoading: 'Loading…',
+      memoryLoadFailed: 'The memory file could not be read:',
+      memoryBody: 'Memory file text',
+      memoryEditFile: 'Edit file',
+      memoryDeleteFile: 'Delete file',
+      memoryDeleted: 'Memory file deleted.',
       save: 'Save',
       concurrency: 'Concurrency',
       concurrencyHint: 'How many threads run at once.',
@@ -205,11 +212,17 @@ window.__ModuleLoader__.load({
       memoryHint: '每个执行者开始前都会读它，也可以把结论追加进来。',
       memoryPlaceholder: '结论、决策、对代码库的了解……',
       memoryEmpty: '共享记忆还是空的。',
-      memoryEdit: '编辑全文',
-      memoryPreamble: '前言',
+      memoryFiles: '个文件',
       memoryChars: '字符',
       memoryStale: '已过时',
-      memorySections: '节',
+      memoryArchived: '已归档',
+      memoryArchivedHint: '自动压缩已把这个文件移出活动记忆：它保留在 memory/archive/ 里，在这里只能查看。',
+      memoryLoading: '读取中…',
+      memoryLoadFailed: '读取记忆文件失败：',
+      memoryBody: '记忆正文',
+      memoryEditFile: '编辑文件',
+      memoryDeleteFile: '删除文件',
+      memoryDeleted: '记忆文件已删除。',
       save: '保存',
       concurrency: '并发',
       concurrencyHint: '同时运行的线程数。',
@@ -316,8 +329,8 @@ window.__ModuleLoader__.load({
 .pj-thread-review{color:var(--dsw-alias-state-success-primary)}
 .pj-thread-waiting{color:var(--dsw-alias-state-warn-primary)}
 .pj-thread-idle{color:var(--dsw-alias-label-tertiary)}
-.pj-thread-spinner{width:12px;height:12px;box-sizing:border-box;border-radius:999px;border:2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 25%, transparent);border-top-color:var(--dsw-alias-state-business-primary);animation:pj-spin .9s linear infinite}
-.pj-thread-idle-dot{width:10px;height:10px;box-sizing:border-box;border-radius:999px;border:1.5px dashed currentColor}
+.pj-thread-resolved{color:var(--dsw-alias-label-secondary)}
+.pj-thread-spinner{animation:pj-spin .9s linear infinite;transform-origin:center}
 @keyframes pj-spin{to{transform:rotate(360deg)}}
 .pj-chip{display:inline-flex;align-items:center;max-width:100%;height:18px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pj-pill{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
@@ -524,19 +537,33 @@ window.__ModuleLoader__.load({
 .pj-path{display:flex;align-items:center;min-width:0;height:34px;padding:0 12px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
 .pj-path.pj-path-empty{color:var(--dsw-alias-label-tertiary)}
 .pj-path-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The memory is a file list, not one textarea: one row per "## " section with
-   its title, one-line description, size and date, and the body opens in a
-   dialog. */
+/* The memory is a file list, not one textarea: one row per topic file with its
+   name, one-line description, size and modified date. The row opens the body in
+   a dialog; the row's own actions edit or delete that one file. */
 .pj-memory-list{display:flex;flex-direction:column;gap:2px;margin-top:2px}
-.pj-memory-row{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 10px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
-.pj-memory-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-memory-row{display:flex;align-items:flex-start;gap:8px;width:100%;padding:8px 10px;border-radius:var(--dsw-radius-sm)}
+.pj-memory-row:hover,.pj-memory-row:focus-within{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-memory-open{display:flex;flex:1 1 auto;flex-direction:column;gap:2px;min-width:0;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
 .pj-memory-row-head{display:flex;align-items:center;gap:8px;min-width:0}
 .pj-memory-row-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary)}
 .pj-memory-row-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .pj-memory-row-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+/* The row's actions sit in the trailing gutter and surface on hover or keyboard
+   focus, so the list reads as a list of files rather than a toolbar. An armed
+   row keeps them visible: the second press is the destructive one. */
+.pj-memory-row-actions{display:flex;flex:none;align-items:center;gap:4px;opacity:0;transition:opacity .12s}
+.pj-memory-row:hover .pj-memory-row-actions,.pj-memory-row:focus-within .pj-memory-row-actions,.pj-memory-row.pj-armed .pj-memory-row-actions{opacity:1}
+/* A touch device has no hover to reveal them, so they stay out. */
+@media (hover: none){.pj-memory-row-actions{opacity:1}}
+.pj-memory-row.pj-archived .pj-memory-open{cursor:default}
 .pj-memory-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-primary)}
-/* The memory group's own tally: the section count and the file size, on the
-   same muted line as a row's meta. */
+/* A dialog's meta line: the size and date of the one file it shows, plus the
+   archived badge when the Host reported the file as moved out of the memory. */
+.pj-memory-preview-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px}
+.pj-memory-preview-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary);white-space:pre-wrap;overflow-wrap:anywhere}
+.pj-memory-error{font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}
+/* The memory group's own tally: the file count and the total size, on the same
+   muted line as a row's meta. */
 .pj-memory-tally{margin:0 0 4px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 /* A thread card: icon in the gutter, then a title line, a one-line summary and
    optional chips. Two rows plus chips, and no controls at all — every action
@@ -816,7 +843,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
       { key: 'review', icon: 'review', titleKey: 'groupReview', statuses: ['review'] },
       { key: 'waiting', icon: 'waiting', titleKey: 'groupWaiting', statuses: ['blocked', 'failed'] },
       { key: 'idle', icon: 'idle', titleKey: 'groupIdle', statuses: ['queued'] },
-      { key: 'resolved', icon: 'none', titleKey: 'groupResolved', statuses: ['resolved'] },
+      { key: 'resolved', icon: 'resolved', titleKey: 'groupResolved', statuses: ['resolved'] },
     ]
 
     /** The first non-empty line of a text, stripped of light markdown noise. */
@@ -1027,117 +1054,62 @@ ${SHARED_CSS}${DISPATCH_RULES}
     // ---------------------------------------------------------------------
     // Shared memory
     //
-    // The settings dialog lists the memory as files, not as one textarea. The
-    // Host splits the memory into `## ` sections for the index it injects into
-    // every worker prompt; the page mirrors that split, so a row the list shows
-    // is exactly the section `projects_memory {action:"read"}` returns.
+    // The Host owns the memory: one markdown file per topic under
+    // `memory/<name>.md`, with a generated index. The project payload carries
+    // metadata only (`memory.files`: name, description, type, modified, size),
+    // so the page lists files and fetches one body from
+    // `GET /projects/:id/memory/:name` when a row opens. Editing is per file
+    // too: `POST /projects/:id/memory` takes that file's `name`.
 
-    /** The Host's cap on a one-line description (`MEMORY_DESCRIPTION_MAX`). */
-    const MEMORY_DESCRIPTION_MAX = 80
+    /** The memory's topic files from the project payload, never a body. */
+    function memoryFilesOf(memory) {
+      return memory && Array.isArray(memory.files) ? memory.files.filter(Boolean) : []
+    }
 
-    /** Titles that mark a section as history rather than current fact. */
-    const MEMORY_STALE_MARKERS = ['[superseded]', '[archived]']
-
-    /** The `YYYY-MM-DD` date a section title carries, or '' when it carries none. */
-    function memoryDate(title) {
-      const match = /\b(\d{4}-\d{2}-\d{2})\b/.exec(String(title ?? ''))
+    /** The `YYYY-MM-DD` date a `modified` timestamp carries, or ''. */
+    function memoryDateOf(modified) {
+      const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(modified ?? ''))
       return match ? match[1] : ''
     }
 
-    /** True for a section whose title marks it as history. */
-    function isStaleMemory(title) {
-      const lower = String(title ?? '').toLowerCase()
-      return MEMORY_STALE_MARKERS.some((marker) => lower.includes(marker))
+    /** A character count, rounded to `k` once it stops being readable. */
+    function memorySize(chars, t) {
+      const value = Number(chars) || 0
+      const text = value < 1000 ? String(value) : `${Math.round(value / 100) / 10}k`
+      return `${text} ${t('memoryChars')}`
     }
 
-    /** The list's one-line description: the first body line, markdown stripped. */
-    function memoryDescription(body) {
-      const plain = plainLine(body).replace(/\s+/g, ' ')
-      if (!plain) return ''
-      return plain.length > MEMORY_DESCRIPTION_MAX
-        ? `${plain.slice(0, MEMORY_DESCRIPTION_MAX).trimEnd()}…`
-        : plain
-    }
-
-    /**
-     * Split the memory into its `## ` sections, mirroring the Host's
-     * `memorySections`. The body is kept because the page previews it; the
-     * description, size and date are what the list shows without opening it.
-     */
-    function memorySections(memory) {
-      const sections = []
-      let current = null
-      for (const line of String(memory ?? '').split('\n')) {
-        if (line.startsWith('## ')) {
-          current = { title: line.slice(3).trim(), lines: [] }
-          sections.push(current)
-          continue
-        }
-        if (current) current.lines.push(line)
-      }
-      return sections.map((section) => {
-        const body = section.lines.join('\n').trim()
-        return {
-          title: section.title,
-          body,
-          chars: body.length,
-          description: memoryDescription(body),
-          date: memoryDate(section.title),
-          stale: isStaleMemory(section.title),
-        }
-      })
-    }
-
-    /** Everything before the first `## ` heading, or '' when it starts with one. */
-    function memoryPreamble(memory) {
-      const text = String(memory ?? '')
-      if (text.startsWith('## ')) return ''
-      const at = text.indexOf('\n## ')
-      return (at === -1 ? text : text.slice(0, at)).trim()
-    }
-
-    /**
-     * The rows the settings list shows: the preamble (if any) first, then every
-     * section. A memory with no headings still gets one row, so loose text can
-     * be read instead of rendering an empty list.
-     */
-    function memoryRows(memory, t) {
-      const rows = []
-      const preamble = memoryPreamble(memory)
-      if (preamble) {
-        rows.push({
-          key: 'preamble',
-          title: t('memoryPreamble'),
-          body: preamble,
-          chars: preamble.length,
-          description: memoryDescription(preamble),
-          date: '',
-          stale: false,
-        })
-      }
-      memorySections(memory).forEach((section, index) => {
-        rows.push({ key: `section:${index}`, ...section })
-      })
-      return rows
-    }
-
-    /** The size and date line under a memory row's title. */
-    function memoryMeta(row, t) {
-      const parts = [`${row.chars} ${t('memoryChars')}`]
-      if (row.date) parts.push(row.date)
+    /** The size and modified-date line under a file row's name. */
+    function memoryMeta(file, t) {
+      const parts = [memorySize(file && file.size, t)]
+      const date = memoryDateOf(file && file.modified)
+      if (date) parts.push(date)
       return parts.join(' · ')
     }
 
     /**
-     * The settings entry row's tally: how many `## ` sections the memory has
-     * and how big the file is. The count is the Host's own index count, not the
-     * page's row count (the preamble is a row but not a section), and a long
-     * file is rounded to `k` the way the index describes it.
+     * The settings entry row's tally: how many topic files the memory holds and
+     * how big they are together. `total` is the Host's own body-character count,
+     * so the page never re-adds the files it happens to list.
      */
-    function memorySummary(sections, memory, t) {
-      const chars = String(memory ?? '').length
-      const size = chars < 1000 ? String(chars) : `${Math.round(chars / 100) / 10}k`
-      return `${sections} ${t('memorySections')} · ${size} ${t('memoryChars')}`
+    function memorySummary(memory, t) {
+      const files = memoryFilesOf(memory)
+      const total = Number(memory && memory.total)
+      const chars = Number.isFinite(total)
+        ? total
+        : files.reduce((sum, file) => sum + (Number(file.size) || 0), 0)
+      return `${files.length} ${t('memoryFiles')} · ${memorySize(chars, t)}`
+    }
+
+    /**
+     * True for a file the Host reported as archived. The project payload lists
+     * the live memory only, so the single-file route is what reveals an archived
+     * file; the page remembers the names it was told about and marks the row.
+     */
+    function isArchivedMemory(file, archivedNames) {
+      if (!file) return false
+      if (file.archived === true) return true
+      return Array.isArray(archivedNames) && archivedNames.includes(file.name)
     }
 
     /**
@@ -1779,20 +1751,60 @@ ${SHARED_CSS}${DISPATCH_RULES}
       )
     }
 
+    // The Idle ring, dot by dot: eight dots on a 5.6 radius around the 16-grid
+    // centre. Drawn as separate dots rather than a dashed border so the ring
+    // keeps its rhythm at 14px instead of smearing into a solid stroke.
+    const IDLE_DOTS = [
+      [13.6, 8],
+      [11.96, 11.96],
+      [8, 13.6],
+      [4.04, 11.96],
+      [2.4, 8],
+      [4.04, 4.04],
+      [8, 2.4],
+      [11.96, 4.04],
+    ]
+
     /**
-     * The group glyph: spinner, eye, warning ring, dashed ring, none.
+     * The group glyph: open arc, radio ring, warning ring, dotted ring, filled
+     * check disc.
      *
-     * Ready-for-review is an eye, not a check: the work is finished but not
-     * accepted, so the glyph asks the human to look at it. A check would read
-     * as accepted work, which is Resolved's meaning. The almond outline is
-     * drawn from curves only — no straight stroke can be mistaken for a check —
-     * and the solid pupil keeps the eye legible at 14px.
+     * The five follow the reference Threads panel, and each silhouette is
+     * different on purpose: an open arc (Working, and it spins), a ring around
+     * a solid dot (Ready-for-review — the radio-button shape, because the work
+     * is finished but not accepted and so waits on a human pick), a ring around
+     * a bar (Waiting), a ring of dots (Idle), a filled disc with a knocked-out
+     * check (Resolved, the one glyph that means accepted). All five sit on the
+     * same 16 grid at the same stroke weight, so they read as one family at
+     * 14px; only the ink is drawn, and every colour is `currentColor` or a
+     * `--dsw-*` token, so the theme owns the palette.
      */
     function ThreadIcon({ kind }) {
       if (kind === 'spinner') {
-        return h('span', { className: 'pj-thread-icon pj-thread-spinner', 'aria-hidden': true })
+        // Three quarters of a circle, drawn from cubics only so the arc has no
+        // straight segment to catch the eye, and open at the top-left so the
+        // spin is visible.
+        return h(
+          'svg',
+          {
+            className: 'pj-thread-icon pj-thread-spinner',
+            width: 14,
+            height: 14,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': true,
+          },
+          h('path', {
+            d: 'M8 2.4C11.09 2.4 13.6 4.91 13.6 8C13.6 11.09 11.09 13.6 8 13.6C4.91 13.6 2.4 11.09 2.4 8',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+          }),
+        )
       }
       if (kind === 'review') {
+        // A radio button waiting to be picked: ring plus a solid centre dot,
+        // with the dot close enough to the ring to read as one control at 14px.
         return h(
           'svg',
           {
@@ -1803,14 +1815,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
             fill: 'none',
             'aria-hidden': true,
           },
-          h('path', {
-            d: 'M1.6 8c1.5-2.6 3.7-4 6.4-4c2.7 0 4.9 1.4 6.4 4c-1.5 2.6-3.7 4-6.4 4c-2.7 0-4.9-1.4-6.4-4',
-            stroke: 'currentColor',
-            strokeWidth: 1.6,
-            strokeLinecap: 'round',
-            strokeLinejoin: 'round',
-          }),
-          h('circle', { cx: 8, cy: 8, r: 1.9, fill: 'currentColor' }),
+          h('circle', { cx: 8, cy: 8, r: 5.6, stroke: 'currentColor', strokeWidth: 1.8 }),
+          h('circle', { cx: 8, cy: 8, r: 2.5, fill: 'currentColor' }),
         )
       }
       if (kind === 'waiting') {
@@ -1835,13 +1841,45 @@ ${SHARED_CSS}${DISPATCH_RULES}
         )
       }
       if (kind === 'idle') {
+        // A ring of dots: nothing is moving and nothing is asked of anyone.
         return h(
-          'span',
-          { className: 'pj-thread-icon pj-thread-idle', 'aria-hidden': true },
-          h('span', { className: 'pj-thread-idle-dot' }),
+          'svg',
+          {
+            className: 'pj-thread-icon pj-thread-idle',
+            width: 14,
+            height: 14,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': true,
+          },
+          IDLE_DOTS.map(([cx, cy]) =>
+            h('circle', { key: `${cx}:${cy}`, cx, cy, r: 1, fill: 'currentColor' }),
+          ),
         )
       }
-      // The Resolved group carries no glyph, per the reference panel.
+      if (kind === 'resolved') {
+        // A filled disc with the check knocked out of it in the surface colour,
+        // so the glyph reads as a stamp rather than as another ring.
+        return h(
+          'svg',
+          {
+            className: 'pj-thread-icon pj-thread-resolved',
+            width: 14,
+            height: 14,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': true,
+          },
+          h('circle', { cx: 8, cy: 8, r: 6.4, fill: 'currentColor' }),
+          h('path', {
+            d: 'M5 8.3L7.1 10.4L11.1 6.2',
+            stroke: 'var(--dsw-alias-bg-base)',
+            strokeWidth: 1.7,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        )
+      }
       return null
     }
 
@@ -1994,13 +2032,19 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const [notice, setNotice] = useState('')
       const [busy, setBusy] = useState(false)
       const [goalText, setGoalText] = useState('')
-      const [memoryText, setMemoryText] = useState('')
       const [goalDirty, setGoalDirty] = useState(false)
       const [memoryDirty, setMemoryDirty] = useState(false)
-      // The memory is a list of sections; one opens as a read-only preview and
-      // the whole file opens in an editor. Both are dialogs on top of settings.
+      // The memory is one file per topic: a row opens that file's body in a
+      // read-only preview, and the editor edits that one file and saves it by
+      // name. Both are dialogs on top of settings.
       const [memoryPreview, setMemoryPreview] = useState(null)
-      const [memoryEditorOpen, setMemoryEditorOpen] = useState(false)
+      const [memoryEditor, setMemoryEditor] = useState(null)
+      // Deleting one memory file is destructive, so the row arms it on the first
+      // press and only the second one deletes.
+      const [memoryDeleteArmed, setMemoryDeleteArmed] = useState('')
+      // The names the Host reported as archived. The project payload lists the
+      // live memory only, so a body fetched by name is what reveals one.
+      const [memoryArchivedNames, setMemoryArchivedNames] = useState([])
       // Both project-level surfaces are dialogs now: the list header carries a
       // plus glyph and the main header a gear, and neither takes a column.
       const [showNewProject, setShowNewProject] = useState(false)
@@ -2423,7 +2467,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setFilterOpen(false)
         setHiddenGroups({})
         setMemoryPreview(null)
-        setMemoryEditorOpen(false)
+        setMemoryEditor(null)
+        setMemoryDeleteArmed('')
+        setMemoryArchivedNames([])
         setSettingsGroup('general')
         setExecTarget((current) => (current ? null : current))
         setMenu(null)
@@ -2432,7 +2478,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
       useEffect(() => {
         if (!detail) return
         if (!goalDirtyRef.current) setGoalText(detail.project?.goal || '')
-        if (!memoryDirtyRef.current) setMemoryText(detail.memory || '')
       }, [detail])
 
       // A success notice is transient; an error stays until the next action.
@@ -2522,13 +2567,22 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setNewProject(BLANK_PROJECT)
       }
 
+      // Closing the editor drops the buffer and its dirty flag together: the
+      // switch-project guard must not keep asking about a dialog that is gone.
+      const closeMemoryEditor = () => {
+        memoryDirtyRef.current = false
+        setMemoryDirty(false)
+        setMemoryEditor(null)
+      }
+
       const openSettings = () => {
         setArchiveArmed(false)
         // The panel always opens on the first group, never on whatever group
         // the last visit ended on.
         setSettingsGroup('general')
         setMemoryPreview(null)
-        setMemoryEditorOpen(false)
+        closeMemoryEditor()
+        setMemoryDeleteArmed('')
         setShowSettings(true)
       }
 
@@ -2537,18 +2591,20 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const closeSettings = () => {
         setArchiveArmed(false)
         setMemoryPreview(null)
-        setMemoryEditorOpen(false)
+        closeMemoryEditor()
+        setMemoryDeleteArmed('')
         setSettingsGroup('general')
         setShowSettings(false)
       }
 
       // Switching groups only swaps the options column. The archive
-      // confirmation and the two memory dialogs belong to the group that opens
-      // them, so a switch disarms and closes them.
+      // confirmation, the armed memory delete and the two memory dialogs belong
+      // to the group that opens them, so a switch disarms and closes them.
       const selectSettingsGroup = (group) => {
         setArchiveArmed(false)
         setMemoryPreview(null)
-        setMemoryEditorOpen(false)
+        closeMemoryEditor()
+        setMemoryDeleteArmed('')
         setSettingsGroup(group)
       }
 
@@ -2595,17 +2651,105 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return t('saved')
         })
 
-      // The whole-memory editor saves the buffer and closes itself; the section
-      // list behind it then re-reads the refreshed memory.
+      // One memory file, fetched by name: the project payload carries metadata
+      // only. A stale answer for another file — or for a dialog that has since
+      // closed — is dropped instead of overwriting what is on screen.
+      const fetchMemoryFile = async (name) => {
+        if (!projectId || !name) return null
+        const data = await api(`/projects/${projectId}/memory/${encodeURIComponent(name)}`)
+        if (data && data.archived === true) {
+          setMemoryArchivedNames((names) => (names.includes(data.name) ? names : [...names, data.name]))
+        }
+        return data
+      }
+
+      const openMemoryPreview = (file) => {
+        if (!file || !projectId) return
+        setMemoryDeleteArmed('')
+        setMemoryPreview({ ...file, text: '', loading: true, error: '' })
+        void fetchMemoryFile(file.name)
+          .then((data) => {
+            if (!data) return
+            setMemoryPreview((current) =>
+              current && current.name === file.name
+                ? { ...current, ...data, loading: false, error: '' }
+                : current,
+            )
+          })
+          .catch((failure) => {
+            setMemoryPreview((current) =>
+              current && current.name === file.name
+                ? { ...current, loading: false, error: `${t('memoryLoadFailed')} ${messageOf(failure)}` }
+                : current,
+            )
+          })
+      }
+
+      const openMemoryEditor = (file) => {
+        if (!file || !projectId) return
+        memoryDirtyRef.current = false
+        setMemoryDirty(false)
+        setMemoryDeleteArmed('')
+        setMemoryEditor({
+          ...file,
+          description: file.description || '',
+          type: file.type || '',
+          text: '',
+          loading: true,
+          error: '',
+        })
+        void fetchMemoryFile(file.name)
+          .then((data) => {
+            if (!data) return
+            setMemoryEditor((current) =>
+              current && current.name === file.name
+                ? { ...current, ...data, loading: false, error: '' }
+                : current,
+            )
+          })
+          .catch((failure) => {
+            setMemoryEditor((current) =>
+              current && current.name === file.name
+                ? { ...current, loading: false, error: `${t('memoryLoadFailed')} ${messageOf(failure)}` }
+                : current,
+            )
+          })
+      }
+
+      // The per-file editor saves that one file. `name` is required by the Host
+      // (the old whole-memory `{ text }` save is a 400 now), and the description
+      // and type are carried through so a body edit never drops the metadata.
       const saveMemory = () =>
         run(async () => {
-          if (!projectId) return ''
-          await api(`/projects/${projectId}/memory`, { method: 'POST', body: JSON.stringify({ text: memoryText }) })
-          memoryDirtyRef.current = false
-          setMemoryDirty(false)
-          setMemoryEditorOpen(false)
+          if (!projectId || !memoryEditor) return ''
+          await api(`/projects/${projectId}/memory`, {
+            method: 'POST',
+            body: JSON.stringify({
+              name: memoryEditor.name,
+              description: memoryEditor.description || '',
+              type: memoryEditor.type || '',
+              text: memoryEditor.text,
+            }),
+          })
+          closeMemoryEditor()
           await refresh(projectId)
           return t('saved')
+        })
+
+      // Deleting one file is destructive, so the first press only arms the row
+      // and the second one deletes. The Host deletes live files only, which is
+      // why an archived row's actions are disabled.
+      const deleteMemoryFile = (file) =>
+        run(async () => {
+          if (!projectId || !file) return ''
+          if (memoryDeleteArmed !== file.name) {
+            setMemoryDeleteArmed(file.name)
+            return ''
+          }
+          setMemoryDeleteArmed('')
+          await api(`/projects/${projectId}/memory/${encodeURIComponent(file.name)}`, { method: 'DELETE' })
+          await refresh(projectId)
+          return t('memoryDeleted')
         })
 
       // The Host's own directory chooser: the same dialog the workspace picker
@@ -2951,12 +3095,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return t('coordinatorRestored')
         })
 
-      // The memory group's list reads the saved memory, not the editor's
-      // buffer: a row is a section the workers can actually read right now. The
-      // group's tally counts `## ` sections, the same number the Host's index
-      // reports.
-      const memoryList = memoryRows(detail?.memory || '', t)
-      const memorySectionCount = memorySections(detail?.memory || '').length
+      // The memory group's list reads the saved files, not the editor's buffer:
+      // a row is a file the workers can actually read right now. The Host sends
+      // metadata only, so a row's body is fetched when the row opens.
+      const memoryFiles = memoryFilesOf(detail?.memory)
 
       // The settings rail: one cell per group, each with the Host's 16px glyph.
       // Two groups only. The general group carries every project setting —
@@ -3200,9 +3342,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
           ),
         )
 
-      // The memory group: the section list and the whole-file editor, in the
-      // options column. A long memory scrolls here instead of pushing the other
-      // groups out of the dialog.
+      // The memory group: the file list, in the options column. A long memory
+      // scrolls here instead of pushing the other groups out of the dialog.
       const renderMemorySettings = () =>
         h(
           'div',
@@ -3214,24 +3355,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
               'div',
               { className: 'pj-section-head' },
               h('h2', { className: 'pj-section-title' }, t('memory')),
-              h(
-                'button',
-                {
-                  className: 'pj-btn',
-                  type: 'button',
-                  disabled: busy,
-                  'aria-haspopup': 'dialog',
-                  onClick: () => setMemoryEditorOpen(true),
-                },
-                t('memoryEdit'),
-              ),
             ),
             h('div', { className: 'pj-hint' }, t('memoryHint')),
-            h(
-              'div',
-              { className: 'pj-memory-tally' },
-              memorySummary(memorySectionCount, detail?.memory || '', t),
-            ),
+            h('div', { className: 'pj-memory-tally' }, memorySummary(detail?.memory, t)),
             renderMemoryList(),
           ),
         )
@@ -3310,35 +3436,105 @@ ${SHARED_CSS}${DISPATCH_RULES}
         return renderGeneralSettings()
       }
 
-      // The section list: one row per "## " section, the preamble first. A row
-      // opens the read-only preview; the whole file is still one textarea.
+      // The file list: one row per topic file. The row's body opens the
+      // read-only preview; its trailing actions edit or delete that one file.
+      // An archived file is marked and read-only here: the Host writes and
+      // deletes the live memory only.
       const renderMemoryList = () =>
-        memoryList.length === 0
+        memoryFiles.length === 0
           ? h('div', { className: 'pj-hint' }, t('memoryEmpty'))
           : h(
               'div',
               { className: 'pj-memory-list' },
-              memoryList.map((row) =>
-                h(
-                  'button',
+              memoryFiles.map((file) => {
+                const archived = isArchivedMemory(file, memoryArchivedNames)
+                const armed = memoryDeleteArmed === file.name
+                const readOnly = archived
+                return h(
+                  'div',
                   {
-                    key: row.key,
-                    className: 'pj-memory-row',
-                    type: 'button',
-                    title: row.description || row.title,
-                    'aria-haspopup': 'dialog',
-                    onClick: () => setMemoryPreview(row),
+                    key: file.name,
+                    className: `pj-memory-row${archived ? ' pj-archived' : ''}${armed ? ' pj-armed' : ''}`,
                   },
                   h(
-                    'span',
-                    { className: 'pj-memory-row-head' },
-                    h('span', { className: 'pj-memory-row-title' }, row.title),
-                    row.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
+                    'button',
+                    {
+                      className: 'pj-memory-open',
+                      type: 'button',
+                      title: file.description || file.name,
+                      'aria-haspopup': 'dialog',
+                      onClick: () => openMemoryPreview(file),
+                    },
+                    h(
+                      'span',
+                      { className: 'pj-memory-row-head' },
+                      h('span', { className: 'pj-memory-row-title' }, file.name),
+                      file.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
+                      archived && h('span', { className: 'pj-badge' }, t('memoryArchived')),
+                    ),
+                    file.description &&
+                      h('span', { className: 'pj-memory-row-desc' }, file.description),
+                    h('span', { className: 'pj-memory-row-meta' }, memoryMeta(file, t)),
                   ),
-                  row.description && h('span', { className: 'pj-memory-row-desc' }, row.description),
-                  h('span', { className: 'pj-memory-row-meta' }, memoryMeta(row, t)),
-                ),
-              ),
+                  h(
+                    'span',
+                    { className: 'pj-memory-row-actions' },
+                    armed
+                      ? [
+                          h(
+                            'button',
+                            {
+                              key: 'confirm',
+                              className: 'pj-btn pj-btn-danger-fill',
+                              type: 'button',
+                              disabled: busy,
+                              onClick: () => deleteMemoryFile(file),
+                            },
+                            t('deleteConfirm'),
+                          ),
+                          h(
+                            'button',
+                            {
+                              key: 'cancel',
+                              className: 'pj-btn pj-btn-ghost',
+                              type: 'button',
+                              disabled: busy,
+                              onClick: () => setMemoryDeleteArmed(''),
+                            },
+                            t('cancel'),
+                          ),
+                        ]
+                      : [
+                          h(
+                            'button',
+                            {
+                              key: 'edit',
+                              className: 'pj-btn',
+                              type: 'button',
+                              disabled: busy || readOnly,
+                              title: readOnly ? t('memoryArchivedHint') : t('memoryEditFile'),
+                              'aria-label': `${t('memoryEditFile')} ${file.name}`,
+                              onClick: () => openMemoryEditor(file),
+                            },
+                            t('memoryEditFile'),
+                          ),
+                          h(
+                            'button',
+                            {
+                              key: 'delete',
+                              className: 'pj-btn pj-btn-danger',
+                              type: 'button',
+                              disabled: busy || readOnly,
+                              title: readOnly ? t('memoryArchivedHint') : t('memoryDeleteFile'),
+                              'aria-label': `${t('memoryDeleteFile')} ${file.name}`,
+                              onClick: () => deleteMemoryFile(file),
+                            },
+                            t('memoryDeleteFile'),
+                          ),
+                        ],
+                  ),
+                )
+              }),
             )
 
       // The collapsed project column: a 44px rail that still shows every
@@ -4302,14 +4498,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
               ]
             : null,
         }),
-        // A memory section opens as a read-only preview on top of the settings
-        // panel, and the whole file opens in an editor. Both are dialogs, so
-        // each surface keeps one scroll source, and Escape closes only the top
-        // one (see `MODAL_LAYERS`).
+        // One memory file opens as a read-only preview on top of the settings
+        // panel; the same file opens in an editor. Both are dialogs, so each
+        // surface keeps one scroll source, and Escape closes only the top one
+        // (see `MODAL_LAYERS`).
         h(Modal, {
           open: Boolean(memoryPreview),
           titleId: 'pj-memory-preview-title',
-          title: memoryPreview ? memoryPreview.title : t('memory'),
+          title: memoryPreview ? memoryPreview.name : t('memory'),
           closeLabel: t('close'),
           onClose: () => setMemoryPreview(null),
           className: 'pj-modal-wide',
@@ -4317,19 +4513,28 @@ ${SHARED_CSS}${DISPATCH_RULES}
             ? [
                 h(
                   'div',
-                  { key: 'meta', className: 'pj-memory-row-meta' },
-                  memoryMeta(memoryPreview, t),
+                  { key: 'meta', className: 'pj-memory-preview-meta' },
+                  h('span', { className: 'pj-memory-row-meta' }, memoryMeta(memoryPreview, t)),
+                  memoryPreview.archived && h('span', { className: 'pj-badge' }, t('memoryArchived')),
                 ),
-                h('div', { key: 'body', className: 'pj-memory-body' }, memoryPreview.body),
+                memoryPreview.description &&
+                  h('div', { key: 'desc', className: 'pj-memory-preview-desc' }, memoryPreview.description),
+                memoryPreview.archived &&
+                  h('div', { key: 'archived', className: 'pj-hint' }, t('memoryArchivedHint')),
+                memoryPreview.loading
+                  ? h('div', { key: 'loading', className: 'pj-hint' }, t('memoryLoading'))
+                  : memoryPreview.error
+                    ? h('div', { key: 'error', className: 'pj-memory-error' }, memoryPreview.error)
+                    : h('div', { key: 'body', className: 'pj-memory-body' }, memoryPreview.text),
               ]
             : null,
         }),
         h(Modal, {
-          open: memoryEditorOpen,
+          open: Boolean(memoryEditor),
           titleId: 'pj-memory-editor-title',
-          title: t('memory'),
+          title: memoryEditor ? memoryEditor.name : t('memory'),
           closeLabel: t('close'),
-          onClose: () => setMemoryEditorOpen(false),
+          onClose: closeMemoryEditor,
           className: 'pj-modal-form',
           footer: [
             h(
@@ -4339,7 +4544,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
                 className: 'pj-btn pj-modal-action',
                 type: 'button',
                 disabled: busy,
-                onClick: () => setMemoryEditorOpen(false),
+                onClick: closeMemoryEditor,
               },
               t('cancel'),
             ),
@@ -4349,29 +4554,45 @@ ${SHARED_CSS}${DISPATCH_RULES}
                 key: 'save',
                 className: 'pj-btn pj-btn-primary pj-modal-action',
                 type: 'button',
-                disabled: busy || !memoryDirty,
+                disabled: busy || !memoryDirty || Boolean(memoryEditor && memoryEditor.loading),
                 onClick: saveMemory,
               },
               t('save'),
             ),
           ],
-          children: [
-            h('div', { key: 'hint', className: 'pj-hint' }, t('memoryHint')),
-            h('textarea', {
-              key: 'text',
-              className: 'pj-textarea',
-              style: { minHeight: '260px' },
-              'aria-label': t('memory'),
-              placeholder: t('memoryPlaceholder'),
-              value: memoryText,
-              'data-pj-modal-autofocus': '',
-              onChange: (event) => {
-                memoryDirtyRef.current = true
-                setMemoryDirty(true)
-                setMemoryText(event.target.value)
-              },
-            }),
-          ],
+          children: memoryEditor
+            ? [
+                h('div', { key: 'hint', className: 'pj-hint' }, t('memoryHint')),
+                h(
+                  'div',
+                  { key: 'meta', className: 'pj-memory-preview-meta' },
+                  h('span', { className: 'pj-memory-row-meta' }, memoryMeta(memoryEditor, t)),
+                  memoryEditor.archived && h('span', { className: 'pj-badge' }, t('memoryArchived')),
+                ),
+                memoryEditor.error &&
+                  h('div', { key: 'error', className: 'pj-memory-error' }, memoryEditor.error),
+                h('textarea', {
+                  key: 'text',
+                  className: 'pj-textarea',
+                  style: { minHeight: '260px' },
+                  'aria-label': t('memoryBody'),
+                  placeholder: t('memoryPlaceholder'),
+                  value: memoryEditor.loading ? '' : memoryEditor.text,
+                  disabled: busy,
+                  'data-pj-modal-autofocus': '',
+                  onChange: (event) => {
+                    // A body that is still loading must not be typed over: the
+                    // fetched text would land on top of the first keystroke.
+                    if (memoryEditor.loading) return
+                    memoryDirtyRef.current = true
+                    setMemoryDirty(true)
+                    setMemoryEditor((current) =>
+                      current ? { ...current, text: event.target.value } : current,
+                    )
+                  },
+                }),
+              ]
+            : null,
         }),
       )
     }

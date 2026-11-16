@@ -1157,10 +1157,10 @@ test('the panel groups threads into five fixed sections in reference order', () 
   assert.match(block, /statuses: \['review'\]/)
   assert.match(block, /statuses: \['blocked', 'failed'\]/, 'failed waits on the human too')
   assert.match(block, /statuses: \['queued'\]/)
-  assert.match(block, /key: 'resolved', icon: 'none'/, 'Resolved carries no glyph')
+  assert.match(block, /key: 'resolved', icon: 'resolved'/, 'Resolved carries its own glyph')
   // `resolved` is a status value, so the group claims it like every other group
   // claims its own statuses instead of outranking them from outside the enum.
-  assert.match(block, /key: 'resolved', icon: 'none', titleKey: 'groupResolved', statuses: \['resolved'\]/)
+  assert.match(block, /key: 'resolved', icon: 'resolved', titleKey: 'groupResolved', statuses: \['resolved'\]/)
 
   // Bucketing reads `status` and nothing else: one enum, one bucket per task.
   const bucket = source.slice(
@@ -2027,14 +2027,48 @@ const SAMPLE_PROJECT = {
   tasks: [],
 }
 
-const SAMPLE_MEMORY = [
-  '## 项目背景（2026-11-16）',
-  '这个项目是 DSH 的项目看板插件。',
-  '',
-  '## 已知坑',
-  '- 不要碰 host/index.js',
-  '- 弹窗要能 Esc 关闭',
-].join('\n')
+/**
+ * The Host's per-file memory payload: the project route carries metadata only
+ * (`memory.files`), and one body comes from `/projects/:id/memory/:name`. The
+ * two files below are the fixture every page test mounts with.
+ */
+const SAMPLE_MEMORY_TEXTS = {
+  'project-background': '这个项目是 DSH 的项目看板插件。',
+  'known-pitfalls': '- 不要碰 host/index.js\n- 弹窗要能 Esc 关闭',
+}
+
+const SAMPLE_MEMORY_FILES = [
+  {
+    name: 'project-background',
+    description: '这个项目是 DSH 的项目看板插件。',
+    type: 'reference',
+    modified: '2026-11-16T08:39:13.613Z',
+    size: SAMPLE_MEMORY_TEXTS['project-background'].length,
+    stale: false,
+  },
+  {
+    name: 'known-pitfalls',
+    description: '不要碰 host/index.js',
+    type: 'reference',
+    modified: '2026-11-16T09:00:00.000Z',
+    size: SAMPLE_MEMORY_TEXTS['known-pitfalls'].length,
+    stale: false,
+  },
+]
+
+const SAMPLE_MEMORY = {
+  files: SAMPLE_MEMORY_FILES,
+  total: SAMPLE_MEMORY_FILES.reduce((sum, file) => sum + file.size, 0),
+  budget: 64000,
+}
+
+/** One body per sample file, the shape `GET …/memory/:name` answers with. */
+const SAMPLE_MEMORY_BODIES = Object.fromEntries(
+  SAMPLE_MEMORY_FILES.map((file) => [
+    file.name,
+    { ...file, text: SAMPLE_MEMORY_TEXTS[file.name], archived: false },
+  ]),
+)
 
 const SAMPLE_MODELS = {
   models: [
@@ -2045,7 +2079,7 @@ const SAMPLE_MODELS = {
   presetsEnumerable: false,
 }
 
-function createPageHarness({ projects = [], detail = null, viewport = 0 } = {}) {
+function createPageHarness({ projects = [], detail = null, viewport = 0, memoryBodies = null } = {}) {
   const slots = []
   const cleanups = []
   let cursor = 0
@@ -2159,7 +2193,16 @@ function createPageHarness({ projects = [], detail = null, viewport = 0 } = {}) 
     '/projects': { projects },
     '/models': SAMPLE_MODELS,
   }
+  // The memory is one file per topic: the project payload carries metadata and
+  // each body comes from `/memory/:name`, so the harness keeps the two in step
+  // the way the Host does. The copy is per-harness, because a write mutates it.
+  const memory = detail && detail.memory ? JSON.parse(JSON.stringify(detail.memory)) : null
+  const bodies = { ...SAMPLE_MEMORY_BODIES, ...(memoryBodies || {}) }
+  if (detail) detail = { ...detail, memory }
   if (detail) routes[`/projects/${detail.project.id}`] = detail
+  /** The Host's body: a fresh JSON copy per response, never a shared object. */
+  const reply = (payload) => ({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(payload)) })
+  const notFound = (error = 'not_found') => ({ ok: false, status: 404, json: async () => ({ error }) })
   const requests = []
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, init) => {
@@ -2167,19 +2210,73 @@ function createPageHarness({ projects = [], detail = null, viewport = 0 } = {}) 
     const method = (init && init.method) || 'GET'
     const body = init && typeof init.body === 'string' ? JSON.parse(init.body) : undefined
     requests.push({ method, path, body })
+    // The memory's single-file routes: one body per GET, one file per POST or
+    // DELETE. `name` is required on the save route, as the Host requires it.
+    const memoryRoute = /^\/projects\/([^/]+)\/memory(?:\/([^/]+))?$/.exec(path)
+    if (memoryRoute) {
+      const board = routes[`/projects/${memoryRoute[1]}`]
+      const name = memoryRoute[2] ? decodeURIComponent(memoryRoute[2]) : ''
+      if (!board) return notFound()
+      if (method === 'GET' && name) {
+        const found = bodies[name]
+        return found ? reply(found) : notFound('memory_file_not_found')
+      }
+      if (method === 'POST' && !name) {
+        if (!body || !body.name) return { ok: false, status: 400, json: async () => ({ error: 'name_required' }) }
+        const text = String(body.text ?? '')
+        const previous = bodies[body.name]
+        const next = {
+          name: body.name,
+          description: body.description || (previous && previous.description) || '',
+          type: body.type || (previous && previous.type) || 'reference',
+          modified: '2026-11-16T10:00:00.000Z',
+          size: text.length,
+          text,
+          archived: false,
+        }
+        bodies[body.name] = next
+        const files = board.memory.files.filter((file) => file.name !== body.name)
+        files.push({
+          name: next.name,
+          description: next.description,
+          type: next.type,
+          modified: next.modified,
+          size: next.size,
+          stale: false,
+        })
+        board.memory = {
+          ...board.memory,
+          files,
+          total: files.reduce((sum, file) => sum + file.size, 0),
+        }
+        return reply({ saved: true, name: next.name, size: next.size, compaction: '' })
+      }
+      if (method === 'DELETE' && name) {
+        if (!bodies[name]) return notFound('memory_file_not_found')
+        delete bodies[name]
+        const files = board.memory.files.filter((file) => file.name !== name)
+        board.memory = {
+          ...board.memory,
+          files,
+          total: files.reduce((sum, file) => sum + file.size, 0),
+        }
+        return reply({ deleted: true, name })
+      }
+      return { ok: false, status: 405, json: async () => ({ error: 'method_not_allowed' }) }
+    }
     if (method !== 'GET') {
       const match = /^\/projects\/([^/]+)\/tasks\/([^/]+)(\/approve)?$/.exec(path)
       const board = match ? routes[`/projects/${match[1]}`] : undefined
       const task = board && (board.project.tasks || []).find((entry) => entry.id === match[2])
-      if (!task) return { ok: false, status: 404, json: async () => ({ error: 'not_found' }) }
+      if (!task) return notFound()
       // The approve route takes no body; the task PATCH takes the status.
       if (match[3]) task.approved = true
       else Object.assign(task, body || {})
-      return { ok: true, status: 200, json: async () => ({ task }) }
+      return reply({ task })
     }
     const payload = routes[path]
-    if (payload === undefined) return { ok: false, status: 404, json: async () => ({ error: 'not_found' }) }
-    return { ok: true, status: 200, json: async () => payload }
+    if (payload === undefined) return notFound()
+    return reply(payload)
   }
 
   const nodes = (from) => {
@@ -2425,11 +2522,12 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(titles().includes('执行'), false)
   assert.equal(page.byText('执行', options()).length, 0)
 
-  // Memory: the section list and the whole-file editor entry.
+  // Memory: the file list, with no whole-memory editor entry any more.
   page.click(cells()[1])
   assert.deepEqual(titles(), ['共享记忆'])
   assert.equal(page.byClass('pj-memory-row', options()).length, 2)
-  assert.equal(page.byText('编辑全文', options()).length, 1)
+  assert.equal(page.byText('编辑全文', options()).length, 0)
+  assert.equal(page.byLabel('编辑文件 project-background', options()).length, 1)
   assert.equal(page.byTag('select', options()).length, 0)
   assert.equal(page.byText('归档', options()).length, 0)
   assert.equal(cells()[1].props['aria-current'], 'true')
@@ -2438,7 +2536,7 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(page.byClass('pj-modal-dialog').length, 1)
 })
 
-test('the memory group keeps the section list, the preview and the whole-file editor', async (t) => {
+test('the memory group lists the Host\'s files and previews one body', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
@@ -2450,55 +2548,219 @@ test('the memory group keeps the section list, the preview and the whole-file ed
   page.click(page.byClass('pj-settings-nav-cell', settings)[1])
   // A group switch re-renders the panel, so re-read the options column.
   const options = page.byClass('pj-settings-options')[0]
+  // The memory is the Host's `memory.files` now; the page never parses a body
+  // string, so the old "[object Object]" preamble cannot come back.
+  assert.doesNotMatch(page.textOf(page.tree()), /\[object Object\]/)
   const rows = page.byClass('pj-memory-row', options)
-  assert.equal(rows.length, 2, 'one row per "## " section')
-  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), '项目背景（2026-11-16）')
+  assert.equal(rows.length, 2, 'one row per memory file')
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), 'project-background')
   assert.equal(
     page.textOf(page.byClass('pj-memory-row-desc', rows[0])[0]),
     '这个项目是 DSH 的项目看板插件。',
   )
   const meta = page.textOf(page.byClass('pj-memory-row-meta', rows[0])[0])
   assert.match(meta, /字符/)
-  assert.match(meta, /2026-11-16/, 'the date in the title is shown')
-  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), '已知坑')
+  assert.match(meta, /2026-11-16/, 'the modified date is shown')
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), 'known-pitfalls')
+  const tally = page.textOf(page.byClass('pj-memory-tally', options)[0])
+  assert.match(tally, /2 个文件/)
+  assert.match(tally, /字符/)
 
-  // A row opens the read-only preview on top of the panel.
-  page.click(rows[1])
+  // A row opens the body the Host serves for that one file.
+  page.click(page.byClass('pj-memory-open', rows[1])[0])
+  await page.settle()
   const dialogs = page.byClass('pj-modal-dialog')
   assert.equal(dialogs.length, 2, 'the preview stacks on the settings panel')
   const preview = dialogs[1]
-  assert.equal(page.textOf(page.byClass('pj-modal-title', preview)[0]), '已知坑')
+  assert.equal(page.textOf(page.byClass('pj-modal-title', preview)[0]), 'known-pitfalls')
   const body = page.textOf(page.byClass('pj-memory-body', preview)[0])
   assert.match(body, /不要碰 host\/index\.js/)
   assert.match(body, /弹窗要能 Esc 关闭/)
-  assert.doesNotMatch(body, /项目背景/, 'the preview shows one section, not the file')
+  assert.doesNotMatch(body, /项目背景/, 'the preview shows one file, not the memory')
+  assert.ok(
+    page.requests.some(
+      (entry) => entry.method === 'GET' && entry.path === '/projects/p1/memory/known-pitfalls',
+    ),
+    'the body comes from the single-file route',
+  )
 
   // Closing the preview leaves the memory group open.
   page.click(page.byClass('pj-modal-close', preview)[0])
   assert.equal(page.byClass('pj-modal-dialog').length, 1)
   assert.equal(page.byClass('pj-memory-row').length, 2, 'the group is still there')
+})
 
-  // Editing is still whole-file, behind one explicit entry point.
-  page.click(page.byText('编辑全文', page.byClass('pj-settings-options')[0])[0])
+test('the memory editor saves one file by name', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
+  const options = () => page.byClass('pj-settings-options')[0]
+  const edit = page.byLabel('编辑文件 known-pitfalls', options())[0]
+  assert.ok(edit, 'the row carries its own edit action')
+  page.click(edit)
+  await page.settle()
   const editor = page.byClass('pj-modal-dialog')[1]
   assert.ok(editor, 'the editor opened')
-  const textarea = page.byTag('textarea', editor).find((node) => node.props['aria-label'] === '共享记忆')
-  assert.ok(textarea, 'the editor is the whole memory')
-  assert.equal(textarea.props.value, SAMPLE_MEMORY)
+  assert.equal(page.textOf(page.byClass('pj-modal-title', editor)[0]), 'known-pitfalls')
+  const textarea = page.byTag('textarea', editor)[0]
+  assert.equal(textarea.props.value, SAMPLE_MEMORY_TEXTS['known-pitfalls'])
   assert.equal(page.byText('保存', editor)[0].props.disabled, true, 'nothing to save yet')
-  page.click(page.byText('取消', editor)[0])
-  assert.equal(page.byClass('pj-modal-dialog').length, 1)
+
+  const next = `${SAMPLE_MEMORY_TEXTS['known-pitfalls']}\n- 新结论`
+  textarea.props.onChange({ target: { value: next } })
+  // The buffer changed, so the button is a new node with the new handler.
+  const dirty = page.byClass('pj-modal-dialog')[1]
+  assert.equal(page.byText('保存', dirty)[0].props.disabled, false, 'the buffer is dirty')
+  page.click(page.byText('保存', dirty)[0])
+  await page.settle()
+
+  const save = page.requests.find((entry) => entry.method === 'POST' && entry.path === '/projects/p1/memory')
+  assert.ok(save, 'the save goes through the memory POST route')
+  assert.deepEqual(save.body, {
+    name: 'known-pitfalls',
+    description: '不要碰 host/index.js',
+    type: 'reference',
+    text: next,
+  })
+  assert.equal(page.byClass('pj-modal-dialog').length, 1, 'the editor closed after saving')
+  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '已保存。')
+  // The list behind it re-read the Host's files: the edited size is the new one.
+  const rows = page.byClass('pj-memory-row', page.byClass('pj-settings-options')[0])
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), 'known-pitfalls')
+  assert.match(page.textOf(page.byClass('pj-memory-row-meta', rows[1])[0]), new RegExp(`${next.length} 字符`))
+})
+
+test('deleting a memory file arms the row and only the second press deletes', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
+  const options = () => page.byClass('pj-settings-options')[0]
+  const rows = () => page.byClass('pj-memory-row', options())
+
+  page.click(page.byLabel('删除文件 known-pitfalls', options())[0])
+  await page.settle()
+  assert.equal(
+    page.requests.filter((entry) => entry.method === 'DELETE').length,
+    0,
+    'the first press only arms the row',
+  )
+  assert.equal(page.byText('确认删除', options()).length, 1)
+  assert.equal(page.byText('取消', options()).length, 1)
+  assert.match(String(rows()[1].props.className), /pj-armed/)
+
+  // Cancelling disarms the row and leaves the file alone.
+  page.click(page.byText('取消', options())[0])
+  assert.equal(page.byText('确认删除', options()).length, 0)
+  assert.equal(page.byText('删除文件', options()).length, 2)
+
+  // The second press deletes exactly that file, and the list re-reads.
+  page.click(page.byLabel('删除文件 known-pitfalls', options())[0])
+  await page.settle()
+  page.click(page.byText('确认删除', options())[0])
+  await page.settle()
+  const deleted = page.requests.filter((entry) => entry.method === 'DELETE')
+  assert.deepEqual(deleted.map((entry) => entry.path), ['/projects/p1/memory/known-pitfalls'])
+  assert.equal(page.byClass('pj-memory-row', options()).length, 1, 'the row is gone')
+  assert.equal(
+    page.textOf(page.byClass('pj-memory-row-title', options())[0]),
+    'project-background',
+  )
+  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '记忆文件已删除。')
+})
+
+test('an archived memory file is marked in the list and read-only', async (t) => {
+  const archivedFile = {
+    name: 'legacy-notes',
+    description: '旧结论',
+    type: 'reference',
+    modified: '2026-11-15T00:00:00.000Z',
+    size: 5,
+    stale: false,
+    archived: true,
+  }
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: {
+      project: SAMPLE_PROJECT,
+      memory: {
+        files: [...SAMPLE_MEMORY.files, archivedFile],
+        total: SAMPLE_MEMORY.total + archivedFile.size,
+        budget: 64000,
+      },
+    },
+    memoryBodies: {
+      'legacy-notes': { ...archivedFile, text: '旧结论正文', archived: true },
+    },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
+  const options = () => page.byClass('pj-settings-options')[0]
+  const row = page.byClass('pj-memory-row', options())[2]
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', row)[0]), 'legacy-notes')
+  assert.match(page.textOf(row), /已归档/, 'the row is marked, not silently mixed in')
+  assert.equal(page.byLabel('编辑文件 legacy-notes', row)[0].props.disabled, true)
+  assert.equal(page.byLabel('删除文件 legacy-notes', row)[0].props.disabled, true)
+
+  // It still reads: the preview says where it went and shows its body.
+  page.click(page.byClass('pj-memory-open', row)[0])
+  await page.settle()
+  const preview = page.byClass('pj-modal-dialog')[1]
+  assert.match(page.textOf(preview), /已归档/)
+  assert.match(page.textOf(preview), /memory\/archive\//)
+  assert.match(page.textOf(page.byClass('pj-memory-body', preview)[0]), /旧结论正文/)
+})
+
+test('a file the Host reports as archived is marked after it is read', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+    // The project payload lists the live memory only, so a body fetched by name
+    // is what reveals an archived file.
+    memoryBodies: {
+      'known-pitfalls': { ...SAMPLE_MEMORY_BODIES['known-pitfalls'], archived: true },
+    },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
+  const options = () => page.byClass('pj-settings-options')[0]
+  const row = () => page.byClass('pj-memory-row', options())[1]
+  assert.doesNotMatch(page.textOf(row()), /已归档/, 'the list alone cannot know it')
+
+  page.click(page.byClass('pj-memory-open', row())[0])
+  await page.settle()
+  page.click(page.byClass('pj-modal-close', page.byClass('pj-modal-dialog')[1])[0])
+  assert.match(page.textOf(row()), /已归档/, 'the fetched body marks the row')
+  assert.equal(page.byLabel('编辑文件 known-pitfalls', row())[0].props.disabled, true)
 })
 
 test('a long memory only grows the memory group, never the general group', async (t) => {
-  // Forty sections: on the old form this list alone would have filled the
-  // dialog and pushed every setting below it out of view.
-  const longMemory = Array.from(
-    { length: 40 },
-    (_, index) => `## 第 ${index + 1} 节\n${'内容'.repeat(50)}`,
-  ).join('\n')
+  // Forty files: the list alone would fill the dialog if it leaked into the
+  // general group.
+  const files = Array.from({ length: 40 }, (_, index) => ({
+    name: `topic-${index + 1}`,
+    description: `第 ${index + 1} 个主题`,
+    type: 'reference',
+    modified: '2026-11-16T08:00:00.000Z',
+    size: 100,
+    stale: false,
+  }))
+  const longMemory = { files, total: files.length * 100, budget: 64000 }
 
-  // The same general group rendered with a two-section memory: the memory only
+  // The same general group rendered with a two-file memory: the memory only
   // changes the memory group's tree, never the general group's.
   const shortPage = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
@@ -2520,39 +2782,36 @@ test('a long memory only grows the memory group, never the general group', async
   assert.equal(
     page.nodes(options).length,
     shortNodes,
-    'the general group tree is the same size for a 40-section memory',
+    'the general group tree is the same size for a 40-file memory',
   )
   assert.equal(page.byClass('pj-memory-row', options).length, 0)
 
-  // The memory group lists all forty, and the tally rounds the size.
+  // The memory group lists all forty, and the tally rounds the total size.
   page.click(page.byClass('pj-settings-nav-cell', settings)[1])
-  assert.equal(page.byClass('pj-memory-row').length, 40, 'the group lists every section')
+  assert.equal(page.byClass('pj-memory-row').length, 40, 'the group lists every file')
   const tally = page.textOf(page.byClass('pj-memory-tally')[0])
-  assert.match(tally, /40 节/)
-  assert.match(tally, /k 字符/, 'a long file is rounded to k')
+  assert.match(tally, /40 个文件/)
+  assert.match(tally, /4k 字符/, 'a long memory is rounded to k')
 })
 
-test('the memory tally counts sections, while the group also lists the preamble', async (t) => {
-  const memory = `项目总览\n\n${SAMPLE_MEMORY}`
+test('an empty memory shows the hint instead of a list', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
-    detail: { project: SAMPLE_PROJECT, memory },
+    detail: { project: SAMPLE_PROJECT, memory: { files: [], total: 0, budget: 64000 } },
   })
   t.after(() => page.unmount())
 
   page.click(page.byLabel('设置')[0])
-  const settings = page.byClass('pj-modal-dialog')[0]
-  page.click(page.byClass('pj-settings-nav-cell', settings)[1])
-  // A group switch re-renders the panel, so re-read the options column.
+  page.click(page.byClass('pj-settings-nav-cell')[1])
   const options = page.byClass('pj-settings-options')[0]
-  assert.match(
-    page.textOf(page.byClass('pj-memory-tally', options)[0]),
-    /2 节/,
-    'the tally is the Host index count: a preamble is not a section',
+  assert.equal(page.byClass('pj-memory-row', options).length, 0)
+  assert.ok(
+    page
+      .byClass('pj-hint', options)
+      .some((node) => page.textOf(node) === '共享记忆还是空的。'),
+    'the empty state is the hint, not a fake row',
   )
-  const rows = page.byClass('pj-memory-row', options)
-  assert.equal(rows.length, 3, 'the group lists the preamble too')
-  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), '前言')
+  assert.match(page.textOf(page.byClass('pj-memory-tally', options)[0]), /0 个文件/)
 })
 
 test('the archive section closes the general group and keeps the two-press confirmation', async (t) => {
@@ -2638,6 +2897,16 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   assert.equal([...source.matchAll(/h\(Modal, \{/g)].length, 4)
   assert.match(source, /titleId: 'pj-settings-title'/)
 
+  // The memory group reads the Host's per-file payload: `memory.files` for the
+  // list and `/memory/:name` for one body. The old `## ` parser and the
+  // whole-memory `{ text }` save are gone.
+  assert.match(source, /function memoryFilesOf\(memory\)/)
+  assert.match(source, /memory\/\$\{encodeURIComponent\(name\)\}/)
+  assert.match(source, /name: memoryEditor\.name/)
+  assert.doesNotMatch(source, /memorySections|memoryPreamble|memoryRows/)
+  assert.doesNotMatch(source, /JSON\.stringify\(\{ text: memoryText \}\)/)
+  assert.doesNotMatch(source, /setMemoryEditorOpen|memoryEditorOpen/)
+
   // Escape closes exactly one level: only the innermost layer answers, and the
   // settings panel no longer has an inner page to leave first.
   assert.doesNotMatch(source, /onEscape/)
@@ -2716,6 +2985,38 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   assert.equal(zh.memoryEnter, undefined)
   assert.equal(en.memoryBack, undefined)
   assert.equal(zh.memoryBack, undefined)
+  // The memory group's own labels: a file list, one-file editing and deleting,
+  // and the archived marker the Host's single-file route reports.
+  for (const key of [
+    'memory',
+    'memoryFiles',
+    'memoryChars',
+    'memoryStale',
+    'memoryArchived',
+    'memoryArchivedHint',
+    'memoryLoading',
+    'memoryLoadFailed',
+    'memoryBody',
+    'memoryEditFile',
+    'memoryDeleteFile',
+    'memoryDeleted',
+  ]) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+  assert.equal(en.memoryFiles, 'files')
+  assert.equal(zh.memoryFiles, '个文件')
+  assert.equal(en.memoryEditFile, 'Edit file')
+  assert.equal(zh.memoryEditFile, '编辑文件')
+  assert.equal(en.memoryDeleteFile, 'Delete file')
+  assert.equal(zh.memoryDeleteFile, '删除文件')
+  assert.equal(en.memoryArchived, 'Archived')
+  assert.equal(zh.memoryArchived, '已归档')
+  // The whole-memory wording retired with the whole-memory editor.
+  for (const key of ['memoryEdit', 'memoryPreamble', 'memorySections']) {
+    assert.equal(en[key], undefined, `EN still carries ${key}`)
+    assert.equal(zh[key], undefined, `ZH still carries ${key}`)
+  }
 })
 
 test('the page top is a window drag region, the way the Host marks its own', async (t) => {
@@ -2903,7 +3204,7 @@ test('the panel buckets tasks by status, so resolved is one bucket', async (t) =
   )
 })
 
-test('the five group glyphs are pairwise distinct, and review is an eye not a check', async (t) => {
+test('the five group glyphs are pairwise distinct, and review is a radio ring not an eye or a check', async (t) => {
   const project = {
     ...SAMPLE_PROJECT,
     tasks: [
@@ -2921,7 +3222,7 @@ test('the five group glyphs are pairwise distinct, and review is an eye not a ch
   t.after(() => page.unmount())
 
   // The glyph belongs to the group header, so a card's own glyph (a running
-  // task wears the spinner too) cannot stand in for the group's.
+  // task wears the arc too) cannot stand in for the group's.
   const headerOf = (name) => {
     const group = page.groupNamed(name)
     assert.ok(group, `the ${name} group rendered`)
@@ -2950,61 +3251,162 @@ test('the five group glyphs are pairwise distinct, and review is an eye not a ch
       .join('|')}]`
   }
 
+  // Every group now carries a glyph, Resolved included: an arc, a radio ring, a
+  // warning ring, a dotted ring and a filled check disc.
   const glyphs = {
     running: glyphOf('执行中'),
     review: glyphOf('待验收'),
     waiting: glyphOf('等你处理'),
     idle: glyphOf('空闲'),
+    resolved: glyphOf('已解决'),
   }
-  // Resolved carries no glyph at all, which is itself its distinguishing shape.
-  assert.equal(
-    page.byClass('pj-thread-icon', headerOf('已解决')).length,
-    0,
-    'Resolved draws no glyph',
-  )
-
   const structures = Object.fromEntries(
     Object.entries(glyphs).map(([key, glyph]) => [key, structure(glyph)]),
   )
-  structures.resolved = 'none'
   assert.equal(
     new Set(Object.values(structures)).size,
     5,
     `all five group glyphs differ: ${JSON.stringify(structures)}`,
   )
 
-  // Ready-for-review is an eye: an almond outline plus a solid pupil, drawn on
-  // the same 16 grid and 1.6 stroke as its neighbours. It is deliberately not a
-  // check — a check means done, which is Resolved's meaning.
+  // The family: one 16 grid, 14px, decorative, and ink from the theme only.
+  for (const [key, glyph] of Object.entries(glyphs)) {
+    assert.equal(glyph.type, 'svg', `${key} is an svg`)
+    assert.equal(glyph.props.viewBox, '0 0 16 16', `${key} sits on the 16 grid`)
+    assert.equal(glyph.props.width, 14, `${key} is 14px wide`)
+    assert.equal(glyph.props.height, 14, `${key} is 14px tall`)
+    assert.equal(glyph.props['aria-hidden'], true, `${key} is decorative`)
+    for (const child of glyph.children) {
+      for (const [name, value] of Object.entries(child.props || {})) {
+        if (name !== 'stroke' && name !== 'fill') continue
+        assert.match(
+          String(value),
+          /^(currentColor|none|var\(--dsw-[a-z0-9-]+\))$/,
+          `${key} paints ${name}=${value} with a literal colour`,
+        )
+      }
+    }
+  }
+
+  // Ready-for-review is a radio button: a ring around a solid dot. It is not
+  // the eye it used to be (no almond outline) and not a check (no straight
+  // stroke, and the only path-shaped glyphs are Working's arc and Resolved's
+  // check).
   const review = glyphs.review
-  assert.equal(review.type, 'svg')
-  assert.equal(review.props.viewBox, '0 0 16 16')
-  assert.equal(review.props.width, 14)
-  assert.equal(review.props.height, 14)
   assert.match(review.props.className, /pj-thread-review/, 'the review colour rule still applies')
-  assert.equal(review.children.length, 2, 'an outline and one pupil')
+  assert.equal(review.children.length, 2, 'a ring and one dot')
+  assert.equal(
+    review.children.filter((child) => child.type === 'path').length,
+    0,
+    'the eye and the check are both gone: the glyph is circles only',
+  )
+  const [ring, dot] = review.children
+  assert.equal(ring.type, 'circle')
+  assert.equal(ring.props.cx, 8)
+  assert.equal(ring.props.cy, 8)
+  assert.equal(ring.props.stroke, 'currentColor')
+  assert.equal(ring.props.fill, undefined, 'the ring is stroked, not filled')
+  assert.ok(ring.props.strokeWidth >= 1.5, `the ring holds at 14px: ${ring.props.strokeWidth}`)
+  assert.equal(dot.type, 'circle')
+  assert.equal(dot.props.cx, 8)
+  assert.equal(dot.props.cy, 8)
+  assert.equal(dot.props.fill, 'currentColor')
+  assert.equal(dot.props.stroke, undefined, 'the dot is filled, not stroked')
+  // A radio dot, not a pupil: big enough to read as a filled centre at 14px,
+  // small enough to leave a clear gap to the ring.
+  assert.ok(dot.props.r >= 2 && dot.props.r <= 3, `the dot survives 14px: r=${dot.props.r}`)
+  const gap = ring.props.r - ring.props.strokeWidth / 2 - dot.props.r
+  assert.ok(gap >= 1.2, `the ring and the dot stay apart: gap=${gap}`)
+  assert.ok(ring.props.r + ring.props.strokeWidth / 2 <= 8, 'the ring fits the grid')
 
-  const [outline, pupil] = review.children
-  assert.equal(outline.type, 'path')
-  assert.equal(outline.props.stroke, 'currentColor')
-  assert.equal(outline.props.strokeWidth, 1.6)
-  // Curves only: a check is two straight strokes, so no line command can hide
-  // in the outline, and the retired checkmark's segment is gone for good.
-  assert.doesNotMatch(outline.props.d, /[lLhHvV]/, 'the eye outline has no straight segments')
-  assert.doesNotMatch(outline.props.d, /M5\.1 8\.2l2 2 3\.8-4/, 'the retired checkmark is gone')
+  // Working is an open arc: one stroked path, curves only, and no closing
+  // command, so the circle stays visibly unfinished while it spins.
+  const running = glyphs.running
+  assert.match(running.props.className, /pj-thread-spinner/, 'the arc still spins')
+  assert.equal(running.children.length, 1, 'one arc')
+  const arc = running.children[0]
+  assert.equal(arc.type, 'path')
+  assert.equal(arc.props.stroke, 'currentColor')
+  assert.equal(arc.props.strokeLinecap, 'round')
+  assert.doesNotMatch(arc.props.d, /[zZ]/, 'the arc is not closed')
+  assert.doesNotMatch(arc.props.d, /[lLhHvVaA]/, 'the arc is drawn from curves only')
+  const arcPoints = pathPoints(arc.props.d)
+  const arcStart = arcPoints[0]
+  const arcEnd = arcPoints[arcPoints.length - 1]
+  assert.ok(
+    Math.hypot(arcEnd[0] - arcStart[0], arcEnd[1] - arcStart[1]) > 3,
+    'the arc leaves a real gap instead of closing the circle',
+  )
+  const arcBox = inkBox(arc.props.d, arc.props.strokeWidth)
+  assert.ok(arcBox.minX >= 0 && arcBox.maxX <= 16, `the arc fits the grid: ${JSON.stringify(arcBox)}`)
+  assert.ok(arcBox.minY >= 0 && arcBox.maxY <= 16, `the arc fits the grid: ${JSON.stringify(arcBox)}`)
+  assert.ok(arcBox.width > 11 && arcBox.height > 11, `the arc is not a speck: ${JSON.stringify(arcBox)}`)
 
-  // The ink stays inside the 16 grid and fills it like the ring glyphs do.
-  const box = inkBox(outline.props.d, outline.props.strokeWidth)
-  assert.ok(box.minX >= 0 && box.maxX <= 16, `the eye fits the grid horizontally: ${JSON.stringify(box)}`)
-  assert.ok(box.minY >= 0 && box.maxY <= 16, `the eye fits the grid vertically: ${JSON.stringify(box)}`)
-  assert.ok(box.width > 11 && box.height > 6, `the eye is not a speck: ${JSON.stringify(box)}`)
+  // Idle is a ring of dots: eight filled dots on one radius, nothing stroked.
+  const idle = glyphs.idle
+  assert.match(idle.props.className, /pj-thread-idle/, 'the idle colour rule still applies')
+  assert.equal(idle.children.length, 8, 'eight dots make the ring')
+  const seats = new Set()
+  for (const dot of idle.children) {
+    assert.equal(dot.type, 'circle')
+    assert.equal(dot.props.fill, 'currentColor')
+    assert.equal(dot.props.stroke, undefined, 'a dot is filled, not stroked')
+    assert.ok(dot.props.r >= 0.8 && dot.props.r <= 1.3, `the dot survives 14px: r=${dot.props.r}`)
+    const radius = Math.hypot(dot.props.cx - 8, dot.props.cy - 8)
+    assert.ok(Math.abs(radius - 5.6) < 0.01, `the dots sit on one radius: ${radius}`)
+    seats.add(`${dot.props.cx},${dot.props.cy}`)
+  }
+  assert.equal(seats.size, 8, 'the dots are distinct, not one dashed stroke')
 
-  // A filled pupil, not a second ring: at 14px the dot is the only thing that
-  // makes the almond read as an eye rather than a leaf.
-  assert.equal(pupil.type, 'circle')
-  assert.equal(pupil.props.fill, 'currentColor')
-  assert.equal(pupil.props.stroke, undefined, 'the pupil is filled, not stroked')
-  assert.ok(pupil.props.r >= 1.5 && pupil.props.r <= 2.5, `the pupil survives 14px: r=${pupil.props.r}`)
+  // Resolved is the one filled glyph: a solid disc with the check knocked out
+  // of it in the surface colour. It is the only glyph that means accepted.
+  const resolved = glyphs.resolved
+  assert.match(resolved.props.className, /pj-thread-resolved/, 'the resolved colour rule applies')
+  assert.equal(resolved.children.length, 2, 'a disc and a check')
+  const [disc, check] = resolved.children
+  assert.equal(disc.type, 'circle')
+  assert.equal(disc.props.cx, 8)
+  assert.equal(disc.props.cy, 8)
+  assert.equal(disc.props.fill, 'currentColor')
+  assert.equal(disc.props.stroke, undefined, 'the disc is filled, not stroked')
+  assert.ok(disc.props.r >= 6, `the disc fills the grid: r=${disc.props.r}`)
+  assert.equal(check.type, 'path')
+  assert.match(
+    check.props.stroke,
+    /^var\(--dsw-[a-z0-9-]+\)$/,
+    'the check is cut out in a theme surface colour, not a literal white',
+  )
+  assert.equal(check.props.strokeLinecap, 'round')
+  assert.equal(check.props.strokeLinejoin, 'round')
+  // A check: down-right, then up-right, and the two arms stay inside the disc.
+  const [start, elbow, tip] = pathPoints(check.props.d)
+  assert.ok(elbow[0] > start[0] && elbow[1] > start[1], 'the first arm goes down-right')
+  assert.ok(tip[0] > elbow[0] && tip[1] < elbow[1], 'the second arm goes up-right')
+  const reach = disc.props.r - check.props.strokeWidth / 2
+  for (const [x, y] of [start, elbow, tip]) {
+    assert.ok(Math.hypot(x - 8, y - 8) < reach, `the check stays inside the disc: ${x},${y}`)
+  }
+
+  // Waiting keeps the amber warning ring — the family's third ring shape, and
+  // the one group the reference panel has no counterpart for.
+  const waiting = glyphs.waiting
+  assert.match(waiting.props.className, /pj-thread-waiting/, 'the waiting colour rule still applies')
+  assert.equal(waiting.children.length, 3, 'ring, bar, dot')
+  assert.equal(waiting.children[0].type, 'circle')
+  assert.equal(waiting.children[0].props.stroke, 'currentColor')
+  assert.equal(waiting.children[1].type, 'path')
+  assert.equal(waiting.children[2].props.fill, 'currentColor')
+
+  // The colours are the theme's, not the glyphs': review is the success ring,
+  // resolved the muted fill, idle the tertiary ring.
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  assert.match(source, /\.pj-thread-review\{color:var\(--dsw-alias-state-success-primary\)\}/)
+  assert.match(source, /\.pj-thread-resolved\{color:var\(--dsw-alias-label-secondary\)\}/)
+  assert.match(source, /\.pj-thread-idle\{color:var\(--dsw-alias-label-tertiary\)\}/)
+  // No literal colour sneaks into the glyph code either.
+  const iconStart = source.indexOf('function ThreadIcon')
+  const iconBlock = source.slice(iconStart, source.indexOf('function ProjectsDispatchRow', iconStart))
+  assert.doesNotMatch(iconBlock, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/)
 })
 
 test('the sidebar tally counts resolved tasks, the way the panel buckets them', async (t) => {

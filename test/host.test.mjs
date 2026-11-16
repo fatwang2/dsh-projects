@@ -7,11 +7,13 @@
  */
 
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
+import { promisify } from 'node:util'
 
 let home
 let plugin
@@ -22,6 +24,8 @@ const tools = new Map()
 const routes = []
 const listeners = new Map()
 const activations = []
+/** Temporary git repositories and plain directories the worktree tests create. */
+const tempDirs = []
 
 const fakeSubagents = {
   async startActivation(spec) {
@@ -148,6 +152,7 @@ before(async () => {
 
 after(async () => {
   await rm(home, { recursive: true, force: true })
+  for (const dir of tempDirs) await rm(dir, { recursive: true, force: true })
 })
 
 test('registers the route and every tool', () => {
@@ -2489,4 +2494,277 @@ test('deleting an unknown task is a 404 and archives nothing', async () => {
   assert.equal(response.status, 404)
   assert.equal(response.body.error, 'task_not_found')
   assert.equal(fakeWorkspaceRegistry.calls.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Per-task git worktree isolation
+//
+// These tests use a real temporary git repository: the feature is a sequence of
+// git commands, and a mock would only prove that the mock was called. The
+// assertions are about the repository on disk (branch, worktree registration,
+// checkout directory) and about the cwd the worker actually received.
+
+const execFileAsync = promisify(execFile)
+
+async function git(cwd, ...args) {
+  const { stdout, stderr } = await execFileAsync('git', args, { cwd })
+  return { stdout: stdout.trim(), stderr: stderr.trim() }
+}
+
+async function gitFails(cwd, ...args) {
+  try {
+    await git(cwd, ...args)
+    return false
+  } catch {
+    return true
+  }
+}
+
+async function exists(path) {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * A real repository with one commit. `gitignore: null` leaves the pool
+ * unignored, which is the pollution case dispatch must refuse; `commit: false`
+ * leaves HEAD unborn, which is the real git failure the cleanup path must
+ * survive.
+ */
+async function makeGitRepo(name, { gitignore = '.worktrees/\n', commit = true } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), `dsh-projects-${name}-`))
+  tempDirs.push(dir)
+  await git(dir, 'init', '-q')
+  await git(dir, 'config', 'user.email', 'test@example.com')
+  await git(dir, 'config', 'user.name', 'Test')
+  if (gitignore !== null) await writeFile(join(dir, '.gitignore'), gitignore)
+  if (commit) {
+    await writeFile(join(dir, 'README.md'), '# repo\n')
+    await git(dir, 'add', '.')
+    await git(dir, 'commit', '-q', '-m', 'init')
+  }
+  return dir
+}
+
+async function worktreeProject(name, workspace, extra = {}) {
+  const created = await call('projects_create', {
+    name,
+    workspace,
+    autonomy: 'auto',
+    concurrency: 4,
+    worktreeIsolation: true,
+    ...extra,
+  })
+  return created.match(/p-[0-9a-f]{8}/)[0]
+}
+
+async function addBoardTask(projectId, title) {
+  const added = await call('projects_add_task', { project_id: projectId, title })
+  return added.match(/t-[0-9a-f]{8}/)[0]
+}
+
+async function boardTask(projectId, taskId) {
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.status, 200)
+  return detail.body.project.tasks.find((task) => task.id === taskId)
+}
+
+test('worktree isolation is off by default: no branch, no checkout, shared cwd', async () => {
+  const repo = await makeGitRepo('wt-off')
+  const created = await call('projects_create', { name: 'No isolation', workspace: repo, autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const taskId = await addBoardTask(projectId, 'Shared workspace task')
+
+  const before = activations.length
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+  assert.equal(activations.at(-1).cwd, repo, 'the worker runs in the project workspace')
+
+  assert.equal(await exists(join(repo, '.worktrees')), false)
+  assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/task/${taskId}`), true)
+  const task = await boardTask(projectId, taskId)
+  assert.equal('branch' in task, false)
+  assert.equal('worktreePath' in task, false)
+  assert.equal('worktreeDegraded' in task, false)
+})
+
+test('a non-git workspace degrades to the shared directory and records why', async () => {
+  const plain = await mkdtemp(join(tmpdir(), 'dsh-projects-plain-'))
+  tempDirs.push(plain)
+  const projectId = await worktreeProject('Plain workspace', plain)
+  const taskId = await addBoardTask(projectId, 'No repository here')
+
+  const before = activations.length
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+  assert.equal(activations.at(-1).cwd, plain)
+  assert.match(dispatched, /degraded \(not_a_git_repository\)/)
+  assert.match(dispatched, /not inside a git repository/)
+
+  assert.equal(await exists(join(plain, '.worktrees')), false)
+  const task = await boardTask(projectId, taskId)
+  assert.equal(task.worktreeDegraded, 'not_a_git_repository')
+  assert.match(task.worktreeNote, /not inside a git repository/)
+  assert.equal('branch' in task, false)
+  assert.equal('worktreePath' in task, false)
+})
+
+test('a project without a workspace degrades with a workspace_missing note', async () => {
+  const projectId = await worktreeProject('No workspace', '')
+  const taskId = await addBoardTask(projectId, 'Nowhere to isolate')
+
+  const before = activations.length
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+  assert.equal('cwd' in activations.at(-1), false, 'the worker inherits the coordinator directory')
+  assert.match(dispatched, /degraded \(workspace_missing\)/)
+
+  const task = await boardTask(projectId, taskId)
+  assert.equal(task.worktreeDegraded, 'workspace_missing')
+  assert.match(task.worktreeNote, /no workspace/)
+  assert.equal('worktreePath' in task, false)
+})
+
+test('worktree isolation creates a branch and a checkout and points the worker at it', async () => {
+  const repo = await makeGitRepo('wt-on')
+  const projectId = await worktreeProject('Isolated workspace', repo)
+  const taskId = await addBoardTask(projectId, 'Isolated task')
+
+  const before = activations.length
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+
+  const expectedPath = join(repo, '.worktrees', taskId)
+  const expectedBranch = `task/${taskId}`
+  const spec = activations.at(-1)
+  assert.equal(spec.cwd, expectedPath)
+  const prompt = spec.prompt[0].text
+  assert.match(prompt, new RegExp(`Work inside ${escapeRegExp(expectedPath)}`))
+  assert.match(prompt, new RegExp(escapeRegExp(expectedBranch)))
+  assert.match(dispatched, new RegExp(`worktree=${escapeRegExp(expectedPath)}`))
+  assert.match(dispatched, new RegExp(`branch=${escapeRegExp(expectedBranch)}`))
+
+  assert.equal((await stat(expectedPath)).isDirectory(), true)
+  assert.equal((await git(expectedPath, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout, expectedBranch)
+  assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/${expectedBranch}`), false)
+  const listed = await git(repo, 'worktree', 'list', '--porcelain')
+  assert.match(listed.stdout, new RegExp(escapeRegExp(await realpath(expectedPath))))
+
+  const task = await boardTask(projectId, taskId)
+  assert.equal(task.branch, expectedBranch)
+  assert.equal(task.worktreePath, expectedPath)
+  assert.equal('worktreeDegraded' in task, false)
+  assert.equal('worktreeNote' in task, false)
+})
+
+test('an unignored .worktrees/ pool is refused instead of polluting the repository', async () => {
+  const repo = await makeGitRepo('wt-noignore', { gitignore: null })
+  const projectId = await worktreeProject('No ignore rule', repo)
+  const taskId = await addBoardTask(projectId, 'Would pollute')
+
+  const before = activations.length
+  await assert.rejects(
+    () => call('projects_dispatch', { project_id: projectId, task_id: taskId }),
+    /\.worktrees\/.*not ignored/i,
+  )
+  assert.equal(activations.length, before, 'the task is not dispatched')
+  assert.equal(await exists(join(repo, '.worktrees')), false, 'nothing is created in the repository')
+  assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/task/${taskId}`), true)
+  const task = await boardTask(projectId, taskId)
+  assert.equal(task.status, 'queued')
+})
+
+test('a failed worktree creation leaves the task queued and no artifacts behind', async () => {
+  // An unborn HEAD makes `git worktree add` fail for a real reason; the branch
+  // must not survive and the task must stay dispatchable once the repository is
+  // usable.
+  const repo = await makeGitRepo('wt-unborn', { commit: false })
+  const projectId = await worktreeProject('Unborn repository', repo)
+  const taskId = await addBoardTask(projectId, 'Cannot branch yet')
+
+  const before = activations.length
+  await assert.rejects(
+    () => call('projects_dispatch', { project_id: projectId, task_id: taskId }),
+    /Could not create the git worktree/i,
+  )
+  assert.equal(activations.length, before, 'the task is not dispatched')
+  assert.equal(await exists(join(repo, '.worktrees', taskId)), false)
+  assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/task/${taskId}`), true)
+  const task = await boardTask(projectId, taskId)
+  assert.equal(task.status, 'queued')
+})
+
+test('deleting a task removes its worktree and branch, even with uncommitted work', async () => {
+  const repo = await makeGitRepo('wt-delete')
+  const projectId = await worktreeProject('Delete cleanup', repo)
+  const taskId = await addBoardTask(projectId, 'Delete me')
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  const worktreePath = join(repo, '.worktrees', taskId)
+  await writeFile(join(worktreePath, 'uncommitted.txt'), 'work in progress\n')
+
+  const response = await request('DELETE', `/projects-api/projects/${projectId}/tasks/${taskId}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.body.deleted, true)
+  assert.deepEqual(response.body.worktree, { removed: true, branchDeleted: true })
+  assert.equal(await exists(worktreePath), false)
+  assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/task/${taskId}`), true)
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 0)
+})
+
+test('archiving a project removes every task worktree and branch', async () => {
+  const repo = await makeGitRepo('wt-archive')
+  const projectId = await worktreeProject('Archive cleanup', repo)
+  const first = await addBoardTask(projectId, 'First isolated task')
+  const second = await addBoardTask(projectId, 'Second isolated task')
+  await call('projects_dispatch', { project_id: projectId, task_id: first })
+  await call('projects_dispatch', { project_id: projectId, task_id: second })
+  const paths = [join(repo, '.worktrees', first), join(repo, '.worktrees', second)]
+  for (const path of paths) assert.equal((await stat(path)).isDirectory(), true)
+
+  const response = await request('PATCH', `/projects-api/projects/${projectId}`, { archived: true })
+  assert.equal(response.status, 200)
+  assert.equal(response.body.project.archived, true)
+  assert.equal(response.body.worktrees.removed.length, 2)
+  assert.deepEqual(response.body.worktrees.failed, [])
+  for (const path of paths) assert.equal(await exists(path), false)
+  for (const taskId of [first, second]) {
+    assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/task/${taskId}`), true)
+  }
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  for (const task of detail.body.project.tasks) {
+    assert.equal('worktreePath' in task, false)
+    assert.equal('branch' in task, false)
+  }
+})
+
+test('the worktree isolation switch round-trips through create, update and the page', async () => {
+  const created = await call('projects_create', { name: 'Switch board', worktreeIsolation: true })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  assert.match(created, /worktreeIsolation=on/)
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.worktreeIsolation, true)
+
+  const patched = await request('PATCH', `/projects-api/projects/${projectId}`, { worktreeIsolation: false })
+  assert.equal(patched.status, 200)
+  assert.equal(patched.body.project.worktreeIsolation, false)
+
+  // Only a real boolean flips it: a string must not silently enable isolation.
+  const bogus = await request('PATCH', `/projects-api/projects/${projectId}`, { worktreeIsolation: 'true' })
+  assert.equal(bogus.body.project.worktreeIsolation, false)
+
+  const viaTool = await call('projects_update', { project_id: projectId, worktreeIsolation: true })
+  assert.match(viaTool, /worktreeIsolation=on/)
+  const list = await call('projects_list', {})
+  assert.match(list, /worktree=on/)
 })

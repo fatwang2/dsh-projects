@@ -21,10 +21,12 @@
  *   $DSH_HOME/projects/<projectId>/memory/archive/       whole files moved out
  */
 
+import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 export const inject = ['webServer', 'tools']
 
@@ -105,6 +107,44 @@ const MAX_EFFORT = 60
  * raise that pool.
  */
 const MAX_CONCURRENCY = 8
+/**
+ * Per-task git worktree isolation (opt-in through `project.worktreeIsolation`).
+ *
+ * A task that gets a worktree runs in `<workspace>/.worktrees/<taskId>` on
+ * branch `task/<taskId>`, so two workers of the same project cannot overwrite
+ * each other's files. The worktree is retained after the worker settles (the
+ * human reviews and merges it), and removed when the task is deleted or the
+ * project is archived.
+ *
+ * `.worktrees/` must already be ignored by the repository: creating it in a
+ * repository that does not ignore it would leave an untracked directory in
+ * `git status`, which is exactly the kind of silent pollution this feature
+ * must not cause. Dispatch refuses with an actionable error instead, and no
+ * artifact is created.
+ */
+const WORKTREE_DIR = '.worktrees'
+const WORKTREE_BRANCH_PREFIX = 'task/'
+/**
+ * A task id is used as one path segment and as the branch suffix, so it must be
+ * a plain slug. Real ids are `t-` plus eight hex digits; the wider pattern keeps
+ * a hand-written or legacy id usable without ever allowing `/`, `..` or a
+ * leading `-` to escape the pool or be read as a git option.
+ */
+const WORKTREE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+/** One git command may take this long; a hung credential prompt must not hang dispatch. */
+const GIT_TIMEOUT_MS = 120_000
+const GIT_MAX_BUFFER = 8 * 1024 * 1024
+/**
+ * Git selector variables are inherited from the host process. A stale
+ * `GIT_DIR`/`GIT_WORK_TREE` would make every command below operate on the wrong
+ * repository, so they are removed from the child environment.
+ */
+const GIT_UNSET_KEYS = [
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT',
+  'GIT_CEILING_DIRECTORIES', 'GIT_PREFIX', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE',
+  'GIT_REPLACE_REF_BASE', 'GIT_ATTR_SOURCE',
+]
 /**
  * The one task-status enum. `status` is written by the host itself (add →
  * queued, dispatch → running, settle → review|failed), by the coordinator tool
@@ -333,6 +373,15 @@ function normalizeTask(raw) {
   if (typeof raw.childSessionId === 'string' && raw.childSessionId) task.childSessionId = raw.childSessionId
   if (typeof raw.childName === 'string' && raw.childName) task.childName = raw.childName
   if (typeof raw.stopReason === 'string' && raw.stopReason) task.stopReason = raw.stopReason
+  // Worktree isolation is recorded on the task that ran: the branch and the
+  // checkout path when it succeeded, and a reason code plus a sentence when the
+  // project asked for isolation but the workspace could not provide it.
+  if (typeof raw.branch === 'string' && raw.branch) task.branch = text(raw.branch, 200)
+  if (typeof raw.worktreePath === 'string' && raw.worktreePath) task.worktreePath = text(raw.worktreePath, 1024)
+  if (typeof raw.worktreeDegraded === 'string' && raw.worktreeDegraded) {
+    task.worktreeDegraded = text(raw.worktreeDegraded, 60)
+  }
+  if (typeof raw.worktreeNote === 'string' && raw.worktreeNote) task.worktreeNote = text(raw.worktreeNote, 600)
   if (Number(raw.startedAt)) task.startedAt = Number(raw.startedAt)
   if (Number(raw.finishedAt)) task.finishedAt = Number(raw.finishedAt)
   return task
@@ -348,6 +397,9 @@ function normalizeProject(raw) {
     autonomy: AUTONOMY.includes(raw.autonomy) ? raw.autonomy : 'manual',
     concurrency: intIn(raw.concurrency, 1, MAX_CONCURRENCY, 2),
     archived: raw.archived === true,
+    // Opt-in: every worker of this project gets its own git worktree and branch
+    // when the workspace is a git repository. Off is the historical behavior.
+    worktreeIsolation: raw.worktreeIsolation === true,
     // The default route every worker of this project starts on. Empty means the
     // host default; a task may override it.
     model: modelValue(raw.model),
@@ -1371,6 +1423,7 @@ function summarize(project) {
     autonomy: project.autonomy,
     concurrency: project.concurrency,
     archived: project.archived,
+    worktreeIsolation: project.worktreeIsolation === true,
     autoCompact: project.autoCompact !== false,
     memoryBudget: memoryBudgetOf(project),
     ...(project.lastCompaction ? { lastCompaction: project.lastCompaction } : {}),
@@ -1395,6 +1448,7 @@ async function createProject(input) {
     reasoningEffort: input?.reasoningEffort,
     autoCompact: input?.autoCompact,
     memoryBudget: input?.memoryBudget,
+    worktreeIsolation: input?.worktreeIsolation,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     tasks: [],
@@ -1411,6 +1465,9 @@ async function updateProject(id, patch) {
   if (patch?.autonomy !== undefined && AUTONOMY.includes(patch.autonomy)) project.autonomy = patch.autonomy
   if (patch?.concurrency !== undefined) project.concurrency = intIn(patch.concurrency, 1, MAX_CONCURRENCY, project.concurrency)
   if (patch?.archived !== undefined) project.archived = patch.archived === true
+  // Per-task worktree isolation is a project setting. Only a real boolean flips
+  // it: a string "false" must not silently turn isolation on.
+  if (typeof patch?.worktreeIsolation === 'boolean') project.worktreeIsolation = patch.worktreeIsolation
   // The page may retune the project's default route: this is a project setting,
   // not a task status, so it does not touch the read-only status contract.
   if (patch?.model !== undefined) project.model = modelValue(patch.model)
@@ -1428,9 +1485,13 @@ async function updateProject(id, patch) {
     if (value) project.coordinatorSessionId = value
     else delete project.coordinatorSessionId
   }
+  // Archiving hides the board, so every retained checkout goes with it. Cleanup
+  // failures are collected rather than thrown: the archive must still succeed,
+  // and a task whose cleanup failed keeps its fields so a later archive retries.
+  const worktrees = patch?.archived === true ? await removeProjectWorktrees(project) : undefined
   project.updatedAt = Date.now()
   await writeProject(project)
-  return project
+  return { project, ...(worktrees === undefined ? {} : { worktrees }) }
 }
 
 async function addTask(id, input) {
@@ -1574,28 +1635,344 @@ async function archiveTaskSession(ctx, project, task) {
   return { id: sessionId, archived: true }
 }
 
+// ---------------------------------------------------------------------------
+// Per-task git worktree isolation
+//
+// Opt-in through `project.worktreeIsolation`. Dispatch creates
+// `<workspace>/.worktrees/<taskId>` on branch `task/<taskId>` and points the
+// worker's cwd at it; the checkout is retained after the worker settles so the
+// human can review and merge it. Git is invoked directly (no shell) rather than
+// through the host's worktree service, because this plugin must keep working in
+// a profile that does not compose that service. Every operation is written so a
+// failure leaves the board as it was: preflight checks run before anything is
+// created, a failed creation cleans up its own artifacts, and a failed removal
+// keeps the task row that points at the checkout.
+
+const execFileAsync = promisify(execFile)
+
+/** The child environment for git: no inherited repository selectors, no prompts. */
+function gitEnv() {
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_LFS_SKIP_SMUDGE: '1',
+    GIT_NO_LAZY_FETCH: '1',
+  }
+  for (const key of GIT_UNSET_KEYS) delete env[key]
+  return env
+}
+
 /**
- * Remove one task from the board, optionally archiving its worker session.
+ * Run one git command without a shell.
  *
- * Order: the session is archived *before* the task is spliced out and written.
- * The task row holds the only reference to `childSessionId`, so archiving after
- * the write would lose the id if that write failed. With this order a failure
- * is recoverable in both directions: a failed archive leaves the task untouched
- * (nothing to undo), and a failed project write leaves an archived session whose
- * task is still on the board — the page's `/sessions/restore` route unarchives
- * it, and retrying the delete is safe because archiving an already-archived id
- * is a no-op.
+ * `allowFailure` is for commands whose non-zero exit is an answer ("does this
+ * branch exist?", "is this path ignored?") rather than an error. Even then the
+ * result distinguishes an exit code from a failure to start git at all: a
+ * missing executable has `code: null`, so callers never mistake "git is not
+ * installed" for "the answer is no".
+ */
+async function runGit(cwd, args, { allowFailure = false } = {}) {
+  try {
+    const { stdout, stderr } = await execFileAsync('git', args, {
+      cwd,
+      env: gitEnv(),
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: GIT_MAX_BUFFER,
+      windowsHide: true,
+    })
+    return { ok: true, code: 0, stdout: String(stdout).trim(), stderr: String(stderr).trim() }
+  } catch (error) {
+    const result = {
+      ok: false,
+      code: typeof error?.code === 'number' ? error.code : null,
+      stdout: typeof error?.stdout === 'string' ? error.stdout.trim() : '',
+      stderr: typeof error?.stderr === 'string' ? error.stderr.trim() : '',
+      error,
+    }
+    if (allowFailure) return result
+    throw new Error(
+      `git ${args.join(' ')} failed${result.code === null ? '' : ` (exit ${result.code})`}: ${result.stderr || result.stdout || messageOf(error)}`,
+    )
+  }
+}
+
+/**
+ * The repository root above `directory`, or null when it is not inside a git
+ * working tree. A missing git executable and a repository git refuses to read
+ * (dubious ownership, a bare repository) are errors, not "not a repository":
+ * silently degrading there would hide a broken environment.
+ */
+async function gitRepositoryRoot(directory) {
+  const result = await runGit(directory, ['rev-parse', '--show-toplevel'], { allowFailure: true })
+  if (result.ok) return result.stdout
+  if (result.code === 128 && /not a git repository/i.test(result.stderr)) return null
+  throw new Error(
+    `Could not read the git repository at ${directory}: ${result.stderr || result.stdout || (result.code === null ? 'git is not available' : `exit ${result.code}`)}`,
+  )
+}
+
+/**
+ * The main checkout of the repository that contains `directory`.
+ *
+ * `git worktree remove` and `git branch` act on the common repository, and from
+ * a linked worktree `rev-parse --show-toplevel` names that worktree, not the
+ * main checkout. The first entry of `worktree list --porcelain` is always the
+ * main one, so it is the stable place to run both commands from.
+ */
+async function gitMainRepositoryRoot(directory) {
+  const result = await runGit(directory, ['worktree', 'list', '--porcelain'], { allowFailure: true })
+  if (!result.ok) return null
+  const first = result.stdout.split('\n').find((line) => line.startsWith('worktree '))
+  return first ? first.slice('worktree '.length) : null
+}
+
+/** Whether the repository ignores `relativePath` (the `.worktrees/` pool, say). */
+async function gitIgnores(directory, relativePath) {
+  const result = await runGit(directory, ['check-ignore', '--no-index', '-q', '--', relativePath], { allowFailure: true })
+  if (result.ok) return true
+  if (result.code === 1) return false
+  throw new Error(
+    `Could not check whether ${relativePath} is ignored in ${directory}: ${result.stderr || result.stdout || (result.code === null ? 'git is not available' : `exit ${result.code}`)}`,
+  )
+}
+
+/**
+ * The branch and checkout path one task would use, validated before any git
+ * command that writes. The task id is one path segment and one branch suffix,
+ * so a malformed id is rejected here rather than being allowed to escape the
+ * pool or be parsed as a git option.
+ */
+function worktreePlan(project, task) {
+  const id = typeof task.id === 'string' ? task.id : ''
+  if (!WORKTREE_ID.test(id)) {
+    throw new Error(
+      `Task id ${JSON.stringify(id)} cannot be used as a worktree name: use letters, digits, ".", "_" or "-" (not a leading "-").`,
+    )
+  }
+  const workspace = project.workspace
+  if (!workspace) throw new Error('The project has no workspace, so there is nowhere to create a worktree.')
+  const root = resolve(workspace, WORKTREE_DIR)
+  const path = resolve(root, id)
+  if (dirname(path) !== root || basename(path) !== id) {
+    throw new Error(`Task id ${JSON.stringify(id)} would escape ${root}.`)
+  }
+  return { id, workspace, root, path, branch: `${WORKTREE_BRANCH_PREFIX}${id}` }
+}
+
+/** A path is exactly this task's pool entry, so cleanup may remove it. */
+function isManagedWorktreePath(project, task, path) {
+  if (!project.workspace || !path) return false
+  return resolve(path) === resolve(project.workspace, WORKTREE_DIR, String(task.id))
+}
+
+/**
+ * Best-effort removal of the artifacts a failed creation may have left. It never
+ * throws: the caller is already reporting the original failure, and a cleanup
+ * problem must not replace it. The checkout path is the exact pool entry
+ * validated by `worktreePlan`, so removing it cannot touch anything else.
+ */
+async function cleanupFailedWorktree(repoRoot, plan, branchExistedBefore) {
+  try {
+    await runGit(repoRoot, ['worktree', 'remove', '--force', '--', plan.path], { allowFailure: true })
+    await runGit(repoRoot, ['worktree', 'prune'], { allowFailure: true })
+    if (!branchExistedBefore) {
+      const branch = await runGit(repoRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { allowFailure: true })
+      if (branch.ok) await runGit(repoRoot, ['branch', '-D', '--', plan.branch], { allowFailure: true })
+    }
+    if (await pathExists(plan.path)) await rm(plan.path, { recursive: true, force: true })
+  } catch {
+    // Keep the original error; the task stays queued and a retry can reuse the
+    // branch or report the leftover path.
+  }
+}
+
+/**
+ * Create (or reuse) the worktree for one task.
+ *
+ * @returns `{ path, branch, repoRoot, reused }` on success, or
+ *   `{ degraded, note }` when the workspace cannot provide isolation (missing
+ *   directory, not a git repository). A condition that would pollute the
+ *   repository or leave a half-created checkout throws instead: the caller then
+ *   leaves the task queued and reports the error, which is the recoverable
+ *   failure the feature promises.
+ */
+async function createTaskWorktree(project, task) {
+  const workspace = typeof project.workspace === 'string' ? project.workspace : ''
+  if (!workspace) {
+    return {
+      degraded: 'workspace_missing',
+      note: 'Worktree isolation is on, but the project has no workspace; the worker ran in the coordinator\'s directory.',
+    }
+  }
+  if (!(await isDirectory(workspace))) {
+    return {
+      degraded: 'workspace_missing',
+      note: `Worktree isolation is on, but the project workspace ${workspace} is not a directory; the worker ran in the shared workspace.`,
+    }
+  }
+  const plan = worktreePlan(project, task)
+  const repoRoot = await gitRepositoryRoot(plan.workspace)
+  if (!repoRoot) {
+    return {
+      degraded: 'not_a_git_repository',
+      note: `Worktree isolation is on, but ${plan.workspace} is not inside a git repository; the worker ran in the shared workspace.`,
+    }
+  }
+  // Git's own ref grammar is the final word: a hand-written task id can pass the
+  // slug pattern and still be an invalid branch (a trailing ".lock", say).
+  const ref = await runGit(repoRoot, ['check-ref-format', `refs/heads/${plan.branch}`], { allowFailure: true })
+  if (!ref.ok) throw new Error(`"${plan.branch}" is not a valid git branch name for task ${task.id}.`)
+  // Refuse before creating anything: an unignored pool would show up as an
+  // untracked directory in the repository this feature must not pollute.
+  if (!(await gitIgnores(plan.workspace, `${WORKTREE_DIR}/`))) {
+    throw new Error(
+      `Worktree isolation is on, but "${WORKTREE_DIR}/" is not ignored in ${plan.workspace}. `
+      + `Add "${WORKTREE_DIR}/" to the repository's .gitignore (or turn project.worktreeIsolation off) and dispatch again.`,
+    )
+  }
+  const pathExistsNow = await pathExists(plan.path)
+  const branchExists = (await runGit(repoRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { allowFailure: true })).ok
+  if (pathExistsNow) {
+    // A retry after a failed start may find the checkout it created last time.
+    // Reuse it only when it really is this task's branch; anything else is a
+    // collision a human must resolve, not something to overwrite.
+    const head = await runGit(plan.path, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true })
+    if (!head.ok || head.stdout !== plan.branch) {
+      throw new Error(
+        `Worktree path ${plan.path} already exists and is not a checkout of ${plan.branch}. Remove it (or the branch) before dispatching task ${task.id}.`,
+      )
+    }
+    return { path: plan.path, branch: plan.branch, repoRoot, reused: true }
+  }
+  try {
+    if (branchExists) {
+      // The branch survived an earlier failure; check it out instead of creating
+      // it again, so a retry does not need manual cleanup.
+      await runGit(repoRoot, [
+        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+        'worktree', 'add', '--', plan.path, plan.branch,
+      ])
+    } else {
+      await runGit(repoRoot, [
+        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+        'worktree', 'add', '-b', plan.branch, '--', plan.path, 'HEAD',
+      ])
+    }
+    const head = await runGit(plan.path, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFailure: true })
+    if (!head.ok || head.stdout !== plan.branch) {
+      throw new Error(`the new checkout is not on ${plan.branch} (git reported ${head.stdout || head.stderr || 'no branch'})`)
+    }
+  } catch (error) {
+    await cleanupFailedWorktree(repoRoot, plan, branchExists)
+    throw new Error(`Could not create the git worktree for task ${task.id} at ${plan.path}: ${messageOf(error)}`)
+  }
+  return { path: plan.path, branch: plan.branch, repoRoot, reused: false }
+}
+
+/**
+ * Remove the worktree and branch recorded on one task.
+ *
+ * Idempotent: a missing directory or branch is success, so a retry after a
+ * partial failure finishes the job. `--force` is deliberate — deleting a task is
+ * the human asking for the checkout to go, including uncommitted work; the
+ * alternative would be a board row that can never be deleted because its
+ * worktree is dirty.
+ *
+ * @returns `null` when the task never had a worktree, otherwise
+ *   `{ removed, branchDeleted, note? }`.
+ */
+async function removeTaskWorktree(project, task) {
+  const path = typeof task.worktreePath === 'string' ? task.worktreePath : ''
+  const branch = typeof task.branch === 'string' ? task.branch : ''
+  if (!path && !branch) return null
+  const start = path && (await isDirectory(path)) ? path : project.workspace
+  const repoRoot = start && (await isDirectory(start)) ? await gitMainRepositoryRoot(start) : null
+  if (!repoRoot) {
+    if (path && (await pathExists(path))) {
+      throw new Error(`Could not find the git repository for worktree ${path}; remove it manually before deleting the task.`)
+    }
+    return { removed: false, branchDeleted: false, note: 'worktree and repository are already gone' }
+  }
+  let removed = false
+  if (path && (await pathExists(path))) {
+    const result = await runGit(repoRoot, ['worktree', 'remove', '--force', '--', path], { allowFailure: true })
+    if (!result.ok) {
+      // Not registered but present: a leftover from a failed creation. Only the
+      // exact pool entry is removed; anything else is reported, never deleted.
+      if (!isManagedWorktreePath(project, task, path)) {
+        throw new Error(`Could not remove worktree ${path}: ${result.stderr || result.stdout || `exit ${result.code}`}`)
+      }
+      await rm(path, { recursive: true, force: true })
+    }
+    removed = true
+  }
+  await runGit(repoRoot, ['worktree', 'prune'], { allowFailure: true })
+  let branchDeleted = false
+  if (branch) {
+    const exists = await runGit(repoRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { allowFailure: true })
+    if (exists.ok) {
+      const deleted = await runGit(repoRoot, ['branch', '-D', '--', branch], { allowFailure: true })
+      if (!deleted.ok) {
+        throw new Error(`Could not delete branch ${branch}: ${deleted.stderr || deleted.stdout || `exit ${deleted.code}`}`)
+      }
+      branchDeleted = true
+    }
+  }
+  return { removed, branchDeleted }
+}
+
+/**
+ * Remove every worktree recorded on a project's tasks. Used when a project is
+ * archived: the board is hidden, so leaving checkouts behind would strand them.
+ * Failures are collected, not thrown: archiving must still succeed, and a task
+ * whose cleanup failed keeps its fields so a later archive retries it.
+ */
+async function removeProjectWorktrees(project) {
+  const removed = []
+  const failed = []
+  for (const task of project.tasks) {
+    if (!task.worktreePath && !task.branch) continue
+    try {
+      const result = await removeTaskWorktree(project, task)
+      removed.push({ taskId: task.id, ...(result || {}) })
+      delete task.worktreePath
+      delete task.branch
+      delete task.worktreeDegraded
+      delete task.worktreeNote
+    } catch (error) {
+      failed.push({ taskId: task.id, error: messageOf(error) })
+      task.worktreeNote = `Worktree cleanup failed while archiving: ${messageOf(error)}`
+    }
+  }
+  return { removed, failed }
+}
+
+/**
+ * Remove one task from the board, optionally archiving its worker session, and
+ * remove the git worktree/branch it recorded.
+ *
+ * Order: the worktree is removed first, then the session is archived, then the
+ * task is spliced out and written. The task row holds the only references to
+ * both `childSessionId` and `worktreePath`, so the write must come last. The
+ * worktree goes first because a git failure is the more likely one and leaves
+ * both the task and the session untouched; if the later archive fails instead,
+ * the task stays on the board and a retry is safe because removing an already
+ * gone worktree is a no-op. A failed project write leaves an archived session
+ * whose task is still on the board — the page's `/sessions/restore` route
+ * unarchives it, and retrying the delete is safe because archiving an
+ * already-archived id is a no-op.
  */
 async function removeTask(ctx, projectId, taskId, action = '') {
   const project = await readProject(projectId)
   const index = project.tasks.findIndex((candidate) => candidate.id === taskId)
   if (index < 0) throw httpError(404, 'task_not_found')
   const task = project.tasks[index]
+  const worktree = await removeTaskWorktree(project, task)
   const session = action === 'archive' ? await archiveTaskSession(ctx, project, task) : null
   project.tasks.splice(index, 1)
   project.updatedAt = Date.now()
   await writeProject(project)
-  return { project, session }
+  return { project, session, worktree }
 }
 
 function blocksToText(blocks) {
@@ -1669,7 +2046,7 @@ function languageRule(language) {
   return lines
 }
 
-function workerPrompt(project, task, memoryFiles) {
+function workerPrompt(project, task, memoryFiles, workdir, branch) {
   const lines = [
     `You are the worker for one task in the DSH project "${project.name}" (project_id: ${project.id}).`,
     'Do only this task, then report back. The coordinator keeps working while you run.',
@@ -1696,7 +2073,12 @@ function workerPrompt(project, task, memoryFiles) {
   lines.push(
     '',
     '## How to work',
-    project.workspace ? `- Work inside ${project.workspace}.` : '- Work in the current directory.',
+    // The effective working directory, not always the project workspace: with
+    // worktree isolation the worker's cwd is its own checkout.
+    workdir ? `- Work inside ${workdir}.` : '- Work in the current directory.',
+    ...(branch
+      ? [`- This is an isolated git worktree on branch ${branch}; commit your changes there. The coordinator will not merge it automatically.`]
+      : []),
     '- Keep changes scoped to this task; do not rewrite unrelated code.',
     `- Before finishing, append what later tasks must know (findings, decisions, gotchas) to the shared memory with the projects_memory tool: project_id "${project.id}", action "append", name "<topic-slug>", description "<one line>".`,
     '- Do not change the task status; the runner records your final message as the task output.',
@@ -1748,7 +2130,36 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   }
   const memoryFiles = await readMemoryFiles(project.id)
   const controller = new AbortController()
-  const cwd = project.workspace && (await isDirectory(project.workspace)) ? project.workspace : undefined
+  let cwd = project.workspace && (await isDirectory(project.workspace)) ? project.workspace : undefined
+  // Per-task isolation is opt-in. A task that already recorded a checkout keeps
+  // its `branch`/`worktreePath` when the switch is later turned off: those
+  // fields describe the retained checkout, not the current run, and deleting
+  // them here would orphan it. Only the degradation note belongs to the latest
+  // dispatch, so it is cleared when isolation was not requested.
+  let worktree = null
+  let isolationNote = ''
+  if (project.worktreeIsolation) {
+    const prepared = await createTaskWorktree(project, task)
+    if (prepared.degraded) {
+      // The historical behavior: run in the shared workspace, but say why on
+      // the task so the coordinator (and the page) can see isolation was asked
+      // for and not delivered.
+      task.worktreeDegraded = prepared.degraded
+      task.worktreeNote = prepared.note
+      isolationNote = ` Worktree isolation degraded (${prepared.degraded}): ${prepared.note}`
+    } else {
+      worktree = prepared
+      cwd = prepared.path
+      task.branch = prepared.branch
+      task.worktreePath = prepared.path
+      delete task.worktreeDegraded
+      delete task.worktreeNote
+      isolationNote = ` worktree=${prepared.path} branch=${prepared.branch}${prepared.reused ? ' (reused)' : ''}.`
+    }
+  } else {
+    delete task.worktreeDegraded
+    delete task.worktreeNote
+  }
   // Route precedence: the task override wins over the project default, and an
   // empty result means "let the child inherit the parent Agent's route" — in
   // which case `agentOptions` is omitted entirely rather than sent as `{}` or
@@ -1776,7 +2187,7 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
     started = await subagents.startActivation({
       provider: 'spawn',
       label: `${project.name} · ${task.title}`.slice(0, 120),
-      prompt: [{ type: 'text', text: workerPrompt(project, task, memoryFiles) }],
+      prompt: [{ type: 'text', text: workerPrompt(project, task, memoryFiles, cwd, worktree?.branch) }],
       parent: exec.agent,
       ...(cwd === undefined ? {} : { cwd }),
       ...(agentPreset ? { agentPreset } : {}),
@@ -1785,6 +2196,20 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
       delivery: 'parent',
     })
   } catch (error) {
+    // A worker that never started must not leave a checkout behind: the task is
+    // still queued, and the next dispatch would collide with the orphan.
+    if (worktree && !worktree.reused) {
+      try {
+        await removeTaskWorktree(project, { id: task.id, worktreePath: worktree.path, branch: worktree.branch })
+        delete task.branch
+        delete task.worktreePath
+      } catch (cleanupError) {
+        throw new Error(
+          `Could not start the worker: ${messageOf(error)} `
+          + `(the new worktree ${worktree.path} could not be removed: ${messageOf(cleanupError)})`,
+        )
+      }
+    }
     throw new Error(`Could not start the worker: ${messageOf(error)}`)
   }
   controllers.set(task.id, controller)
@@ -1801,7 +2226,7 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   const routeNote = route === undefined ? '' : ` model=${route.provider ? `${route.provider}/` : ''}${route.model}`
   const presetNote = agentPreset ? ` preset=${agentPreset}` : ''
   const effortNote = effort ? ` effort=${effort}` : ''
-  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${effortNote}${presetNote}. It runs in the background; its final message lands on the task when it settles.`
+  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${effortNote}${presetNote}.${isolationNote} It runs in the background; its final message lands on the task when it settles.`
 }
 
 async function settleWorker(info) {
@@ -2072,8 +2497,10 @@ async function routeRequest(ctx, method, path, req, searchParams) {
     }
     if (method === 'PATCH') {
       const body = await readJson(req)
-      const project = await updateProject(projectId, body)
-      return { status: 200, body: { project } }
+      const { project, worktrees } = await updateProject(projectId, body)
+      // `worktrees` is present only on an archive request: it reports what the
+      // cleanup removed and what it could not, without failing the archive.
+      return { status: 200, body: { project, ...(worktrees === undefined ? {} : { worktrees }) } }
     }
     throw httpError(405, 'method_not_allowed')
   }
@@ -2169,8 +2596,13 @@ async function routeRequest(ctx, method, path, req, searchParams) {
             : `unknown session action "${action}" (supported: ${SESSION_ACTIONS.join(', ')})`,
         )
       }
-      const { session } = await removeTask(ctx, projectId, taskId, action)
-      return { status: 200, body: { deleted: true, session } }
+      const { session, worktree } = await removeTask(ctx, projectId, taskId, action)
+      return {
+        status: 200,
+        // `worktree` is null when the task never had one, so a board that does
+        // not use isolation keeps the exact response shape it had before.
+        body: { deleted: true, session, ...(worktree === null ? {} : { worktree }) },
+      }
     }
     throw httpError(405, 'method_not_allowed')
   }
@@ -2230,7 +2662,7 @@ function formatProject(project, memoryFiles) {
   const lines = [
     `Project ${project.id} — ${project.name}`,
     `workspace: ${project.workspace || '(inherited)'}`,
-    `autonomy: ${project.autonomy}, concurrency: ${project.concurrency}${project.archived ? ', ARCHIVED' : ''}`,
+    `autonomy: ${project.autonomy}, concurrency: ${project.concurrency}${project.worktreeIsolation ? ', worktree isolation: on' : ''}${project.archived ? ', ARCHIVED' : ''}`,
     `worker model: ${project.model || '(host default)'}${project.reasoningEffort ? `, effort: ${project.reasoningEffort}` : ''}${project.agentPreset ? `, preset: ${project.agentPreset}` : ''}`,
     `memory: budget ${memoryBudgetOf(project)}, auto-compaction ${project.autoCompact === false ? 'off' : 'on'}${formatCompaction(project)}`,
     '',
@@ -2246,9 +2678,17 @@ function formatProject(project, memoryFiles) {
     const model = task.model ? ` model=${task.model}` : ''
     const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
     const preset = task.agentPreset ? ` preset=${task.agentPreset}` : ''
+    // The retained checkout (or the reason isolation was not applied) is part of
+    // the task's state a coordinator needs before re-dispatching or merging.
+    const worktree = task.worktreePath
+      ? ` worktree=${task.worktreePath} branch=${task.branch || '(unknown)'}`
+      : task.worktreeDegraded
+        ? ` worktree=off(${task.worktreeDegraded})`
+        : ''
     lines.push(
-      `- ${task.id} [${task.status}]${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset} ${task.title}`,
+      `- ${task.id} [${task.status}]${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset}${worktree} ${task.title}`,
     )
+    if (task.worktreeNote) lines.push(`    worktree: ${task.worktreeNote}`)
     if (task.output) lines.push(`    output: ${task.output.replace(/\n+/g, ' ').slice(0, 300)}`)
   }
   lines.push(
@@ -2278,7 +2718,7 @@ function registerTools(ctx) {
           // One tally, one formatter: `resolved` is just another status, so the
           // list cannot count accepted work as review/blocked again.
           const tally = counts(project.tasks)
-          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.model ? ` model=${project.model}` : ''}${project.reasoningEffort ? ` effort=${project.reasoningEffort}` : ''}${project.archived ? ' archived' : ''}  tasks: ${formatCounts(tally)}`
+          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.worktreeIsolation ? ' worktree=on' : ''}${project.model ? ` model=${project.model}` : ''}${project.reasoningEffort ? ` effort=${project.reasoningEffort}` : ''}${project.archived ? ' archived' : ''}  tasks: ${formatCounts(tally)}`
         })
         .join('\n')
     },
@@ -2330,6 +2770,11 @@ function registerTools(ctx) {
           type: 'integer',
           description: `Shared-memory size that triggers auto-compaction, ${MEMORY_BUDGET_MIN}-${MEMORY_BUDGET_MAX}; defaults to ${MEMORY_BUDGET}.`,
         },
+        worktreeIsolation: {
+          type: 'boolean',
+          description:
+            'Give every task its own git worktree and branch under <workspace>/.worktrees/ when the workspace is a git repository. Off by default; the repository must already ignore ".worktrees/".',
+        },
       },
       required: ['name'],
       additionalProperties: false,
@@ -2337,7 +2782,7 @@ function registerTools(ctx) {
     output: TEXT_OUTPUT,
     execute: async (args) => {
       const project = await createProject(args)
-      return `Created project ${project.id} "${project.name}". autonomy=${project.autonomy} concurrency=${project.concurrency}.`
+      return `Created project ${project.id} "${project.name}". autonomy=${project.autonomy} concurrency=${project.concurrency} worktreeIsolation=${project.worktreeIsolation === true ? 'on' : 'off'}.`
     },
   })
 
@@ -2367,6 +2812,11 @@ function registerTools(ctx) {
           type: 'integer',
           description: `Shared-memory size that triggers auto-compaction, ${MEMORY_BUDGET_MIN}-${MEMORY_BUDGET_MAX}; defaults to ${MEMORY_BUDGET}.`,
         },
+        worktreeIsolation: {
+          type: 'boolean',
+          description:
+            'Give every task its own git worktree and branch under <workspace>/.worktrees/ when the workspace is a git repository. Off by default; the repository must already ignore ".worktrees/".',
+        },
       },
       required: ['project_id'],
       additionalProperties: false,
@@ -2384,9 +2834,10 @@ function registerTools(ctx) {
         ...(args?.concurrency === undefined ? {} : { concurrency: args.concurrency }),
         ...(args?.autoCompact === undefined ? {} : { autoCompact: args.autoCompact }),
         ...(args?.memoryBudget === undefined ? {} : { memoryBudget: args.memoryBudget }),
+        ...(args?.worktreeIsolation === undefined ? {} : { worktreeIsolation: args.worktreeIsolation }),
       }
-      const project = await updateProject(String(args?.project_id || ''), patch)
-      return `Updated project ${project.id} "${project.name}". autonomy=${project.autonomy} concurrency=${project.concurrency} memory=${memoryBudgetOf(project)} autoCompact=${project.autoCompact !== false}${formatCompaction(project)}.`
+      const { project } = await updateProject(String(args?.project_id || ''), patch)
+      return `Updated project ${project.id} "${project.name}". autonomy=${project.autonomy} concurrency=${project.concurrency} memory=${memoryBudgetOf(project)} autoCompact=${project.autoCompact !== false} worktreeIsolation=${project.worktreeIsolation === true ? 'on' : 'off'}${formatCompaction(project)}.`
     },
   })
 

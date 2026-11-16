@@ -1279,7 +1279,16 @@ test('the threads head is glyphs, and the fold-all action lives in the filter', 
 
 test('the concurrency input follows the Host ceiling of eight', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
-  const input = source.slice(source.indexOf("t('concurrency')"), source.indexOf("t('workspace')"))
+  // The concurrency field is the general group's last policy row, before the
+  // threads section.
+  const general = source.slice(
+    source.indexOf('const renderGeneralSettings'),
+    source.indexOf('const renderThreadsSection'),
+  )
+  const input = general.slice(
+    general.indexOf("t('concurrency')"),
+    general.indexOf('renderThreadsSection()'),
+  )
   assert.match(input, /max: 8,/)
   assert.doesNotMatch(source, /max: 10,/)
 })
@@ -1297,12 +1306,12 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
 
   // Project settings: one select per catalog, each with the empty default
   // option, saving through the existing project PATCH route. The pickers live
-  // in the execution group, so the slice is that group's renderer.
-  const settingsStart = source.indexOf('const renderExecutionSettings')
+  // in the general group's threads section, so the slice is that section.
+  const settingsStart = source.indexOf('const renderThreadsSection')
   const settingsEnd = source.indexOf('const renderMemorySettings', settingsStart)
   assert.ok(settingsStart > 0 && settingsEnd > settingsStart)
   const settings = source.slice(settingsStart, settingsEnd)
-  assert.match(settings, /t\('execution'\)/)
+  assert.match(settings, /t\('threads'\)/)
   assert.match(settings, /catalog\.enumerable[\s\S]{0,60}\? h\([\s\S]{0,160}'select'/)
   assert.match(settings, /patchProject\(\{ model: event\.target\.value \}\)/)
   assert.match(settings, /patchProject\(\{ reasoningEffort: event\.target\.value \}\)/)
@@ -1353,8 +1362,8 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
   const { dictionaries } = applyWithFakes()
   const { en, zh } = dictionaries[0].dicts
   for (const key of [
-    'execution',
-    'executionHint',
+    'threads',
+    'threadsHint',
     'model',
     'reasoningEffort',
     'effortShort',
@@ -1588,9 +1597,10 @@ test('the effort picker follows the catalog and the agent preset left the page',
   // A stored id the catalog does not advertise stays selectable.
   assert.match(helper, /if \(value && !entries\.some\(\(entry\) => entry\.id === value\)\)/)
 
-  // Settings: the picker sits next to the model, defaults to the empty
-  // "follows host" option, and saves through the project PATCH route.
-  const settingsStart = source.indexOf('const renderExecutionSettings')
+  // Settings: the picker sits next to the model in the general group's threads
+  // section, defaults to the empty "follows host" option, and saves through the
+  // project PATCH route.
+  const settingsStart = source.indexOf('const renderThreadsSection')
   const settings = source.slice(settingsStart, source.indexOf('const renderMemorySettings', settingsStart))
   assert.match(settings, /t\('reasoningEffort'\)/)
   assert.match(settings, /h\('option', \{ value: '' \}, t\('effortDefault'\)\)/)
@@ -1853,18 +1863,27 @@ test('the header triggers are glyphs, and archive moved into the settings dialog
   assert.match(source, /concurrency: Number\(newProject\.concurrency\) \|\| 2/)
   assert.match(source, /const BLANK_PROJECT = \{ name: '', goal: '', workspace: '', concurrency: 2 \}/)
 
-  // Archive is the danger group, the last group in the settings panel.
-  const groups = source.slice(
+  // Archive is the general group's last section: the threads section comes
+  // first, then the archive action, so the one irreversible control sits at the
+  // bottom of the group that owns every project setting.
+  const general = source.slice(
     source.indexOf('const renderGeneralSettings'),
-    source.indexOf('const renderListRail'),
+    source.indexOf('const renderThreadsSection'),
   )
-  const danger = groups.indexOf("className: 'pj-section pj-danger-zone'")
-  assert.ok(danger > 0, 'the danger zone is inside the settings dialog')
-  assert.ok(danger > groups.indexOf("t('memory')"), 'the danger group follows the memory group')
+  assert.ok(
+    general.indexOf('renderThreadsSection()') > 0 &&
+      general.indexOf('renderThreadsSection()') < general.indexOf('renderArchiveSection()'),
+    'the general group renders the threads section, then the archive section',
+  )
+  const archive = source.slice(
+    source.indexOf('const renderArchiveSection'),
+    source.indexOf('const renderSettings'),
+  )
+  assert.match(archive, /className: 'pj-section pj-danger-zone'/)
+  assert.match(archive, /t\('archiveSection'\)/)
+  assert.match(archive, /t\('archiveWarning'\)/)
   assert.match(source, /\.pj-section\.pj-danger-zone\{[^}]*border-top:\.5px solid color-mix\(in srgb, var\(--dsw-alias-state-error-primary\)/)
   assert.match(source, /\.pj-section\.pj-danger-zone \.pj-section-title\{color:var\(--dsw-alias-state-error-primary\)\}/)
-  assert.match(source, /t\('dangerZone'\)/)
-  assert.match(source, /t\('archiveWarning'\)/)
 
   // Archiving needs two presses: the first only arms it, and the armed dialog
   // refuses to close on a mask press.
@@ -1889,7 +1908,7 @@ test('the header triggers are glyphs, and archive moved into the settings dialog
   for (const key of [
     'settings',
     'close',
-    'dangerZone',
+    'archiveSection',
     'archiveWarning',
     'archiveConfirm',
     'filterThreads',
@@ -1902,7 +1921,7 @@ test('the header triggers are glyphs, and archive moved into the settings dialog
   assert.match(en.archiveWarning, /hides this project from the list/)
   assert.match(zh.archiveWarning, /从列表中隐藏/)
   // The retired keys are gone from both dictionaries.
-  for (const key of ['chatTab', 'settingsTab', 'refresh']) {
+  for (const key of ['chatTab', 'settingsTab', 'refresh', 'dangerZone', 'execution', 'executionHint']) {
     assert.equal(en[key], undefined, `EN still carries ${key}`)
     assert.equal(zh[key], undefined, `ZH still carries ${key}`)
   }
@@ -2244,17 +2263,14 @@ test('the workspace is a folder picker in both dialogs, never a text field', asy
   assert.equal(page.textOf(page.byClass('pj-path', settingsField)[0]), SAMPLE_PROJECT.workspace)
   assert.ok(page.byText('选择文件夹', settingsField).length === 1)
   assert.ok(page.byText('清除', settingsField).length === 1, 'a stored folder can be cleared')
-  // The general group has no model picker; the execution group owns both.
-  assert.equal(page.byTag('select', options).length, 0)
-  page.click(page.byClass('pj-settings-nav-cell', settings)[1])
-  // A group switch re-renders the panel, so re-read the options column.
-  const execution = page.byClass('pj-settings-options')[0]
-  assert.equal(page.byTag('select', execution).length, 2)
-  assert.equal(page.byLabel('自主程度', execution).length, 0)
-  assert.doesNotMatch(page.textOf(execution), /自主程度/)
+  // The threads section lives in the same group now, so the general group owns
+  // both pickers.
+  assert.equal(page.byTag('select', options).length, 2)
+  assert.equal(page.byLabel('自主程度', options).length, 0)
+  assert.doesNotMatch(page.textOf(options), /自主程度/)
   // The "effective model: … · effort: …" line is gone: it repeated the two
-  // pickers directly below it.
-  for (const hint of page.byClass('pj-hint', execution)) {
+  // pickers directly above it.
+  for (const hint of page.byClass('pj-hint', options)) {
     assert.doesNotMatch(page.textOf(hint), /生效模型/, 'the duplicated default line is gone')
   }
 })
@@ -2272,51 +2288,63 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(page.byClass('pj-settings-panel', settings).length, 1, 'the panel is the Host two-column card')
   assert.equal(page.textOf(page.byClass('pj-settings-title', settings)[0]), '设置')
 
-  // The rail: four groups, the first one selected.
+  // The rail: two groups, the first one selected.
   const cells = () => page.byClass('pj-settings-nav-cell')
   const options = () => page.byClass('pj-settings-options')[0]
   const titles = () => page.byClass('pj-section-title', options()).map((node) => page.textOf(node))
-  assert.equal(cells().length, 4, 'one cell per group')
+  assert.equal(cells().length, 2, 'one cell per group')
   assert.deepEqual(
     cells().map((cell) => page.textOf(cell)),
-    ['通用', '执行', '共享记忆', '危险区'],
+    ['通用', '共享记忆'],
   )
   assert.equal(cells()[0].props['aria-current'], 'true')
-  for (const cell of cells().slice(1)) assert.equal(cell.props['aria-current'], undefined)
+  assert.equal(cells()[1].props['aria-current'], undefined)
 
-  // General: the project name, the instructions and the policy. No picker, no
-  // memory row and no archive action.
-  assert.deepEqual(titles(), ['项目', '项目指令', '派发策略'])
+  // General: the project name, the instructions, the dispatch policy, the
+  // threads' defaults, and the archive action last. No memory row.
+  assert.deepEqual(titles(), ['项目', '项目指令', '派发策略', '线程', '归档项目'])
   assert.equal(page.byLabel('项目名称', options()).length, 1)
   assert.equal(page.byLabel('项目指令', options()).length, 1)
   assert.equal(page.byLabel('并行执行者', options()).length, 1)
-  assert.equal(page.byTag('select', options()).length, 0)
+  assert.equal(page.byTag('select', options()).length, 2, 'the threads section owns the two pickers')
+  assert.equal(page.byLabel('模型', options()).length, 1)
+  assert.equal(page.byLabel('思考程度', options()).length, 1)
   assert.equal(page.byClass('pj-memory-row', options()).length, 0)
-  assert.equal(page.byText('归档', options()).length, 0)
 
-  // Execution: the two pickers only.
-  page.click(cells()[1])
-  assert.deepEqual(titles(), ['执行'])
-  assert.equal(page.byTag('select', options()).length, 2)
-  assert.equal(page.byLabel('项目指令', options()).length, 0)
-  assert.equal(page.byClass('pj-memory-row', options()).length, 0)
-  assert.equal(page.byText('归档', options()).length, 0)
-  assert.equal(cells()[1].props['aria-current'], 'true')
+  // The archive action is the last section of the group: it follows the threads
+  // section and closes the options column.
+  const sections = page.byClass('pj-section', options())
+  assert.equal(sections.length, 5, 'five sections in the general group')
+  const last = sections[sections.length - 1]
+  assert.equal(page.textOf(page.byClass('pj-section-title', last)[0]), '归档项目')
+  assert.equal(page.byText('归档', last).length, 1, 'the archive action closes the group')
+
+  // The model and effort pickers belong to the threads section, whose title is
+  // the Threads wording — not an "execution" group.
+  const threadsSection = sections[3]
+  assert.equal(page.textOf(page.byClass('pj-section-title', threadsSection)[0]), '线程')
+  assert.equal(page.byLabel('模型', threadsSection).length, 1)
+  assert.equal(page.byLabel('思考程度', threadsSection).length, 1)
+
+  // There is no Coordinator section: the coordinator Session has no model or
+  // effort of its own, so only the threads' defaults are configurable here.
+  assert.equal(titles().includes('协调者'), false)
+  assert.equal(titles().includes('Coordinator'), false)
+
+  // No group is called 执行 any more: the model and effort pickers are the
+  // Threads section's.
+  assert.equal(cells().some((cell) => page.textOf(cell) === '执行'), false)
+  assert.equal(titles().includes('执行'), false)
+  assert.equal(page.byText('执行', options()).length, 0)
 
   // Memory: the section list and the whole-file editor entry.
-  page.click(cells()[2])
+  page.click(cells()[1])
   assert.deepEqual(titles(), ['共享记忆'])
   assert.equal(page.byClass('pj-memory-row', options()).length, 2)
   assert.equal(page.byText('编辑全文', options()).length, 1)
   assert.equal(page.byTag('select', options()).length, 0)
   assert.equal(page.byText('归档', options()).length, 0)
-
-  // Danger: the archive action, and nothing else.
-  page.click(cells()[3])
-  assert.deepEqual(titles(), ['危险区'])
-  assert.equal(page.byText('归档', options()).length, 1)
-  assert.equal(page.byClass('pj-memory-row', options()).length, 0)
-  assert.equal(page.byTag('select', options()).length, 0)
+  assert.equal(cells()[1].props['aria-current'], 'true')
 
   // Switching never stacks a dialog: one panel the whole time.
   assert.equal(page.byClass('pj-modal-dialog').length, 1)
@@ -2331,7 +2359,7 @@ test('the memory group keeps the section list, the preview and the whole-file ed
 
   page.click(page.byLabel('设置')[0])
   const settings = page.byClass('pj-modal-dialog')[0]
-  page.click(page.byClass('pj-settings-nav-cell', settings)[2])
+  page.click(page.byClass('pj-settings-nav-cell', settings)[1])
   // A group switch re-renders the panel, so re-read the options column.
   const options = page.byClass('pj-settings-options')[0]
   const rows = page.byClass('pj-memory-row', options)
@@ -2409,7 +2437,7 @@ test('a long memory only grows the memory group, never the general group', async
   assert.equal(page.byClass('pj-memory-row', options).length, 0)
 
   // The memory group lists all forty, and the tally rounds the size.
-  page.click(page.byClass('pj-settings-nav-cell', settings)[2])
+  page.click(page.byClass('pj-settings-nav-cell', settings)[1])
   assert.equal(page.byClass('pj-memory-row').length, 40, 'the group lists every section')
   const tally = page.textOf(page.byClass('pj-memory-tally')[0])
   assert.match(tally, /40 节/)
@@ -2426,7 +2454,7 @@ test('the memory tally counts sections, while the group also lists the preamble'
 
   page.click(page.byLabel('设置')[0])
   const settings = page.byClass('pj-modal-dialog')[0]
-  page.click(page.byClass('pj-settings-nav-cell', settings)[2])
+  page.click(page.byClass('pj-settings-nav-cell', settings)[1])
   // A group switch re-renders the panel, so re-read the options column.
   const options = page.byClass('pj-settings-options')[0]
   assert.match(
@@ -2439,7 +2467,7 @@ test('the memory tally counts sections, while the group also lists the preamble'
   assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), '前言')
 })
 
-test('the danger group keeps the two-press archive confirmation', async (t) => {
+test('the archive section closes the general group and keeps the two-press confirmation', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
@@ -2447,9 +2475,15 @@ test('the danger group keeps the two-press archive confirmation', async (t) => {
   t.after(() => page.unmount())
 
   page.click(page.byLabel('设置')[0])
-  page.click(page.byClass('pj-settings-nav-cell')[3])
   const options = () => page.byClass('pj-settings-options')[0]
-  assert.equal(page.byText('归档', options()).length, 1, 'the danger group owns the archive action')
+  // The archive action is in the general group — no group switch needed — and
+  // it is the last section of that group.
+  const sections = page.byClass('pj-section', options())
+  const last = sections[sections.length - 1]
+  assert.equal(page.textOf(page.byClass('pj-section-title', last)[0]), '归档项目')
+  assert.equal(page.byText('归档', options()).length, 1, 'the general group owns the archive action')
+  assert.equal(page.byText('归档', last).length, 1, 'the archive action is the last section')
+
   page.click(page.byText('归档', options())[0])
   assert.equal(page.byText('确认归档', options()).length, 1, 'the first press only arms it')
   assert.equal(page.byText('取消', options()).length, 1)
@@ -2458,8 +2492,8 @@ test('the danger group keeps the two-press archive confirmation', async (t) => {
 
   // Leaving the group disarms the confirmation, so coming back starts over.
   page.click(page.byText('归档', options())[0])
+  page.click(page.byClass('pj-settings-nav-cell')[1])
   page.click(page.byClass('pj-settings-nav-cell')[0])
-  page.click(page.byClass('pj-settings-nav-cell')[3])
   assert.equal(page.byText('确认归档', options()).length, 0)
   assert.equal(page.byText('归档', options()).length, 1)
 })
@@ -2487,34 +2521,29 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
   // The panel state is one group id, and the rail is the only switch.
   assert.match(source, /const \[settingsGroup, setSettingsGroup\] = useState\('general'\)/)
   assert.match(source, /const selectSettingsGroup = \(group\) => \{/)
-  assert.match(source, /if \(settingsGroup === 'execution'\) return renderExecutionSettings\(\)/)
   assert.match(source, /if \(settingsGroup === 'memory'\) return renderMemorySettings\(\)/)
-  assert.match(source, /if \(settingsGroup === 'danger'\) return renderDangerSettings\(\)/)
   assert.match(source, /return renderGeneralSettings\(\)/)
   assert.doesNotMatch(source, /settingsView/)
   assert.doesNotMatch(source, /memoryEnter|memoryBack/)
 
-  // The four groups, each rendered by its own function.
-  for (const name of [
-    'renderGeneralSettings',
-    'renderExecutionSettings',
-    'renderMemorySettings',
-    'renderDangerSettings',
-  ]) {
+  // Two groups, each rendered by its own function. The threads' defaults and
+  // the archive action are sections inside the general group, not groups.
+  for (const name of ['renderGeneralSettings', 'renderThreadsSection', 'renderArchiveSection', 'renderMemorySettings']) {
     assert.match(source, new RegExp(`const ${name} = \\(\\) =>`))
   }
+  assert.doesNotMatch(source, /renderExecutionSettings|renderDangerSettings/)
   const nav = source.slice(
     source.indexOf('const settingsGroups = ['),
     source.indexOf('const renderGeneralSettings'),
   )
   assert.match(nav, /id: 'general'/)
-  assert.match(nav, /id: 'execution'/)
   assert.match(nav, /id: 'memory'/)
-  assert.match(nav, /id: 'danger'/)
+  assert.equal([...nav.matchAll(/id: '/g)].length, 2, 'exactly two groups')
+  assert.doesNotMatch(nav, /id: 'execution'/)
+  assert.doesNotMatch(nav, /id: 'danger'/)
   assert.match(nav, /h\(GearIcon, \{ size: 16 \}\)/)
-  assert.match(nav, /h\(PlayIcon, \{ size: 16 \}\)/)
   assert.match(nav, /h\(MemoryIcon, \{ size: 16 \}\)/)
-  assert.match(nav, /h\(ArchiveIcon, \{ size: 16 \}\)/)
+  assert.doesNotMatch(source, /PlayIcon/)
 
   // One dialog, four layers: the settings panel, the preview and the editor
   // still stack on top of it.
@@ -2550,15 +2579,29 @@ test('the settings dialog is the Host settings panel, and Escape closes one leve
     assert.doesNotMatch(rule, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, `literal colour: ${rule.trim()}`)
   }
 
-  // The labels exist in both languages; the page-switch keys are gone.
+  // The labels exist in both languages; the retired group keys are gone.
   const { dictionaries } = applyWithFakes()
   const { en, zh } = dictionaries[0].dicts
-  for (const key of ['general', 'project', 'settingsNav']) {
+  for (const key of ['general', 'project', 'settingsNav', 'threads', 'threadsHint', 'archiveSection']) {
     assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
     assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
   }
   assert.equal(zh.general, '通用')
   assert.equal(zh.settingsNav, '设置分组')
+  assert.equal(zh.threads, '线程')
+  assert.equal(en.threads, 'Threads')
+  assert.equal(zh.archiveSection, '归档项目')
+  // The threads hint says the coordinator follows the host default: the page has
+  // no coordinator model or effort to configure, which is why the group has no
+  // Coordinator section.
+  assert.match(en.threadsHint, /coordinator/)
+  assert.match(zh.threadsHint, /协调者/)
+  assert.doesNotMatch(source, /coordinatorModel|coordinatorEffort/)
+  // The old group names are gone from both dictionaries.
+  for (const key of ['execution', 'executionHint', 'dangerZone']) {
+    assert.equal(en[key], undefined, `EN still carries ${key}`)
+    assert.equal(zh[key], undefined, `ZH still carries ${key}`)
+  }
   assert.equal(en.memoryEnter, undefined)
   assert.equal(zh.memoryEnter, undefined)
   assert.equal(en.memoryBack, undefined)

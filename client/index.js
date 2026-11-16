@@ -101,7 +101,7 @@ window.__ModuleLoader__.load({
       archive: 'Archive',
       unarchive: 'Unarchive',
       archivedBadge: 'Archived',
-      dangerZone: 'Danger zone',
+      archiveSection: 'Archive project',
       archiveWarning:
         'Archiving hides this project from the list. Its tasks, shared memory and sessions are kept, and you can unarchive it here at any time.',
       archiveConfirm: 'Confirm archive',
@@ -129,6 +129,8 @@ window.__ModuleLoader__.load({
       resizeColumns: 'Resize columns',
       taskActions: 'Task actions',
       threads: 'Threads',
+      threadsHint:
+        'Default model and reasoning effort for the threads this project dispatches. A task may override them; the coordinator itself follows the host default.',
       searchThreads: 'Search threads',
       filterThreads: 'Filter threads',
       filterGroups: 'Groups shown',
@@ -145,9 +147,6 @@ window.__ModuleLoader__.load({
       dispatchCard: 'Dispatched task',
       dispatchPreparing: 'Dispatching…',
       dispatchOpenHint: 'Open this task',
-      execution: 'Execution',
-      executionHint:
-        'Default model and reasoning effort for every worker in this project. A task may override them.',
       model: 'Model',
       reasoningEffort: 'Reasoning effort',
       effortShort: 'Effort',
@@ -238,7 +237,7 @@ window.__ModuleLoader__.load({
       archive: '归档',
       unarchive: '取消归档',
       archivedBadge: '已归档',
-      dangerZone: '危险区',
+      archiveSection: '归档项目',
       archiveWarning:
         '归档后项目会从列表中隐藏。任务、共享记忆与会话都会保留，随时可以在这里取消归档。',
       archiveConfirm: '确认归档',
@@ -266,6 +265,8 @@ window.__ModuleLoader__.load({
       resizeColumns: '调整栏宽',
       taskActions: '任务操作',
       threads: '线程',
+      threadsHint:
+        '本项目派发的线程（Threads）的默认模型与思考程度；单个任务可以覆盖。协调者本身沿用宿主默认。',
       searchThreads: '搜索线程',
       filterThreads: '筛选线程',
       filterGroups: '显示的分组',
@@ -282,8 +283,6 @@ window.__ModuleLoader__.load({
       dispatchCard: '派发的任务',
       dispatchPreparing: '派发中…',
       dispatchOpenHint: '打开这个任务',
-      execution: '执行',
-      executionHint: '本项目所有执行者的默认模型与思考程度；单个任务可以覆盖。',
       model: '模型',
       reasoningEffort: '思考程度',
       effortShort: '思考',
@@ -499,7 +498,7 @@ window.__ModuleLoader__.load({
 .pj-section-title{font-size:14px;font-weight:600;margin:0}
 .pj-hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .pj-section > .pj-hint{margin-bottom:8px}
-/* The danger zone closes the settings dialog: a danger-tinted rule above it and
+/* The danger rule closes the general group: a danger-tinted rule above it and
    the error ink on its title, so the one irreversible action never reads as
    another settings row. */
 /* Two classes, because the sibling-section rule also draws a top border and
@@ -602,9 +601,6 @@ window.__ModuleLoader__.load({
 .pj-settings-nav-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .pj-settings-options{grid-area:options;min-width:0;min-height:0;padding:0 24px 24px;overflow-y:auto}
 .pj-settings-options > .pj-error,.pj-settings-options > .pj-notice{margin:0 0 12px}
-/* The danger zone is a group of its own now, so the rule that used to separate
-   it from the settings above it would draw a stray line under the header. */
-.pj-settings .pj-section.pj-danger-zone:first-child{margin-top:0;padding-top:0;border-top:0}
 /* A narrow window turns the rail into a horizontal strip, as the Host panel
    does: the title and close keep the first row, the cells run edge to edge. */
 @media (max-width: 640px){
@@ -1471,20 +1467,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
           stroke: 'currentColor',
           strokeWidth: ICON_STROKE,
           strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-        }),
-      )
-    }
-
-    /** A play glyph: the settings rail's execution group. */
-    function PlayIcon({ size }) {
-      return h(
-        OutlineIcon,
-        { size },
-        h('path', {
-          d: 'M5.5 3.5L12.5 8L5.5 12.5V3.5Z',
-          stroke: 'currentColor',
-          strokeWidth: ICON_STROKE,
           strokeLinejoin: 'round',
         }),
       )
@@ -2554,9 +2536,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setShowSettings(false)
       }
 
-      // Switching groups only swaps the options column. Leaving the danger
-      // group disarms its confirmation, and leaving memory closes the two
-      // dialogs it can open, so neither survives the group it belongs to.
+      // Switching groups only swaps the options column. The archive
+      // confirmation and the two memory dialogs belong to the group that opens
+      // them, so a switch disarms and closes them.
       const selectSettingsGroup = (group) => {
         setArchiveArmed(false)
         setMemoryPreview(null)
@@ -2979,16 +2961,17 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const memorySectionCount = memorySections(detail?.memory || '').length
 
       // The settings rail: one cell per group, each with the Host's 16px glyph.
-      // The order is the reading order of the panel, general first.
+      // Two groups only. The general group carries every project setting —
+      // including the threads' defaults and, at its very end, the archive
+      // action — and the memory group owns the shared memory.
       const settingsGroups = [
         { id: 'general', label: t('general'), icon: h(GearIcon, { size: 16 }) },
-        { id: 'execution', label: t('execution'), icon: h(PlayIcon, { size: 16 }) },
         { id: 'memory', label: t('memory'), icon: h(MemoryIcon, { size: 16 }) },
-        { id: 'danger', label: t('dangerZone'), icon: h(ArchiveIcon, { size: 16 }) },
       ]
 
-      // The general group: the project's name, its instructions and the
-      // dispatch policy (parallel workers and the chosen workspace).
+      // The general group: the project's name, its instructions, the dispatch
+      // policy (the chosen workspace and how many threads run at once), the
+      // threads' defaults, and the archive action last.
       const renderGeneralSettings = () =>
         h(
           'div',
@@ -3050,27 +3033,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
             h(
               'div',
               { className: 'pj-row' },
-              h(
-                'label',
-                { className: 'pj-field' },
-                h('span', { className: 'pj-label' }, t('concurrency')),
-                h('input', {
-                  className: 'pj-input',
-                  'aria-label': t('concurrency'),
-                  type: 'number',
-                  min: 1,
-                  max: 8,
-                  defaultValue: project.concurrency,
-                  disabled: busy,
-                  style: { width: '72px' },
-                  onBlur: (event) => {
-                    const value = Number(event.target.value)
-                    if (Number.isFinite(value) && value !== project.concurrency) {
-                      void patchProject({ concurrency: value })
-                    }
-                  },
-                }),
-              ),
               // The workspace is chosen, never typed: the picker writes the path
               // and this line only shows it.
               h(
@@ -3106,107 +3068,130 @@ ${SHARED_CSS}${DISPATCH_RULES}
                     ),
                 ),
               ),
+              h(
+                'label',
+                { className: 'pj-field' },
+                h('span', { className: 'pj-label' }, t('concurrency')),
+                h('input', {
+                  className: 'pj-input',
+                  'aria-label': t('concurrency'),
+                  type: 'number',
+                  min: 1,
+                  max: 8,
+                  defaultValue: project.concurrency,
+                  disabled: busy,
+                  style: { width: '72px' },
+                  onBlur: (event) => {
+                    const value = Number(event.target.value)
+                    if (Number.isFinite(value) && value !== project.concurrency) {
+                      void patchProject({ concurrency: value })
+                    }
+                  },
+                }),
+              ),
             ),
           ),
+          // The threads' defaults, then the archive action at the very end.
+          renderThreadsSection(),
+          renderArchiveSection(),
         )
 
-      // The execution group: the project's default model and reasoning effort.
-      const renderExecutionSettings = () =>
+      // The threads section: the default model and reasoning effort of every
+      // thread this project dispatches. The coordinator Session itself has no
+      // model or effort of its own — it follows the host default — so there is
+      // no separate Coordinator section.
+      const renderThreadsSection = () =>
         h(
           'div',
-          { className: 'pj-settings' },
+          { className: 'pj-section' },
           h(
             'div',
-            { className: 'pj-section' },
+            { className: 'pj-section-head' },
+            h('h2', { className: 'pj-section-title' }, t('threads')),
+          ),
+          h('div', { className: 'pj-hint' }, t('threadsHint')),
+          h(
+            'div',
+            { className: 'pj-row' },
             h(
-              'div',
-              { className: 'pj-section-head' },
-              h('h2', { className: 'pj-section-title' }, t('execution')),
+              'label',
+              { className: 'pj-field pj-grow' },
+              h('span', { className: 'pj-label' }, t('model')),
+              catalog.enumerable
+                ? h(
+                    'span',
+                    { className: 'pj-select-wrap' },
+                    h(
+                      'select',
+                      {
+                        className: 'pj-select',
+                        'aria-label': t('model'),
+                        value: project.model || '',
+                        disabled: busy,
+                        onChange: (event) => void patchProject({ model: event.target.value }),
+                      },
+                      h('option', { value: '' }, t('modelDefault')),
+                      ...catalogOptions(catalog, 'models', project.model),
+                    ),
+                    h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
+                  )
+                : h('input', {
+                    className: 'pj-input',
+                    type: 'text',
+                    'aria-label': t('model'),
+                    placeholder: t('modelRoutePlaceholder'),
+                    defaultValue: project.model || '',
+                    // Re-key on the stored value so a refresh (or a project
+                    // switch) re-seeds the uncontrolled field without
+                    // clobbering what the user is typing.
+                    key: `${project.id}:${project.model || ''}`,
+                    disabled: busy,
+                    onBlur: (event) => {
+                      const value = event.target.value.trim()
+                      if (value !== (project.model || '')) void patchProject({ model: value })
+                    },
+                  }),
+              !catalog.enumerable && h('span', { className: 'pj-hint' }, t('modelFreeTextHint')),
             ),
-            h('div', { className: 'pj-hint' }, t('executionHint')),
             h(
-              'div',
-              { className: 'pj-row' },
-              h(
-                'label',
-                { className: 'pj-field pj-grow' },
-                h('span', { className: 'pj-label' }, t('model')),
-                catalog.enumerable
-                  ? h(
-                      'span',
-                      { className: 'pj-select-wrap' },
-                      h(
-                        'select',
-                        {
-                          className: 'pj-select',
-                          'aria-label': t('model'),
-                          value: project.model || '',
-                          disabled: busy,
-                          onChange: (event) => void patchProject({ model: event.target.value }),
-                        },
-                        h('option', { value: '' }, t('modelDefault')),
-                        ...catalogOptions(catalog, 'models', project.model),
-                      ),
-                      h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
-                    )
-                  : h('input', {
-                      className: 'pj-input',
-                      type: 'text',
-                      'aria-label': t('model'),
-                      placeholder: t('modelRoutePlaceholder'),
-                      defaultValue: project.model || '',
-                      // Re-key on the stored value so a refresh (or a project
-                      // switch) re-seeds the uncontrolled field without
-                      // clobbering what the user is typing.
-                      key: `${project.id}:${project.model || ''}`,
-                      disabled: busy,
-                      onBlur: (event) => {
-                        const value = event.target.value.trim()
-                        if (value !== (project.model || '')) void patchProject({ model: value })
+              'label',
+              { className: 'pj-field pj-grow' },
+              h('span', { className: 'pj-label' }, t('reasoningEffort')),
+              catalog.enumerable
+                ? h(
+                    'span',
+                    { className: 'pj-select-wrap' },
+                    h(
+                      'select',
+                      {
+                        className: 'pj-select',
+                        'aria-label': t('reasoningEffort'),
+                        value: effortValue(project.reasoningEffort),
+                        disabled: busy,
+                        onChange: (event) =>
+                          void patchProject({ reasoningEffort: event.target.value }),
                       },
-                    }),
-                !catalog.enumerable && h('span', { className: 'pj-hint' }, t('modelFreeTextHint')),
-              ),
-              h(
-                'label',
-                { className: 'pj-field pj-grow' },
-                h('span', { className: 'pj-label' }, t('reasoningEffort')),
-                catalog.enumerable
-                  ? h(
-                      'span',
-                      { className: 'pj-select-wrap' },
-                      h(
-                        'select',
-                        {
-                          className: 'pj-select',
-                          'aria-label': t('reasoningEffort'),
-                          value: effortValue(project.reasoningEffort),
-                          disabled: busy,
-                          onChange: (event) =>
-                            void patchProject({ reasoningEffort: event.target.value }),
-                        },
-                        h('option', { value: '' }, t('effortDefault')),
-                        ...effortOptions(catalog, project.model, project.reasoningEffort, t),
-                      ),
-                      h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
-                    )
-                  : h('input', {
-                      className: 'pj-input',
-                      type: 'text',
-                      'aria-label': t('reasoningEffort'),
-                      placeholder: t('effortDefault'),
-                      defaultValue: effortValue(project.reasoningEffort),
-                      key: `${project.id}:${effortValue(project.reasoningEffort)}`,
-                      disabled: busy,
-                      onBlur: (event) => {
-                        const value = event.target.value.trim()
-                        if (value !== effortValue(project.reasoningEffort)) {
-                          void patchProject({ reasoningEffort: value })
-                        }
-                      },
-                    }),
-                !catalog.enumerable && h('span', { className: 'pj-hint' }, t('effortFreeTextHint')),
-              ),
+                      h('option', { value: '' }, t('effortDefault')),
+                      ...effortOptions(catalog, project.model, project.reasoningEffort, t),
+                    ),
+                    h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
+                  )
+                : h('input', {
+                    className: 'pj-input',
+                    type: 'text',
+                    'aria-label': t('reasoningEffort'),
+                    placeholder: t('effortDefault'),
+                    defaultValue: effortValue(project.reasoningEffort),
+                    key: `${project.id}:${effortValue(project.reasoningEffort)}`,
+                    disabled: busy,
+                    onBlur: (event) => {
+                      const value = event.target.value.trim()
+                      if (value !== effortValue(project.reasoningEffort)) {
+                        void patchProject({ reasoningEffort: value })
+                      }
+                    },
+                  }),
+              !catalog.enumerable && h('span', { className: 'pj-hint' }, t('effortFreeTextHint')),
             ),
           ),
         )
@@ -3247,73 +3232,69 @@ ${SHARED_CSS}${DISPATCH_RULES}
           ),
         )
 
-      // The danger group: archiving hides the project from the list, so the
-      // first press only arms it and the second one acts; unarchiving is not
-      // destructive and stays a single press.
-      const renderDangerSettings = () =>
+      // The archive section closes the general group: archiving hides the
+      // project from the list, so the first press only arms it and the second
+      // one acts; unarchiving is not destructive and stays a single press.
+      const renderArchiveSection = () =>
         h(
           'div',
-          { className: 'pj-settings' },
+          { className: 'pj-section pj-danger-zone' },
           h(
             'div',
-            { className: 'pj-section pj-danger-zone' },
-            h(
-              'div',
-              { className: 'pj-section-head' },
-              h('h2', { className: 'pj-section-title' }, t('dangerZone')),
-            ),
-            h('div', { className: 'pj-hint' }, t('archiveWarning')),
-            h(
-              'div',
-              { className: 'pj-danger-actions' },
-              project.archived
-                ? h(
-                    'button',
-                    {
-                      className: 'pj-btn',
-                      type: 'button',
-                      disabled: busy,
-                      onClick: archiveProject,
-                    },
-                    t('unarchive'),
-                  )
-                : archiveArmed
-                  ? [
-                      h(
-                        'button',
-                        {
-                          key: 'confirm',
-                          className: 'pj-btn pj-btn-danger-fill',
-                          type: 'button',
-                          disabled: busy,
-                          onClick: archiveProject,
-                        },
-                        t('archiveConfirm'),
-                      ),
-                      h(
-                        'button',
-                        {
-                          key: 'cancel',
-                          className: 'pj-btn pj-btn-ghost',
-                          type: 'button',
-                          disabled: busy,
-                          onClick: () => setArchiveArmed(false),
-                        },
-                        t('cancel'),
-                      ),
-                    ]
-                  : h(
+            { className: 'pj-section-head' },
+            h('h2', { className: 'pj-section-title' }, t('archiveSection')),
+          ),
+          h('div', { className: 'pj-hint' }, t('archiveWarning')),
+          h(
+            'div',
+            { className: 'pj-danger-actions' },
+            project.archived
+              ? h(
+                  'button',
+                  {
+                    className: 'pj-btn',
+                    type: 'button',
+                    disabled: busy,
+                    onClick: archiveProject,
+                  },
+                  t('unarchive'),
+                )
+              : archiveArmed
+                ? [
+                    h(
                       'button',
                       {
-                        className: 'pj-btn pj-btn-danger',
+                        key: 'confirm',
+                        className: 'pj-btn pj-btn-danger-fill',
                         type: 'button',
                         disabled: busy,
                         onClick: archiveProject,
                       },
-                      h(ArchiveIcon, { size: 14 }),
-                      t('archive'),
+                      t('archiveConfirm'),
                     ),
-            ),
+                    h(
+                      'button',
+                      {
+                        key: 'cancel',
+                        className: 'pj-btn pj-btn-ghost',
+                        type: 'button',
+                        disabled: busy,
+                        onClick: () => setArchiveArmed(false),
+                      },
+                      t('cancel'),
+                    ),
+                  ]
+                : h(
+                    'button',
+                    {
+                      className: 'pj-btn pj-btn-danger',
+                      type: 'button',
+                      disabled: busy,
+                      onClick: archiveProject,
+                    },
+                    h(ArchiveIcon, { size: 14 }),
+                    t('archive'),
+                  ),
           ),
         )
 
@@ -3321,9 +3302,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
       // each group owns the whole options column and no group can push another
       // one out of view.
       const renderSettings = () => {
-        if (settingsGroup === 'execution') return renderExecutionSettings()
         if (settingsGroup === 'memory') return renderMemorySettings()
-        if (settingsGroup === 'danger') return renderDangerSettings()
         return renderGeneralSettings()
       }
 
@@ -3911,8 +3890,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
               project?.archived && h('span', { className: 'pj-badge' }, t('archivedBadge')),
             ),
             // One glyph replaces the old tab row: the column always shows the
-            // conversation, and settings (with the archive danger zone) is a
-            // dialog behind this gear.
+            // conversation, and settings (with the archive action at the end of
+            // its general group) is a dialog behind this gear.
             project &&
               h(
                 'div',

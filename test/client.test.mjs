@@ -2198,7 +2198,10 @@ function createPageHarness({ projects = [], detail = null, viewport = 0, memoryB
   // the way the Host does. The copy is per-harness, because a write mutates it.
   const memory = detail && detail.memory ? JSON.parse(JSON.stringify(detail.memory)) : null
   const bodies = { ...SAMPLE_MEMORY_BODIES, ...(memoryBodies || {}) }
-  if (detail) detail = { ...detail, memory }
+  // The project is copied per harness too: the fixtures are module-level
+  // constants, and a settings write (name, model, worktreeIsolation…) must not
+  // leak into the next test through a shared object.
+  if (detail) detail = { ...detail, project: { ...detail.project }, memory }
   if (detail) routes[`/projects/${detail.project.id}`] = detail
   /** The Host's body: a fresh JSON copy per response, never a shared object. */
   const reply = (payload) => ({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(payload)) })
@@ -2265,6 +2268,16 @@ function createPageHarness({ projects = [], detail = null, viewport = 0, memoryB
       return { ok: false, status: 405, json: async () => ({ error: 'method_not_allowed' }) }
     }
     if (method !== 'GET') {
+      // The project PATCH: every settings field (name, goal, workspace,
+      // concurrency, model, effort, worktreeIsolation) is written through it, so
+      // the board takes the patch and the page's refresh reads it back.
+      const projectRoute = /^\/projects\/([^/]+)$/.exec(path)
+      if (projectRoute) {
+        const board = routes[`/projects/${projectRoute[1]}`]
+        if (!board) return notFound()
+        Object.assign(board.project, body || {})
+        return reply({ project: board.project })
+      }
       const match = /^\/projects\/([^/]+)\/tasks\/([^/]+)(\/approve)?$/.exec(path)
       const board = match ? routes[`/projects/${match[1]}`] : undefined
       const task = board && (board.project.tasks || []).find((entry) => entry.id === match[2])
@@ -2484,13 +2497,14 @@ test('the settings panel is a nav rail with one group in the options column', as
   assert.equal(page.textOf(page.byClass('pj-section-title', last)[0]), '归档项目')
   assert.equal(page.byText('归档', last).length, 1, 'the archive action closes the group')
 
-  // The threads section owns three fields, in this order: the concurrency cap,
-  // the model and the effort. The cap is no longer a neighbour of the folder.
+  // The threads section owns four fields, in this order: the concurrency cap,
+  // the model, the effort, and the per-task worktree switch. The cap is no
+  // longer a neighbour of the folder.
   const threadsSection = sections[3]
   assert.equal(page.textOf(page.byClass('pj-section-title', threadsSection)[0]), '线程')
   assert.deepEqual(
     page.byClass('pj-label', threadsSection).map((node) => page.textOf(node)),
-    ['并发', '模型', '思考程度'],
+    ['并发', '模型', '思考程度', '每任务独立 worktree'],
   )
   assert.equal(page.byLabel('模型', threadsSection).length, 1)
   assert.equal(page.byLabel('思考程度', threadsSection).length, 1)
@@ -3461,4 +3475,252 @@ test('the status pill covers resolved with its own label and theme colour', () =
   const card = source.slice(cardStart, cardEnd)
   assert.match(card, /task\.status === 'resolved'/)
   assert.doesNotMatch(card, /task\.resolved/)
+})
+
+// ---------------------------------------------------------------------------
+// Per-task worktree isolation
+//
+// The Host owns the git work (branch, checkout, cleanup); the page only turns
+// the switch on, names the branch a task runs on and says why a task could not
+// be isolated. These tests mount the real page for each of the three surfaces.
+
+test('the worktree switch saves through the project PATCH and echoes the stored value', async (t) => {
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  const options = () => page.byClass('pj-settings-options')[0]
+  const toggle = () => page.byLabel('每任务独立 worktree', options())[0]
+  assert.ok(toggle(), 'the threads section carries the isolation switch')
+  assert.equal(toggle().props.role, 'switch')
+  assert.equal(toggle().props['aria-checked'], 'false', 'off until the Host says otherwise')
+  assert.equal(page.byClass('pj-switch-thumb', toggle()).length, 1, 'the switch draws a thumb')
+  // It lives in the threads section, next to the model and effort pickers.
+  const threadsSection = page
+    .byClass('pj-section', options())
+    .find((node) => page.textOf(node).startsWith('线程'))
+  assert.ok(threadsSection, 'the general group still has its threads section')
+  assert.equal(page.byClass('pj-switch', threadsSection).length, 1)
+  // The hint names both preconditions the Host enforces before it creates
+  // anything: a git repository, and an ignored .worktrees/ pool.
+  const hint = page
+    .byClass('pj-hint', options())
+    .find((node) => page.textOf(node).includes('.worktrees/'))
+  assert.ok(hint, 'the switch explains what it needs')
+  assert.match(page.textOf(hint), /git 仓库/)
+  assert.match(page.textOf(hint), /\.gitignore/)
+
+  page.click(toggle())
+  await page.settle()
+  const on = page.requests.find((entry) => entry.method === 'PATCH' && entry.path === '/projects/p1')
+  assert.ok(on, 'the switch writes through the project PATCH route')
+  assert.deepEqual(on.body, { worktreeIsolation: true }, 'a boolean, not a string')
+  assert.equal(toggle().props['aria-checked'], 'true', 'the switch echoes the stored value')
+
+  // The second press turns it back off, so the switch is a toggle and not a
+  // one-way enable.
+  page.click(toggle())
+  await page.settle()
+  const off = page.requests.filter((entry) => entry.method === 'PATCH').at(-1)
+  assert.deepEqual(off.body, { worktreeIsolation: false })
+  assert.equal(toggle().props['aria-checked'], 'false')
+})
+
+test('a task with a worktree leads its card chips with the branch', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    worktreeIsolation: true,
+    tasks: [
+      {
+        id: 't1',
+        title: '隔离的任务',
+        brief: '写测试',
+        output: '',
+        status: 'review',
+        model: 'deepseek/deepseek-chat',
+        branch: 'task/t1',
+        worktreePath: '/ws/.worktrees/t1',
+      },
+      {
+        id: 't2',
+        title: '普通任务',
+        brief: '写测试',
+        output: '',
+        status: 'queued',
+        model: 'deepseek/deepseek-chat',
+      },
+    ],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+    viewport: 1200,
+  })
+  t.after(() => page.unmount())
+
+  const rows = page.byClass('pj-task-row')
+  const chipsOf = (row) => page.byClass('pj-chip', row).map((node) => page.textOf(node))
+  // The branch already names the task (`task/<id>`), so it takes the first seat
+  // and the id chip drops out; the model keeps the second.
+  assert.deepEqual(chipsOf(rows[0]), ['task/t1', 'deepseek-chat'])
+  assert.equal(page.byClass('pj-chip-branch', rows[0]).length, 1, 'the branch chip is marked')
+  assert.equal(page.byClass('pj-chip-branch', rows[0])[0].props.title, 'task/t1')
+  // A task without a worktree keeps the old pair: model, then the id short code.
+  assert.deepEqual(chipsOf(rows[1]), ['deepseek-chat', 't2'])
+  assert.equal(page.byClass('pj-chip-branch', rows[1]).length, 0)
+  // The two-chip cap survives the new chip.
+  for (const row of rows) assert.ok(chipsOf(row).length <= 2, 'never more than two chips')
+})
+
+test('the detail head names the worktree branch and copies it', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    worktreeIsolation: true,
+    tasks: [
+      {
+        id: 't1',
+        title: '写测试',
+        brief: '写一个测试',
+        output: '',
+        status: 'review',
+        branch: 'task/t1',
+        worktreePath: '/ws/.worktrees/t1',
+      },
+    ],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+    viewport: 1200,
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byClass('pj-task-row')[0])
+  await page.settle()
+
+  const head = page.byClass('pj-exec-head')[0]
+  const branch = page.byClass('pj-worktree-branch-name', head)[0]
+  assert.ok(branch, 'the detail head carries the branch row')
+  assert.equal(page.textOf(branch), 'task/t1')
+  // The full checkout path is the tooltip: the chip itself may be ellipsized.
+  assert.equal(branch.props.title, '/ws/.worktrees/t1')
+  assert.equal(page.byClass('pj-worktree-note', head).length, 0, 'an isolated task has no reason to show')
+
+  // The copy control writes the ref to the clipboard and says so.
+  const written = []
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { language: 'zh-CN', clipboard: { writeText: async (text) => written.push(text) } },
+  })
+  t.after(() => Object.defineProperty(globalThis, 'navigator', original))
+
+  page.click(page.byLabel('复制分支名', head)[0])
+  await page.settle()
+  assert.deepEqual(written, ['task/t1'])
+  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '分支名已复制。')
+})
+
+test('a task the Host could not isolate shows the reason instead of staying silent', async (t) => {
+  const note =
+    'Worktree isolation is on, but /ws is not inside a git repository; the worker ran in the shared workspace.'
+  const project = {
+    ...SAMPLE_PROJECT,
+    worktreeIsolation: true,
+    tasks: [
+      {
+        id: 't1',
+        title: '退化的任务',
+        brief: '写测试',
+        output: '',
+        status: 'queued',
+        worktreeDegraded: 'not_a_git_repository',
+        worktreeNote: note,
+      },
+      { id: 't2', title: '只有原因码', brief: '写测试', output: '', status: 'queued', worktreeDegraded: 'workspace_missing' },
+    ],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+    viewport: 1200,
+  })
+  t.after(() => page.unmount())
+
+  const rows = page.byClass('pj-task-row')
+  page.click(rows[0])
+  await page.settle()
+  const first = page.byClass('pj-exec-head')[0]
+  const shown = page.byClass('pj-worktree-note', first)[0]
+  assert.ok(shown, 'the degraded task shows the reason')
+  assert.equal(page.textOf(shown), note, 'the Host note is shown verbatim')
+  assert.equal(shown.props.title, note)
+  assert.equal(page.byClass('pj-worktree-branch', first).length, 0, 'a degraded task has no branch to name')
+
+  // A payload that carries only the enum falls back to the localised sentence.
+  page.click(page.byText('← 线程', first)[0])
+  await page.settle()
+  page.click(page.byClass('pj-task-row')[1])
+  await page.settle()
+  const second = page.byClass('pj-exec-head')[0]
+  assert.match(page.textOf(page.byClass('pj-worktree-note', second)[0]), /工作区目录不存在/)
+})
+
+test('the worktree surfaces read the Host fields and stay on theme tokens', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The switch is a real toggle: role, aria-checked and the boolean PATCH.
+  assert.match(source, /role: 'switch'/)
+  assert.match(source, /'aria-checked': project\.worktreeIsolation === true \? 'true' : 'false'/)
+  assert.match(source, /patchProject\(\{ worktreeIsolation: project\.worktreeIsolation !== true \}\)/)
+
+  // The card chips put the branch first and still cap at two.
+  const chips = source.slice(source.indexOf('function taskChips'), source.indexOf('function chipElement'))
+  assert.match(chips, /String\(task\.branch \|\| ''\)\.trim\(\)/)
+  assert.match(chips, /return chips\.slice\(0, 2\)/)
+
+  // The detail row reads the Host's task fields, never a local guess.
+  const detail = source.slice(source.indexOf('const execBranch'), source.indexOf('const BLANK_PROJECT'))
+  assert.match(detail, /execTask\.branch/)
+  assert.match(detail, /worktreeNoteOf\(execTask, t\)/)
+  assert.match(detail, /execTask\.worktreePath/)
+  assert.match(source, /task\.worktreeDegraded/)
+
+  // Every new rule is a theme token; no literal colour sneaks in.
+  for (const rule of [
+    /\.pj-switch\{[^}]*\}/,
+    /\.pj-switch\[aria-checked='true'\]\{[^}]*\}/,
+    /\.pj-switch-thumb\{[^}]*\}/,
+    /\.pj-detail-worktree\{[^}]*\}/,
+    /\.pj-worktree-branch\{[^}]*\}/,
+    /\.pj-worktree-note\{[^}]*\}/,
+  ]) {
+    const found = source.match(rule)
+    assert.ok(found, `missing rule ${rule}`)
+    assert.doesNotMatch(found[0], /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/, `literal colour in ${rule}`)
+  }
+
+  // Both dictionaries carry the new copy, and the archive warning now says the
+  // worktrees go with the project.
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  for (const key of [
+    'worktreeIsolation',
+    'worktreeIsolationHint',
+    'worktreeWorkspaceMissing',
+    'worktreeNotGit',
+    'copyBranch',
+    'branchCopied',
+    'copyFailed',
+  ]) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+  assert.match(zh.worktreeIsolationHint, /\.gitignore/)
+  assert.match(en.worktreeIsolationHint, /git repository/)
+  assert.match(zh.archiveWarning, /worktree 会被删除/)
+  assert.match(en.archiveWarning, /Worktrees created for its tasks are removed/)
 })

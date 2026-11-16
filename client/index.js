@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
       archivedBadge: 'Archived',
       archiveSection: 'Archive project',
       archiveWarning:
-        'Archiving hides this project from the list. Its tasks, shared memory and sessions are kept, and you can unarchive it here at any time.',
+        'Archiving hides this project from the list. Its tasks, shared memory and sessions are kept, and you can unarchive it here at any time. Worktrees created for its tasks are removed.',
       archiveConfirm: 'Confirm archive',
       queued: 'Queued',
       running: 'Running',
@@ -137,6 +137,16 @@ window.__ModuleLoader__.load({
       threads: 'Threads',
       threadsHint:
         'Default model and reasoning effort for the threads this project dispatches. A task may override them; the coordinator itself follows the host default.',
+      worktreeIsolation: 'Isolated worktree per task',
+      worktreeIsolationHint:
+        'Each task runs in its own git worktree on branch task/<id>. The workspace must be a git repository, and .worktrees/ must already be in its .gitignore.',
+      worktreeWorkspaceMissing:
+        'Worktree isolation is on, but the workspace folder is missing, so this task ran in the project folder instead.',
+      worktreeNotGit:
+        'Worktree isolation is on, but the workspace is not a git repository, so this task ran in the project folder instead.',
+      copyBranch: 'Copy branch name',
+      branchCopied: 'Branch name copied.',
+      copyFailed: 'The clipboard is unavailable, so the branch name was not copied.',
       searchThreads: 'Search threads',
       filterThreads: 'Filter threads',
       filterGroups: 'Groups shown',
@@ -251,7 +261,7 @@ window.__ModuleLoader__.load({
       archivedBadge: '已归档',
       archiveSection: '归档项目',
       archiveWarning:
-        '归档后项目会从列表中隐藏。任务、共享记忆与会话都会保留，随时可以在这里取消归档。',
+        '归档后项目会从列表中隐藏。任务、共享记忆与会话都会保留，随时可以在这里取消归档；为任务创建的 worktree 会被删除。',
       archiveConfirm: '确认归档',
       queued: '排队中',
       running: '执行中',
@@ -278,6 +288,14 @@ window.__ModuleLoader__.load({
       threads: '线程',
       threadsHint:
         '本项目派发的线程（Threads）的默认模型与思考程度；单个任务可以覆盖。协调者本身沿用宿主默认。',
+      worktreeIsolation: '每任务独立 worktree',
+      worktreeIsolationHint:
+        '每个任务在自己的 git worktree 里运行，分支为 task/<id>。工作区必须是 git 仓库，且 .worktrees/ 要已在 .gitignore 里。',
+      worktreeWorkspaceMissing: '已开启 worktree 隔离，但工作区目录不存在，这个任务改为在项目目录里运行。',
+      worktreeNotGit: '已开启 worktree 隔离，但工作区不是 git 仓库，这个任务改为在项目目录里运行。',
+      copyBranch: '复制分支名',
+      branchCopied: '分支名已复制。',
+      copyFailed: '剪贴板不可用，分支名没有复制。',
       searchThreads: '搜索线程',
       filterThreads: '筛选线程',
       filterGroups: '显示的分组',
@@ -333,6 +351,9 @@ window.__ModuleLoader__.load({
 .pj-thread-spinner{animation:pj-spin .9s linear infinite;transform-origin:center}
 @keyframes pj-spin{to{transform:rotate(360deg)}}
 .pj-chip{display:inline-flex;align-items:center;max-width:100%;height:18px;padding:0 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* A branch is a ref, not prose: the one chip that reads in the monospace face
+   and in the brighter ink, so a worktree'd task is recognisable at a glance. */
+.pj-chip-branch{color:var(--dsw-alias-label-secondary);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .pj-pill{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
 .pj-pill-queued{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .pj-pill-running{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);color:var(--dsw-alias-state-business-primary)}
@@ -415,13 +436,24 @@ window.__ModuleLoader__.load({
    positioned layers, so nothing can paint over anything else. */
 .pj-exec-detail{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .pj-exec-detail > .pj-chat-body{flex:1 1 0;min-height:140px}
-/* The detail header is two dense rows: back + title + state controls, then one
-   secondary line (model · executor) with the remaining actions. Everything the
-   old field form stacked as labelled blocks now lives in the conversation. */
+/* The detail header is up to three dense rows: back + title + state controls,
+   then one secondary line (model · executor) with the remaining actions, then —
+   only when the task has a worktree or a reason it has none — where its code
+   lives. Everything the old field form stacked as labelled blocks now lives in
+   the conversation. */
 .pj-detail-head{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
 .pj-detail-row{display:flex;align-items:center;gap:6px;min-width:0}
 .pj-detail-meta{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .pj-detail-meta-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The detail head's third row: where the task's code lives. The branch is the
+   one value a human pastes into a shell, so it sits in a monospace chip with its
+   own copy control; a task the Host could not isolate shows the reason here in
+   the warn ink instead of leaving the reader to guess. */
+.pj-detail-worktree{display:flex;align-items:center;gap:8px;min-width:0;font-size:12px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
+.pj-worktree-branch{display:inline-flex;flex:0 1 auto;align-items:center;gap:4px;max-width:100%;min-width:0;height:20px;padding:0 2px 0 6px;box-sizing:border-box;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
+.pj-worktree-branch svg{flex:none;width:12px;height:12px}
+.pj-worktree-branch-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:16px}
+.pj-worktree-note{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-state-warn-primary)}
 /* The search row sits under the Threads head, so it needs its own gap: the head
    owns a 1px divider and nothing else, and a field flush against it reads as
    part of the border. */
@@ -465,6 +497,10 @@ window.__ModuleLoader__.load({
    native seat instead of the 15px default of this button. */
 .pj-icon-btn .pj-icon-16{width:16px;height:16px}
 .pj-icon-btn .pj-icon-18{width:18px;height:18px}
+/* The copy control inside the branch chip: the 28px seat is taller than the
+   20px row it sits in, so it keeps the glyph and drops the padding. */
+.pj-icon-btn.pj-icon-btn-xs{width:20px;height:20px;padding:2px}
+.pj-icon-btn-xs svg{width:12px;height:12px}
 .pj-icon-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .pj-icon-btn:disabled{opacity:.4;cursor:default}
 .pj-icon-btn.pj-on{color:var(--dsw-alias-state-success-primary)}
@@ -532,6 +568,17 @@ window.__ModuleLoader__.load({
 .pj-row > .pj-grow{flex:1 1 220px;min-width:0}
 .pj-field{display:flex;flex-direction:column;gap:6px;min-width:0}
 .pj-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+/* An on/off project setting: the label and its two-line hint on the left, the
+   switch on the right. The track carries the state (border ink when off, the
+   business fill when on) and the thumb only reinforces it, so the control still
+   reads on a monochrome screenshot. */
+.pj-switch-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-top:14px}
+.pj-switch-text{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pj-switch{position:relative;flex:none;width:36px;height:20px;margin-top:2px;padding:0;border:0;border-radius:999px;background:var(--dsw-alias-border-l4);cursor:pointer;transition:background .12s}
+.pj-switch[aria-checked='true']{background:var(--dsw-alias-state-business-primary)}
+.pj-switch:disabled{opacity:.4;cursor:not-allowed}
+.pj-switch-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:999px;background:var(--dsw-alias-label-primary-foreground);transition:transform .12s}
+.pj-switch[aria-checked='true'] .pj-switch-thumb{transform:translateX(16px)}
 /* A chosen workspace is data, not a field: the Host input's geometry with no
    caret and no typing, so the path reads as the value the picker produced. */
 .pj-path{display:flex;align-items:center;min-width:0;height:34px;padding:0 12px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
@@ -865,6 +912,22 @@ ${SHARED_CSS}${DISPATCH_RULES}
     }
 
     /**
+     * Why a task has no worktree, in the reader's language.
+     *
+     * The Host writes `worktreeNote` itself and it names the offending path, so
+     * that sentence is what the detail page shows. The enum is the fallback for
+     * a payload that carries the code without the sentence; an unknown code
+     * with no note renders nothing rather than an empty line.
+     */
+    function worktreeNoteOf(task, t) {
+      const note = String((task && task.worktreeNote) || '').trim()
+      if (note) return note
+      if (task && task.worktreeDegraded === 'workspace_missing') return t('worktreeWorkspaceMissing')
+      if (task && task.worktreeDegraded === 'not_a_git_repository') return t('worktreeNotGit')
+      return ''
+    }
+
+    /**
      * Relative age of a thread. The Host stamps `createdAt`/`updatedAt` on every
      * task and adds `startedAt`/`finishedAt` around a run, so the freshest stamp
      * wins. An unstamped task renders no time at all rather than a fake one.
@@ -887,13 +950,37 @@ ${SHARED_CSS}${DISPATCH_RULES}
       }
     }
 
-    /** At most two chips: the model route, then the task id short code. */
+    /**
+     * At most two chips: the branch, then the model route, then the task id
+     * short code. A task with a worktree puts its branch first — the Host names
+     * it `task/<id>`, so the id chip would only repeat it — and the model keeps
+     * the second seat. Without a branch the old pair (model, id) is unchanged.
+     */
     function taskChips(task) {
       const chips = []
+      const branch = String(task.branch || '').trim()
+      if (branch) chips.push({ text: branch, branch: true })
       const model = String(task.model || '').trim()
-      if (model) chips.push(model.split('/').pop() || model)
-      if (task.id) chips.push(String(task.id).slice(0, 6))
+      if (model) chips.push({ text: model.split('/').pop() || model })
+      if (task.id) chips.push({ text: String(task.id).slice(0, 6) })
       return chips.slice(0, 2)
+    }
+
+    /**
+     * One thread-card chip. The branch chip is marked so the sheet can set it in
+     * the monospace face, and it carries the full ref as a tooltip because the
+     * chip itself may be ellipsized.
+     */
+    function chipElement(chip) {
+      return h(
+        'span',
+        {
+          key: chip.text,
+          className: `pj-chip${chip.branch ? ' pj-chip-branch' : ''}`,
+          title: chip.branch ? chip.text : undefined,
+        },
+        chip.text,
+      )
     }
 
     /**
@@ -1459,6 +1546,56 @@ ${SHARED_CSS}${DISPATCH_RULES}
           stroke: 'currentColor',
           strokeWidth: ICON_STROKE,
           strokeLinecap: 'round',
+        }),
+      )
+    }
+
+    /**
+     * A git branch: one trunk with two commits on it and a second line forking
+     * off. It marks the worktree's branch name in the detail head, so it is
+     * drawn on the same 16 grid and stroke as the other outline glyphs.
+     */
+    function BranchIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size },
+        h('path', {
+          d: 'M4.5 4.2V11.8',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+          strokeLinecap: 'round',
+        }),
+        h('path', {
+          d: 'M4.5 8.2C4.5 6 6.1 4.6 8.1 4.6H11.5',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+          strokeLinecap: 'round',
+        }),
+        h('circle', { cx: 4.5, cy: 3.1, r: 1.4, stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+        h('circle', { cx: 4.5, cy: 12.9, r: 1.4, stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+        h('circle', { cx: 11.5, cy: 4.6, r: 1.4, stroke: 'currentColor', strokeWidth: ICON_STROKE }),
+      )
+    }
+
+    /** Two offset sheets: the copy control beside the branch name. */
+    function CopyIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size },
+        h('rect', {
+          x: 5.6,
+          y: 5.6,
+          width: 7.4,
+          height: 7.4,
+          rx: 1.4,
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+        }),
+        h('path', {
+          d: 'M10.4 5.6V4.2C10.4 3.4 9.8 2.8 9 2.8H4.2C3.4 2.8 2.8 3.4 2.8 4.2V9C2.8 9.8 3.4 10.4 4.2 10.4H5.6',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
+          strokeLinejoin: 'round',
         }),
       )
     }
@@ -2551,6 +2688,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
             }`,
           ].join('\n')
         : ''
+      // The head's third row: the branch this task's worktree sits on, and — when
+      // the Host could not isolate it — the reason, so a degraded dispatch is
+      // never silent. Both are empty for a task that never asked for a worktree,
+      // and the row is then not rendered at all.
+      const execBranch = execTask ? String(execTask.branch || '').trim() : ''
+      const execWorktreeNote = execTask ? worktreeNoteOf(execTask, t) : ''
+      const execWorktreeTitle = execTask
+        ? String(execTask.worktreePath || execTask.branch || '').trim()
+        : ''
 
       // The new-project dialog starts from the Host's own defaults (two
       // workers, no folder), so the fields it does show are never blank.
@@ -2639,6 +2785,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
         run(async () => {
           await saveProjectPatch(patch)
           return ''
+        })
+
+      // The branch name is the one value on this page a human pastes into a
+      // shell, so it gets its own copy control. A page without the async
+      // clipboard API — or a denied permission — says so instead of reporting a
+      // copy that never happened; the ref stays on screen either way.
+      const copyBranch = (branch) =>
+        run(async () => {
+          const clipboard = globalThis.navigator && globalThis.navigator.clipboard
+          if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error(t('copyFailed'))
+          await clipboard.writeText(branch)
+          return t('branchCopied')
         })
 
       const saveInstructions = () =>
@@ -3340,6 +3498,33 @@ ${SHARED_CSS}${DISPATCH_RULES}
               !catalog.enumerable && h('span', { className: 'pj-hint' }, t('effortFreeTextHint')),
             ),
           ),
+          // Isolation is a thread setting too: it decides where each dispatched
+          // thread runs, so it closes the section after the defaults. The Host
+          // owns the git work (branch, checkout, cleanup); this only turns it on.
+          h(
+            'div',
+            { className: 'pj-switch-row' },
+            h(
+              'div',
+              { className: 'pj-switch-text' },
+              h('span', { className: 'pj-label' }, t('worktreeIsolation')),
+              h('span', { className: 'pj-hint' }, t('worktreeIsolationHint')),
+            ),
+            h(
+              'button',
+              {
+                className: 'pj-switch',
+                type: 'button',
+                role: 'switch',
+                'aria-checked': project.worktreeIsolation === true ? 'true' : 'false',
+                'aria-label': t('worktreeIsolation'),
+                disabled: busy,
+                onClick: () =>
+                  void patchProject({ worktreeIsolation: project.worktreeIsolation !== true }),
+              },
+              h('span', { className: 'pj-switch-thumb', 'aria-hidden': true }),
+            ),
+          ),
         )
 
       // The memory group: the file list, in the options column. A long memory
@@ -3791,11 +3976,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
           stamp && h('span', { className: 'pj-thread-time' }, stamp),
           h('span', { className: 'pj-thread-sub' }, taskSubtitle(task, t)),
           chips.length > 0 &&
-            h(
-              'span',
-              { className: 'pj-thread-chips' },
-              chips.map((chip) => h('span', { key: chip, className: 'pj-chip' }, chip)),
-            ),
+            h('span', { className: 'pj-thread-chips' }, chips.map(chipElement)),
         )
       }
 
@@ -4248,6 +4429,39 @@ ${SHARED_CSS}${DISPATCH_RULES}
                               h('span', { className: 'pj-detail-meta-text', title: execMetaTitle }, execMeta),
                             execTask?.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
                             execAccepted && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
+                          ),
+                        (execBranch || execWorktreeNote) &&
+                          h(
+                            'div',
+                            { className: 'pj-detail-worktree' },
+                            execBranch &&
+                              h(
+                                'span',
+                                { className: 'pj-worktree-branch' },
+                                h(BranchIcon, { size: 12 }),
+                                h(
+                                  'code',
+                                  { className: 'pj-worktree-branch-name', title: execWorktreeTitle },
+                                  execBranch,
+                                ),
+                                h(
+                                  'button',
+                                  {
+                                    className: 'pj-icon-btn pj-icon-btn-xs',
+                                    type: 'button',
+                                    title: t('copyBranch'),
+                                    'aria-label': t('copyBranch'),
+                                    onClick: () => void copyBranch(execBranch),
+                                  },
+                                  h(CopyIcon, { size: 12 }),
+                                ),
+                              ),
+                            execWorktreeNote &&
+                              h(
+                                'span',
+                                { className: 'pj-worktree-note', title: execWorktreeNote },
+                                execWorktreeNote,
+                              ),
                           ),
                       )
                     : h('h2', { className: 'pj-exec-title' }, t('threads')),

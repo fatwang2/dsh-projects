@@ -1827,7 +1827,7 @@ async function createTaskWorktree(project, task) {
   if (!(await gitIgnores(plan.workspace, `${WORKTREE_DIR}/`))) {
     throw new Error(
       `Worktree isolation is on, but "${WORKTREE_DIR}/" is not ignored in ${plan.workspace}. `
-      + `Add "${WORKTREE_DIR}/" to the repository's .gitignore (or turn project.worktreeIsolation off) and dispatch again.`,
+      + `Add "${WORKTREE_DIR}/" to the repository's .gitignore (${repoRoot}/.gitignore) or turn project.worktreeIsolation off, then dispatch again.`,
     )
   }
   const pathExistsNow = await pathExists(plan.path)
@@ -1849,12 +1849,12 @@ async function createTaskWorktree(project, task) {
       // The branch survived an earlier failure; check it out instead of creating
       // it again, so a retry does not need manual cleanup.
       await runGit(repoRoot, [
-        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'submodule.recurse=false',
         'worktree', 'add', '--', plan.path, plan.branch,
       ])
     } else {
       await runGit(repoRoot, [
-        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'submodule.recurse=false',
         'worktree', 'add', '-b', plan.branch, '--', plan.path, 'HEAD',
       ])
     }
@@ -1951,24 +1951,26 @@ async function removeProjectWorktrees(project) {
  * Remove one task from the board, optionally archiving its worker session, and
  * remove the git worktree/branch it recorded.
  *
- * Order: the worktree is removed first, then the session is archived, then the
- * task is spliced out and written. The task row holds the only references to
- * both `childSessionId` and `worktreePath`, so the write must come last. The
- * worktree goes first because a git failure is the more likely one and leaves
- * both the task and the session untouched; if the later archive fails instead,
- * the task stays on the board and a retry is safe because removing an already
- * gone worktree is a no-op. A failed project write leaves an archived session
- * whose task is still on the board — the page's `/sessions/restore` route
- * unarchives it, and retrying the delete is safe because archiving an
- * already-archived id is a no-op.
+ * Order: the session is archived first (when asked), then the worktree is
+ * removed, then the task is spliced out and written. The task row holds the only
+ * references to both `childSessionId` and `worktreePath`, so the write must come
+ * last. The archive goes first because it refuses a session whose worker is
+ * still running; removing the checkout before that refusal would delete a live
+ * worker's files and then decline the delete. With this order a refused archive
+ * leaves everything untouched. If the worktree removal then fails, the task
+ * stays on the board and the page's `/sessions/restore` route can unarchive the
+ * session; retrying is safe because archiving an already-archived id and
+ * removing an already-gone worktree are both no-ops. A failed project write
+ * leaves an archived session whose task is still on the board, with the same
+ * recovery path.
  */
 async function removeTask(ctx, projectId, taskId, action = '') {
   const project = await readProject(projectId)
   const index = project.tasks.findIndex((candidate) => candidate.id === taskId)
   if (index < 0) throw httpError(404, 'task_not_found')
   const task = project.tasks[index]
-  const worktree = await removeTaskWorktree(project, task)
   const session = action === 'archive' ? await archiveTaskSession(ctx, project, task) : null
+  const worktree = await removeTaskWorktree(project, task)
   project.tasks.splice(index, 1)
   project.updatedAt = Date.now()
   await writeProject(project)
@@ -2789,7 +2791,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_update',
     description:
-      'Update one project\'s settings: its name, goal, workspace, autonomy, concurrency, or its memory compaction settings (autoCompact / memoryBudget). Task status and the human verdict are not touched here — use projects_update_task for a task.',
+      'Update one project\'s settings: its name, goal, workspace, autonomy, concurrency, its memory compaction settings (autoCompact / memoryBudget), or per-task git worktree isolation (worktreeIsolation). Task status and the human verdict are not touched here — use projects_update_task for a task.',
     parameters: {
       type: 'object',
       properties: {
@@ -3044,7 +3046,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_dispatch',
     description:
-      'Dispatch one queued task to a worker subagent. The worker gets the project instructions, an index of the shared memory and the task brief, runs in the project workspace, and reports its final message back onto the task. Returns immediately: the coordinator stays free.',
+      'Dispatch one queued task to a worker subagent. The worker gets the project instructions, an index of the shared memory and the task brief, runs in the project workspace (or in its own git worktree when worktreeIsolation is on), and reports its final message back onto the task. Returns immediately: the coordinator stays free.',
     parameters: {
       type: 'object',
       properties: {

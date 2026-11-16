@@ -2615,6 +2615,11 @@ test('a non-git workspace degrades to the shared directory and records why', asy
   assert.match(task.worktreeNote, /not inside a git repository/)
   assert.equal('branch' in task, false)
   assert.equal('worktreePath' in task, false)
+
+  // The coordinator's own view of the board carries the reason too.
+  const detail = await call('projects_get', { project_id: projectId })
+  assert.match(detail, /worktree=off\(not_a_git_repository\)/)
+  assert.match(detail, /worktree: Worktree isolation is on/)
 })
 
 test('a project without a workspace degrades with a workspace_missing note', async () => {
@@ -2663,6 +2668,11 @@ test('worktree isolation creates a branch and a checkout and points the worker a
   assert.equal(task.worktreePath, expectedPath)
   assert.equal('worktreeDegraded' in task, false)
   assert.equal('worktreeNote' in task, false)
+
+  // The coordinator's own view of the board names the retained checkout.
+  const detail = await call('projects_get', { project_id: projectId })
+  assert.match(detail, new RegExp(`worktree=${escapeRegExp(expectedPath)} branch=${escapeRegExp(expectedBranch)}`))
+  assert.match(detail, /worktree isolation: on/)
 })
 
 test('an unignored .worktrees/ pool is refused instead of polluting the repository', async () => {
@@ -2720,6 +2730,30 @@ test('deleting a task removes its worktree and branch, even with uncommitted wor
   assert.equal(detail.body.project.tasks.length, 0)
 })
 
+test('a refused session archive leaves a live worker\'s worktree untouched', async () => {
+  const repo = await makeGitRepo('wt-active')
+  const projectId = await worktreeProject('Active worker', repo)
+  const taskId = await addBoardTask(projectId, 'Still running')
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  const worktreePath = join(repo, '.worktrees', taskId)
+  fakeWorkspaceRegistry = createRegistry()
+  const active = new Error("cannot archive session 'child-session-1': the session is active (agent)")
+  active.name = 'WorkspaceActiveSessionError'
+  fakeWorkspaceRegistry.failWith = active
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 409)
+  assert.match(response.body.error, /still running/)
+  // The archive refusal must come first: a live worker keeps its checkout.
+  assert.equal((await stat(worktreePath)).isDirectory(), true)
+  assert.equal(await gitFails(repo, 'show-ref', '--verify', '--quiet', `refs/heads/task/${taskId}`), false)
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 1)
+})
+
 test('archiving a project removes every task worktree and branch', async () => {
   const repo = await makeGitRepo('wt-archive')
   const projectId = await worktreeProject('Archive cleanup', repo)
@@ -2729,6 +2763,9 @@ test('archiving a project removes every task worktree and branch', async () => {
   await call('projects_dispatch', { project_id: projectId, task_id: second })
   const paths = [join(repo, '.worktrees', first), join(repo, '.worktrees', second)]
   for (const path of paths) assert.equal((await stat(path)).isDirectory(), true)
+  // Archiving is a human decision to drop the checkouts, so uncommitted work
+  // must not make it fail.
+  await writeFile(join(paths[0], 'uncommitted.txt'), 'work in progress\n')
 
   const response = await request('PATCH', `/projects-api/projects/${projectId}`, { archived: true })
   assert.equal(response.status, 200)

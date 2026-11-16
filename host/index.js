@@ -490,6 +490,16 @@ async function listProjects() {
 /** The generated index file inside the memory directory. Never a topic file. */
 const MEMORY_INDEX_FILE = 'MEMORY.md'
 /**
+ * The refusal every write path returns for the generated index. It is rebuilt
+ * from the topic files on every mutation, so a write would be overwritten and a
+ * delete would only make it reappear on the next read. One message keeps the
+ * HTTP route and the tools consistent.
+ */
+const MEMORY_INDEX_READ_ONLY =
+  'MEMORY.md is the generated index of the shared memory: it is rebuilt from the topic files on every write, so it is read-only. Edit or delete a topic file instead.'
+/** One-line description of the index in the page's file list. */
+const MEMORY_INDEX_DESCRIPTION = 'Generated index of the shared memory'
+/**
  * Longest slug used as a file name. A 60-character Chinese slug is 180 UTF-8
  * bytes, so the file name stays under the 255-byte limit; it is also short
  * enough that a full index of ~20 files still fits the prompt cap.
@@ -578,9 +588,21 @@ function memoryNameOrThrow(value) {
   const name = memorySlug(raw.replace(/\.md$/i, ''))
   if (!name) throw httpError(400, `"${raw}" is not a valid memory file name`)
   if (name === 'memory') {
-    throw httpError(400, 'MEMORY.md is the generated index, not a topic file; pick another name')
+    throw httpError(400, MEMORY_INDEX_READ_ONLY)
   }
   return name
+}
+
+/**
+ * Whether a name addresses the generated index rather than a topic file. The
+ * page asks for it as `MEMORY.md`; `memory` is the reserved slug the tools use,
+ * and `memory.md` is the same file name without the case distinction. None of
+ * these can be a topic file (`memoryNameOrThrow` refuses the slug), so the
+ * lookup is unambiguous.
+ */
+function isMemoryIndexName(value) {
+  const raw = String(value ?? '').trim().toLowerCase()
+  return raw === 'memory' || raw === 'memory.md'
 }
 
 /**
@@ -1083,6 +1105,34 @@ async function readMemoryFile(id, name) {
   return archived ? { file: archived, archived: true } : null
 }
 
+/**
+ * The generated `MEMORY.md` as one read-only pseudo-file: metadata for the
+ * page's list and text for its preview. It is generated from the topic files,
+ * so it is never part of `files`, never counted in `total` and never writable.
+ * Returns null when the file does not exist (an empty memory has no index yet).
+ */
+async function readMemoryIndexFile(id) {
+  const path = memoryIndexFile(id)
+  const info = await statOrNull(path)
+  if (!info) return null
+  let text
+  try {
+    text = await readFile(path, 'utf8')
+  } catch {
+    return null
+  }
+  return {
+    name: MEMORY_INDEX_FILE,
+    description: MEMORY_INDEX_DESCRIPTION,
+    type: 'index',
+    modified: new Date(info.mtimeMs).toISOString(),
+    size: text.length,
+    readOnly: true,
+    isIndex: true,
+    text,
+  }
+}
+
 /** Write one topic file (create or replace) and regenerate the index. */
 async function writeMemoryFile(id, input, knownFiles) {
   const files = knownFiles || (await readMemoryFiles(id))
@@ -1364,7 +1414,8 @@ async function afterMemoryWrite(project, written) {
 }
 
 /** The page's view of the memory: file metadata, never bodies. */
-function memoryPayload(project, files) {
+async function memoryPayload(project, files) {
+  const index = await readMemoryIndexFile(project.id)
   return {
     files: files.map((file) => ({
       name: file.name,
@@ -1374,6 +1425,20 @@ function memoryPayload(project, files) {
       size: file.chars,
       stale: file.stale === true,
     })),
+    // The generated index is listed beside the topic files, not among them: it
+    // is read-only, and its characters are not part of the memory budget. Null
+    // when the memory is empty and `MEMORY.md` has not been generated yet.
+    indexFile: index
+      ? {
+          name: index.name,
+          description: index.description,
+          type: index.type,
+          modified: index.modified,
+          size: index.size,
+          readOnly: true,
+          isIndex: true,
+        }
+      : null,
     total: memoryTotal(files),
     budget: memoryBudgetOf(project),
   }
@@ -2495,7 +2560,7 @@ async function routeRequest(ctx, method, path, req, searchParams) {
       // The page gets the file list, not the memory text: the memory is one file
       // per topic, and a single body is fetched from /projects/:id/memory/:name.
       const files = await readMemoryFiles(project.id)
-      return { status: 200, body: { project, memory: memoryPayload(project, files) } }
+      return { status: 200, body: { project, memory: await memoryPayload(project, files) } }
     }
     if (method === 'PATCH') {
       const body = await readJson(req)
@@ -2514,7 +2579,7 @@ async function routeRequest(ctx, method, path, req, searchParams) {
       const files = await readMemoryFiles(project.id)
       return {
         status: 200,
-        body: { memory: memoryPayload(project, files), index: renderMemoryIndexFile(files) },
+        body: { memory: await memoryPayload(project, files), index: renderMemoryIndexFile(files) },
       }
     }
     if (method === 'POST') {
@@ -2552,6 +2617,32 @@ async function routeRequest(ctx, method, path, req, searchParams) {
     }
     if (method === 'GET') {
       const project = await readProject(projectId)
+      // The generated index is readable like a file but is not a topic: it has
+      // no frontmatter, no write path, and is addressed by its file name.
+      if (isMemoryIndexName(name)) {
+        let index = await readMemoryIndexFile(project.id)
+        if (!index) {
+          // Missing index: this read is a memory read like any other, so migrate
+          // a legacy `memory.md` and regenerate the index from the topic files.
+          await readMemoryFiles(project.id)
+          index = await readMemoryIndexFile(project.id)
+        }
+        if (!index) throw httpError(404, 'memory_index_not_found')
+        return {
+          status: 200,
+          body: {
+            name: index.name,
+            description: index.description,
+            type: index.type,
+            modified: index.modified,
+            size: index.size,
+            text: index.text,
+            archived: false,
+            readOnly: true,
+            isIndex: true,
+          },
+        }
+      }
       const found = await readMemoryFile(project.id, name)
       if (!found) throw httpError(404, 'memory_file_not_found')
       return {
@@ -2569,6 +2660,9 @@ async function routeRequest(ctx, method, path, req, searchParams) {
     }
     if (method === 'DELETE') {
       const project = await readProject(projectId)
+      // Refuse before touching the disk: the index is regenerated on the next
+      // read, so deleting it would only make it reappear.
+      if (isMemoryIndexName(name)) throw httpError(400, MEMORY_INDEX_READ_ONLY)
       const deleted = await deleteMemoryFile(project.id, name)
       return { status: 200, body: { deleted: true, name: deleted.file.name } }
     }

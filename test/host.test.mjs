@@ -1489,6 +1489,96 @@ test('the page can write and delete one memory file through the HTTP route', asy
   assert.equal(gone.status, 404)
 })
 
+test('the memory payload lists MEMORY.md as a read-only index file', async () => {
+  const projectId = await memoryProject('Index payload')
+  const onDisk = await memoryIndexOnDisk(projectId)
+  assert.match(onDisk, /^# Shared memory index\n\n2 file\(s\)/)
+
+  // The project route lists the index beside the topic files, never among them.
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.status, 200)
+  const memory = detail.body.memory
+  assert.equal(memory.files.length, 2)
+  assert.equal(memory.files.some((file) => file.name === 'MEMORY.md'), false)
+  assert.equal(memory.indexFile.name, 'MEMORY.md')
+  assert.equal(memory.indexFile.description, 'Generated index of the shared memory')
+  assert.equal(memory.indexFile.type, 'index')
+  assert.equal(memory.indexFile.readOnly, true)
+  assert.equal(memory.indexFile.isIndex, true)
+  assert.equal(memory.indexFile.size, onDisk.length)
+  assert.match(memory.indexFile.modified, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  // `total` still counts the topic bodies only: the index is generated, not stored knowledge.
+  assert.equal(memory.total, memory.files.reduce((sum, file) => sum + file.size, 0))
+  assert.doesNotMatch(JSON.stringify(memory.indexFile), /BODY-ALPHA-MARKER/)
+
+  // The whole-memory route carries the same metadata plus the full index text.
+  const whole = await request('GET', `/projects-api/projects/${projectId}/memory`)
+  assert.equal(whole.status, 200)
+  assert.deepEqual(whole.body.memory.indexFile, memory.indexFile)
+  assert.equal(whole.body.index, onDisk)
+
+  // The index is readable by name, exactly like a topic file but read-only.
+  for (const name of ['MEMORY.md', 'memory.md', 'memory']) {
+    const read = await request('GET', `/projects-api/projects/${projectId}/memory/${name}`)
+    assert.equal(read.status, 200, `${name} must read the index`)
+    assert.equal(read.body.name, 'MEMORY.md')
+    assert.equal(read.body.text, onDisk)
+    assert.equal(read.body.size, onDisk.length)
+    assert.equal(read.body.archived, false)
+    assert.equal(read.body.readOnly, true)
+    assert.equal(read.body.isIndex, true)
+  }
+
+  // Writing or deleting the index is refused with an explanation, and the file
+  // is untouched.
+  const write = await request('POST', `/projects-api/projects/${projectId}/memory`, {
+    name: 'MEMORY.md',
+    text: 'forged index',
+  })
+  assert.equal(write.status, 400)
+  assert.match(write.body.error, /MEMORY\.md is the generated index/)
+  assert.match(write.body.error, /read-only/)
+  const remove = await request('DELETE', `/projects-api/projects/${projectId}/memory/MEMORY.md`)
+  assert.equal(remove.status, 400)
+  assert.match(remove.body.error, /MEMORY\.md is the generated index/)
+  assert.match(remove.body.error, /read-only/)
+  assert.equal(await memoryIndexOnDisk(projectId), onDisk)
+
+  // The tools refuse the same names through the same message.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'write', name: 'MEMORY.md', text: 'x' }),
+    /MEMORY\.md is the generated index/,
+  )
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'delete', name: 'memory' }),
+    /MEMORY\.md is the generated index/,
+  )
+  assert.equal(await memoryIndexOnDisk(projectId), onDisk)
+})
+
+test('an empty memory has no index file until the first topic exists', async () => {
+  const projectId = await newProject('Empty memory index')
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.status, 200)
+  assert.deepEqual(detail.body.memory.files, [])
+  assert.equal(detail.body.memory.indexFile, null)
+  const missing = await request('GET', `/projects-api/projects/${projectId}/memory/MEMORY.md`)
+  assert.equal(missing.status, 404)
+  assert.match(missing.body.error, /memory_index_not_found/)
+
+  // The first write generates the index, so the next payload lists it.
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'first-topic',
+    text: 'One fact.',
+  })
+  const after = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(after.body.memory.files.length, 1)
+  assert.equal(after.body.memory.indexFile.name, 'MEMORY.md')
+  assert.equal(after.body.memory.indexFile.size, (await memoryIndexOnDisk(projectId)).length)
+})
+
 test('a description is explicit frontmatter, and falls back to the first body line', async () => {
   const projectId = await newProject('Described memory')
   await call('projects_memory', {

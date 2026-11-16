@@ -87,6 +87,30 @@ const STATUSES = ['queued', 'running', 'review', 'failed', 'blocked']
 /** The single task field the browser is allowed to write. */
 const HUMAN_TASK_FIELDS = ['resolved']
 const AUTONOMY = ['manual', 'auto']
+/**
+ * What `DELETE /projects-api/projects/:id/tasks/:taskId?session=` may do to the
+ * worker session behind the task.
+ *
+ * Only `archive` exists, because DeepSeek Harness has no session deletion at
+ * all. `sessions` (the `SessionStore`) offers create/prepare/enter/announce/
+ * get/list/fork/flush and `sessionPersistence` offers create/open/read/append/
+ * flush/stat/list — no method removes a stored log — and the product states the
+ * gap outright ("会话可以归档但绝不会被删除",
+ * `dsh-client-ui-workspace/README.zh.md`). Reaching under those services to
+ * `rm -rf $DSH_HOME/sessions/<cwd>/<id>/` would strand the workspace accounting
+ * in `workspace.json`, the `session_projcache` projection cache and the archive
+ * set, and would silently truncate the log of a session that is still live in
+ * memory. So a delete request is refused with an explanation instead of being
+ * quietly downgraded to an archive.
+ */
+const SESSION_ACTIONS = ['archive']
+/** The delete action's refusal: explicit, and it names the supported one. */
+const SESSION_DELETE_REFUSED =
+  'DeepSeek Harness cannot delete a session — sessions can be archived but never deleted. '
+  + 'Use ?session=archive to archive the worker session, or drop the parameter to delete only the task. '
+  + 'The task was not deleted.'
+/** Delete-action spellings that mean "remove the session", all of which refuse. */
+const SESSION_DELETE_SPELLINGS = ['1', 'true', 'delete', 'remove', 'yes']
 /** Live dispatch controllers, so unloading the plugin stops its workers. */
 const controllers = new Map()
 /**
@@ -873,14 +897,77 @@ async function approveTask(projectId, taskId) {
   return updateTask(projectId, taskId, { approved: true })
 }
 
-async function removeTask(projectId, taskId) {
+/**
+ * Archive the session that belongs to one task, or explain why it cannot be.
+ *
+ * The session id is never taken from the request: it is exactly the task's own
+ * `childSessionId`, the id `dispatchTask` recorded when it started the worker.
+ * That is the whole safety model — there is no way to name somebody else's
+ * session through this route — plus one explicit refusal for the coordinator,
+ * whose conversation must never be hidden by a board operation.
+ *
+ * `archiveSession` (not deletion) is the supported primitive: it writes the
+ * registry-global archive set, which the `ArchivedSessionGate` reads to refuse
+ * model steps, and the sidebar filters archived rows out of the default view.
+ * It refuses a session that still has running work (unless `stopActivity`), and
+ * that refusal is propagated rather than overridden: deleting a task must not
+ * silently kill a worker that is still writing.
+ *
+ * @returns `null` when the task never started a worker, otherwise
+ *   `{ id, archived }` — `archived: false` only when the session is already gone.
+ */
+async function archiveTaskSession(ctx, project, task) {
+  const sessionId = typeof task.childSessionId === 'string' ? task.childSessionId.trim() : ''
+  if (!sessionId) return null
+  if (project.coordinatorSessionId === sessionId) {
+    throw httpError(
+      409,
+      `refusing to archive ${sessionId}: it is the coordinator session of project ${project.id}`,
+    )
+  }
+  const registry = ctx.get('workspaceRegistry')
+  if (!registry || typeof registry.archiveSession !== 'function') {
+    throw httpError(503, 'workspace_registry_unavailable')
+  }
+  try {
+    await registry.archiveSession(sessionId)
+  } catch (error) {
+    // A session that is already gone needs no archive: the task row is the only
+    // pointer to it, so dropping the row is the whole cleanup.
+    if (error?.name === 'WorkspaceUnknownSessionError') return { id: sessionId, archived: false }
+    if (error?.name === 'WorkspaceActiveSessionError') {
+      throw httpError(
+        409,
+        `refusing to archive ${sessionId}: the worker is still running (${messageOf(error)}); stop it first, or delete the task without ?session=archive`,
+      )
+    }
+    throw httpError(500, `could not archive session ${sessionId}: ${messageOf(error)}`)
+  }
+  return { id: sessionId, archived: true }
+}
+
+/**
+ * Remove one task from the board, optionally archiving its worker session.
+ *
+ * Order: the session is archived *before* the task is spliced out and written.
+ * The task row holds the only reference to `childSessionId`, so archiving after
+ * the write would lose the id if that write failed. With this order a failure
+ * is recoverable in both directions: a failed archive leaves the task untouched
+ * (nothing to undo), and a failed project write leaves an archived session whose
+ * task is still on the board — the page's `/sessions/restore` route unarchives
+ * it, and retrying the delete is safe because archiving an already-archived id
+ * is a no-op.
+ */
+async function removeTask(ctx, projectId, taskId, action = '') {
   const project = await readProject(projectId)
   const index = project.tasks.findIndex((candidate) => candidate.id === taskId)
   if (index < 0) throw httpError(404, 'task_not_found')
+  const task = project.tasks[index]
+  const session = action === 'archive' ? await archiveTaskSession(ctx, project, task) : null
   project.tasks.splice(index, 1)
   project.updatedAt = Date.now()
   await writeProject(project)
-  return project
+  return { project, session }
 }
 
 function blocksToText(blocks) {
@@ -1262,7 +1349,17 @@ function readJson(req) {
   })
 }
 
-async function routeRequest(ctx, method, path, req) {
+/**
+ * The `?session=` value of a task DELETE, normalized. Absent, empty and
+ * whitespace all mean "no session action", which is the conservative default:
+ * deleting a task must never touch a session unless the caller asked.
+ */
+function sessionActionOf(searchParams) {
+  const raw = searchParams && typeof searchParams.get === 'function' ? searchParams.get('session') : null
+  return typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+}
+
+async function routeRequest(ctx, method, path, req, searchParams) {
   const parts = path.split('/').filter(Boolean)
 
   // /sessions/restore — an archived Session rejects every model step, so the
@@ -1360,8 +1457,17 @@ async function routeRequest(ctx, method, path, req) {
       return { status: 200, body: { task } }
     }
     if (method === 'DELETE') {
-      await removeTask(projectId, taskId)
-      return { status: 200, body: { deleted: true } }
+      const action = sessionActionOf(searchParams)
+      if (action && !SESSION_ACTIONS.includes(action)) {
+        throw httpError(
+          400,
+          SESSION_DELETE_SPELLINGS.includes(action)
+            ? SESSION_DELETE_REFUSED
+            : `unknown session action "${action}" (supported: ${SESSION_ACTIONS.join(', ')})`,
+        )
+      }
+      const { session } = await removeTask(ctx, projectId, taskId, action)
+      return { status: 200, body: { deleted: true, session } }
     }
     throw httpError(405, 'method_not_allowed')
   }
@@ -1390,7 +1496,7 @@ function createRouteHandler(ctx) {
     const path = url.pathname.slice(ROUTE.length) || '/'
     const method = (req.method || 'GET').toUpperCase()
     try {
-      const result = await routeRequest(ctx, method, path, req)
+      const result = await routeRequest(ctx, method, path, req, url.searchParams)
       send(res, result.status, result.body)
     } catch (error) {
       const status = Number(error?.status) || 500

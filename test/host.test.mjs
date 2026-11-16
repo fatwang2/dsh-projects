@@ -38,6 +38,33 @@ const fakeSubagents = {
 let fakeLlm
 let fakePresets
 
+/**
+ * Stand-in for the `workspaceRegistry` service. Archiving a session is a real
+ * service call this process does not have, so the archive tests inject a
+ * recorder instead: they assert *which* session the host asked to archive and
+ * control whether the call succeeds, is refused, or fails. Reassigned per test
+ * (`createRegistry()`) so call records never leak between cases.
+ */
+let fakeWorkspaceRegistry
+
+function createRegistry() {
+  const registry = {
+    calls: [],
+    archived: new Set(),
+    failWith: null,
+    async archiveSession(sessionId, options) {
+      registry.calls.push({ sessionId, options })
+      if (registry.failWith) throw registry.failWith
+      registry.archived.add(sessionId)
+    },
+    async unarchiveSession(sessionId) {
+      registry.calls.push({ sessionId, unarchive: true })
+      registry.archived.delete(sessionId)
+    },
+  }
+  return registry
+}
+
 function createContext() {
   return {
     effect(fn) {
@@ -47,6 +74,7 @@ function createContext() {
       if (name === 'subagents') return fakeSubagents
       if (name === 'llm') return fakeLlm
       if (name === 'agentPresets') return fakePresets
+      if (name === 'workspaceRegistry') return fakeWorkspaceRegistry
       return undefined
     },
     on(name, listener) {
@@ -113,6 +141,7 @@ async function request(method, path, body) {
 before(async () => {
   home = await mkdtemp(join(tmpdir(), 'dsh-projects-test-'))
   process.env.DSH_HOME = home
+  fakeWorkspaceRegistry = createRegistry()
   plugin = await import('../host/index.js')
   plugin.apply(createContext())
 })
@@ -1457,4 +1486,211 @@ test('an archived section is still readable, and the index says so', async () =>
     () => call('projects_memory', { project_id: projectId, action: 'read', section: 'no such section' }),
     /Archived sections are searchable too/,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Deleting a task and the worker session behind it.
+//
+// DeepSeek Harness has no session deletion at all — `sessions` and
+// `sessionPersistence` expose no delete, and the product documents that sessions
+// "can be archived but are never deleted". So the host supports exactly one
+// session action on task delete, `?session=archive`, and refuses every delete
+// spelling instead of silently downgrading it. These tests drive the injected
+// `workspaceRegistry` above; no real session store is touched.
+
+/** Create a project with one dispatched task, so the task carries a childSessionId. */
+async function projectWithWorker(title) {
+  const created = await call('projects_create', { name: `Sessions · ${title}`, autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', { project_id: projectId, title })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  return { projectId, taskId }
+}
+
+test('deleting a task leaves its worker session alone by default', async () => {
+  const { projectId, taskId } = await projectWithWorker('default keeps the session')
+  fakeWorkspaceRegistry = createRegistry()
+
+  const response = await request('DELETE', `/projects-api/projects/${projectId}/tasks/${taskId}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.body.deleted, true)
+  assert.equal(response.body.session, null)
+  assert.equal(fakeWorkspaceRegistry.calls.length, 0, 'no archive call without the parameter')
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 0)
+})
+
+test('?session=archive archives the task\'s own worker session, then drops the task', async () => {
+  const { projectId, taskId } = await projectWithWorker('archive the worker')
+  fakeWorkspaceRegistry = createRegistry()
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body.session, { id: 'child-session-1', archived: true })
+  // The id comes from the task row, never from the request.
+  assert.deepEqual(fakeWorkspaceRegistry.calls.map((entry) => entry.sessionId), ['child-session-1'])
+  assert.equal(fakeWorkspaceRegistry.calls[0].options, undefined, 'running work is not stopped implicitly')
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 0)
+})
+
+test('the coordinator session is never archived', async () => {
+  const { projectId, taskId } = await projectWithWorker('coordinator guard')
+  fakeWorkspaceRegistry = createRegistry()
+  // Simulate the collision the guard exists for: the task's worker id is also
+  // recorded as the project's coordinator session.
+  const patched = await request('PATCH', `/projects-api/projects/${projectId}`, {
+    coordinatorSessionId: 'child-session-1',
+  })
+  assert.equal(patched.status, 200)
+  assert.equal(patched.body.project.coordinatorSessionId, 'child-session-1')
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 409)
+  assert.match(response.body.error, /coordinator session/)
+  assert.equal(fakeWorkspaceRegistry.calls.length, 0, 'the coordinator is not even asked about')
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 1, 'the task survives a refused archive')
+})
+
+test('a failed archive keeps the task on the board', async () => {
+  const { projectId, taskId } = await projectWithWorker('archive failure')
+  fakeWorkspaceRegistry = createRegistry()
+  fakeWorkspaceRegistry.failWith = new Error('registry is read-only')
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 500)
+  assert.match(response.body.error, /could not archive session child-session-1/)
+  assert.equal(fakeWorkspaceRegistry.calls.length, 1)
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 1, 'no dangling reference is left behind')
+  assert.equal(detail.body.project.tasks[0].id, taskId)
+})
+
+test('an active worker is refused instead of being stopped behind the user', async () => {
+  const { projectId, taskId } = await projectWithWorker('still running')
+  fakeWorkspaceRegistry = createRegistry()
+  const active = new Error("cannot archive session 'child-session-1': the session is active (agent)")
+  active.name = 'WorkspaceActiveSessionError'
+  fakeWorkspaceRegistry.failWith = active
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 409)
+  assert.match(response.body.error, /still running/)
+  assert.match(response.body.error, /stop it first/)
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 1)
+})
+
+test('a session that is already gone does not block the delete', async () => {
+  const { projectId, taskId } = await projectWithWorker('session already gone')
+  fakeWorkspaceRegistry = createRegistry()
+  const unknown = new Error('no such session')
+  unknown.name = 'WorkspaceUnknownSessionError'
+  fakeWorkspaceRegistry.failWith = unknown
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body.session, { id: 'child-session-1', archived: false })
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 0)
+})
+
+test('a session delete request is refused, not silently downgraded to archive', async () => {
+  const { projectId, taskId } = await projectWithWorker('delete refused')
+  fakeWorkspaceRegistry = createRegistry()
+
+  for (const spelling of ['1', 'true', 'delete', 'remove']) {
+    const response = await request(
+      'DELETE',
+      `/projects-api/projects/${projectId}/tasks/${taskId}?session=${spelling}`,
+    )
+    assert.equal(response.status, 400, `?session=${spelling} must refuse`)
+    assert.match(response.body.error, /cannot delete a session/)
+    assert.match(response.body.error, /session=archive/, 'the refusal names the supported action')
+  }
+  assert.equal(fakeWorkspaceRegistry.calls.length, 0)
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 1, 'a refused request deletes nothing')
+})
+
+test('an unknown session action is rejected', async () => {
+  const { projectId, taskId } = await projectWithWorker('unknown action')
+  fakeWorkspaceRegistry = createRegistry()
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=purge`,
+  )
+  assert.equal(response.status, 400)
+  assert.match(response.body.error, /unknown session action "purge"/)
+  assert.equal(fakeWorkspaceRegistry.calls.length, 0)
+})
+
+test('a task that never ran has no session to archive', async () => {
+  const created = await call('projects_create', { name: 'Sessions · never dispatched', autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Queued only' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  fakeWorkspaceRegistry = createRegistry()
+
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+  )
+  assert.equal(response.status, 200)
+  assert.equal(response.body.session, null)
+  assert.equal(fakeWorkspaceRegistry.calls.length, 0)
+})
+
+test('archiving without a workspace registry service is refused', async () => {
+  const { projectId, taskId } = await projectWithWorker('no registry')
+  fakeWorkspaceRegistry = undefined
+  try {
+    const response = await request(
+      'DELETE',
+      `/projects-api/projects/${projectId}/tasks/${taskId}?session=archive`,
+    )
+    assert.equal(response.status, 503)
+    assert.equal(response.body.error, 'workspace_registry_unavailable')
+  } finally {
+    fakeWorkspaceRegistry = createRegistry()
+  }
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks.length, 1, 'the task is kept when the session cannot be archived')
+})
+
+test('deleting an unknown task is a 404 and archives nothing', async () => {
+  const { projectId } = await projectWithWorker('unknown task')
+  fakeWorkspaceRegistry = createRegistry()
+  const response = await request(
+    'DELETE',
+    `/projects-api/projects/${projectId}/tasks/t-deadbeef?session=archive`,
+  )
+  assert.equal(response.status, 404)
+  assert.equal(response.body.error, 'task_not_found')
+  assert.equal(fakeWorkspaceRegistry.calls.length, 0)
 })

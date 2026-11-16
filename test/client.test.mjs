@@ -130,6 +130,183 @@ test('registers the sidebar entry and the main page', () => {
   assert.equal(typeof injected.activeLocale, 'function')
 })
 
+/**
+ * Sample an SVG path into points. Supports the commands the icons use
+ * (M/L/H/V/Q/C/Z, absolute and relative) and flattens curves, so the caller can
+ * take a real bounding box instead of eyeballing the `d` string.
+ */
+function pathPoints(d, steps = 40) {
+  const tokens = d.match(/[A-Za-z]|-?\d*\.?\d+/g) || []
+  const points = []
+  let i = 0
+  let cx = 0
+  let cy = 0
+  let sx = 0
+  let sy = 0
+  const num = () => Number(tokens[i++])
+  const push = (x, y) => points.push([x, y])
+
+  while (i < tokens.length) {
+    const cmd = tokens[i++]
+    const rel = cmd === cmd.toLowerCase()
+    if (cmd === 'M' || cmd === 'm') {
+      const x = num()
+      const y = num()
+      cx = rel ? cx + x : x
+      cy = rel ? cy + y : y
+      sx = cx
+      sy = cy
+      push(cx, cy)
+    } else if (cmd === 'L' || cmd === 'l') {
+      const x = num()
+      const y = num()
+      cx = rel ? cx + x : x
+      cy = rel ? cy + y : y
+      push(cx, cy)
+    } else if (cmd === 'H' || cmd === 'h') {
+      const x = num()
+      cx = rel ? cx + x : x
+      push(cx, cy)
+    } else if (cmd === 'V' || cmd === 'v') {
+      const y = num()
+      cy = rel ? cy + y : y
+      push(cx, cy)
+    } else if (cmd === 'Q' || cmd === 'q') {
+      const qx = num()
+      const qy = num()
+      const x = num()
+      const y = num()
+      const ctrlX = rel ? cx + qx : qx
+      const ctrlY = rel ? cy + qy : qy
+      const endX = rel ? cx + x : x
+      const endY = rel ? cy + y : y
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps
+        const mt = 1 - t
+        push(
+          mt * mt * cx + 2 * mt * t * ctrlX + t * t * endX,
+          mt * mt * cy + 2 * mt * t * ctrlY + t * t * endY,
+        )
+      }
+      cx = endX
+      cy = endY
+    } else if (cmd === 'C' || cmd === 'c') {
+      const a = num()
+      const b = num()
+      const c = num()
+      const dd = num()
+      const e = num()
+      const f = num()
+      const x1 = rel ? cx + a : a
+      const y1 = rel ? cy + b : b
+      const x2 = rel ? cx + c : c
+      const y2 = rel ? cy + dd : dd
+      const endX = rel ? cx + e : e
+      const endY = rel ? cy + f : f
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps
+        const mt = 1 - t
+        push(
+          mt ** 3 * cx + 3 * mt * mt * t * x1 + 3 * mt * t * t * x2 + t ** 3 * endX,
+          mt ** 3 * cy + 3 * mt * mt * t * y1 + 3 * mt * t * t * y2 + t ** 3 * endY,
+        )
+      }
+      cx = endX
+      cy = endY
+    } else if (cmd === 'Z' || cmd === 'z') {
+      cx = sx
+      cy = sy
+      push(cx, cy)
+    } else {
+      throw new Error(`pathPoints cannot read the command ${cmd}`)
+    }
+  }
+  return points
+}
+
+/** The ink box of a path: the point box grown by half the stroke on every side. */
+function inkBox(d, strokeWidth = 0) {
+  const points = pathPoints(d)
+  const xs = points.map((point) => point[0])
+  const ys = points.map((point) => point[1])
+  const pad = strokeWidth / 2
+  const minX = Math.min(...xs) - pad
+  const maxX = Math.max(...xs) + pad
+  const minY = Math.min(...ys) - pad
+  const maxY = Math.max(...ys) + pad
+  return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY }
+}
+
+test('the sidebar icon fills its 24 grid the way the host icons do', () => {
+  const { registrations } = applyWithFakes()
+  const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist')
+
+  const icon = sidebar.component({ size: 18 })
+  assert.equal(icon.type, 'svg')
+  assert.equal(icon.props.viewBox, '0 0 24 24')
+  assert.equal(icon.props.width, 18)
+  assert.equal(icon.props.height, 18)
+  assert.equal(icon.props.fill, 'none')
+
+  // The host passes its own size; our default only covers a missing prop.
+  assert.equal(sidebar.component({ size: 16 }).props.width, 16)
+  assert.equal(sidebar.component({ size: 16 }).props.height, 16)
+  assert.equal(sidebar.component({}).props.width, 18)
+  assert.equal(sidebar.component({}).props.height, 18)
+
+  // Both strokes stay on the 24 grid's weight, in currentColor only.
+  assert.equal(icon.children.length, 2)
+  for (const child of icon.children) {
+    assert.equal(child.props.stroke, 'currentColor')
+    assert.equal(child.props.fill, undefined)
+    assert.ok(
+      child.props.strokeWidth >= 1.5 && child.props.strokeWidth <= 2,
+      `strokeWidth ${child.props.strokeWidth} matches the host's 1.5-2 range`,
+    )
+  }
+
+  const strokeWidth = icon.children[0].props.strokeWidth
+  const folder = inkBox(icon.children[0].props.d, strokeWidth)
+  const check = inkBox(icon.children[1].props.d, strokeWidth)
+
+  // The path coordinates themselves sit inside 2..22, like the host grid.
+  const outline = inkBox(icon.children[0].props.d, 0)
+  assert.ok(outline.minX >= 2 && outline.maxX <= 22, `x ink ${outline.minX}..${outline.maxX}`)
+  assert.ok(outline.minY >= 2 && outline.maxY <= 22, `y ink ${outline.minY}..${outline.maxY}`)
+
+  // Measured fill: the visible box over the rendered size, on both axes.
+  const fillX = folder.width / 24
+  const fillY = folder.height / 24
+  for (const [axis, fill] of [['x', fillX], ['y', fillY]]) {
+    assert.ok(fill >= 0.75 && fill <= 0.9, `${axis} fill ${fill.toFixed(3)} lands in 0.75-0.90`)
+  }
+
+  // Nothing spills out of the viewBox once the stroke is drawn.
+  assert.ok(folder.minX >= 0 && folder.maxX <= 24, 'no horizontal clipping')
+  assert.ok(folder.minY >= 0 && folder.maxY <= 24, 'no vertical clipping')
+
+  // A host-shaped 24-grid glyph (ink 2..22) measures 83.3%; stay within 6pp of it.
+  const host = inkBox('M2 4.5Q2 2 4.5 2H19.5Q22 2 22 4.5V19.5Q22 22 19.5 22H4.5Q2 22 2 19.5Z', 0)
+  const hostFill = host.width / 24
+  assert.ok(
+    Math.abs(fillX - hostFill) <= 0.06 && Math.abs(fillY - hostFill) <= 0.06,
+    `fill ${fillX.toFixed(3)}x${fillY.toFixed(3)} tracks the host's ${hostFill.toFixed(3)}`,
+  )
+
+  // The check rides inside the folder, so the glyph reads as one mark.
+  assert.ok(check.minX > folder.minX && check.maxX < folder.maxX, 'check is inside horizontally')
+  assert.ok(check.minY > folder.minY && check.maxY < folder.maxY, 'check is inside vertically')
+
+  // No literal colours sneak into the icon block.
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function ProjectsIcon')
+  const end = source.indexOf('function StatusPill', start)
+  const block = source.slice(start, end)
+  assert.match(block, /currentColor/)
+  assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b/)
+  assert.doesNotMatch(block, /\brgba?\(|\bhsla?\(/)
+})
+
 test('both dictionaries carry the same keys and no add-task surface', () => {
   const { registrations, dictionaries } = applyWithFakes()
   const { en, zh } = dictionaries[0].dicts

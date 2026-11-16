@@ -908,21 +908,27 @@ ${SHARED_CSS}${DISPATCH_RULES}
     // ---------------------------------------------------------------------
     // Components
 
+    /**
+     * The sidebar glyph: a folder with a check, drawn on the host's 24x24 grid.
+     * The path spans 2.5-21.5 on both axes (79% fill, stroke included 87%), so it
+     * reads at the same weight as the neighbouring host icons instead of the old
+     * 36-grid art, whose ink only covered 67% x 53% of its box.
+     */
     function ProjectsIcon({ size }) {
       const edge = typeof size === 'number' && size > 0 ? size : 18
       return h(
         'svg',
-        { width: edge, height: edge, viewBox: '0 0 36 36', fill: 'none', 'aria-hidden': true },
+        { width: edge, height: edge, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true },
         h('path', {
-          d: 'M6 12.4c0-1.4 1.1-2.4 2.4-2.4h5.2l2.2 2.6h11.8c1.3 0 2.4 1.1 2.4 2.4v11.6c0 1.4-1.1 2.4-2.4 2.4H8.4C7.1 29 6 27.9 6 26.6V12.4Z',
+          d: 'M4.5 2.5H8.4Q9.5 2.5 10.2 3.4L11.8 6.5H19.5Q21.5 6.5 21.5 8.5V19.5Q21.5 21.5 19.5 21.5H4.5Q2.5 21.5 2.5 19.5V4.5Q2.5 2.5 4.5 2.5Z',
           stroke: 'currentColor',
-          strokeWidth: 2.2,
+          strokeWidth: 1.8,
           strokeLinejoin: 'round',
         }),
         h('path', {
-          d: 'M13.4 20.2l3 3 6.4-6.6',
+          d: 'M8.6 14.2L11.2 16.8L16.4 11.2',
           stroke: 'currentColor',
-          strokeWidth: 2.2,
+          strokeWidth: 1.8,
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
         }),

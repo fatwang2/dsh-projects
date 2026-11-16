@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# macOS / editor noise
+.DS_Store
+
+# Logs and temporary files
+*.log
+
+# Environment files
+.env*

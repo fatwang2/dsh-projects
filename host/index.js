@@ -129,7 +129,7 @@ const AUTONOMY = ['manual', 'auto']
  * all. `sessions` (the `SessionStore`) offers create/prepare/enter/announce/
  * get/list/fork/flush and `sessionPersistence` offers create/open/read/append/
  * flush/stat/list — no method removes a stored log — and the product states the
- * gap outright ("会话可以归档但绝不会被删除",
+ * gap outright ("sessions can be archived but are never deleted",
  * `dsh-client-ui-workspace/README.zh.md`). Reaching under those services to
  * `rm -rf $DSH_HOME/sessions/<cwd>/<id>/` would strand the workspace accounting
  * in `workspace.json`, the `session_projcache` projection cache and the archive

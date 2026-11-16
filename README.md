@@ -5,6 +5,31 @@ instructions, a workspace, a shared memory file, and a board of tasks. One
 coordinator session plans and dispatches; every task runs as a worker subagent
 with its own context, and its final message lands on the task for review.
 
+## Install
+
+The package is a DSH bundle. `package.json` declares `dsh.bundle.patch`
+(`cordis.patch.yml` inserts the Host plugin row) and `dsh.client` (the Client
+module is discovered from the same package), so one installation provides both
+halves.
+
+Install it into a profile with the plugin manager: `plugin_manager` →
+`install_bundle` takes this package's directory or a published spec, installs
+the package and selects the bundle. The profile then lists
+`@local/dsh-projects` in `dsh.profile.bundles` and links the package in its
+`dependencies`:
+
+```json
+{
+  "dsh": { "profile": { "bundles": ["@local/dsh-projects"] } },
+  "dependencies": { "@local/dsh-projects": "link:/path/to/projects-plugin" }
+}
+```
+
+A directory install links the checkout rather than packing it, so `files` does
+not filter what runs — edit the sources in place. A newly installed Client module
+needs one page refresh before the **Projects** entry appears. Disabling or
+removing the bundle leaves every project on disk.
+
 ## Where it lives
 
 - Left sidebar: a **Projects** entry (a stacked-card glyph drawn on a 24 grid
@@ -69,11 +94,12 @@ with its own context, and its final message lands on the task for review.
    `projects_memory`.
 4. When a worker settles, its final message becomes the task output and the
    task moves to **Ready for review**. The human accepts it by toggling
-   **Resolve** in the task detail view: status is system-owned and read-only, so
-   acceptance is the `resolved` flag, not a status edit. To send work back or
-   add a follow-up, say so in the main conversation and let the coordinator
-   derive a new task. Deleting a task is in the row's right-click menu
-   (two-step confirm).
+   **Resolve** in the task detail view. `status` is a single enum and `resolved`
+   is one of its values: Resolve writes `status: "resolved"`, and toggling it
+   again sends the task back to `review`. There is no separate `resolved`
+   boolean. To send work back or add a follow-up, say so in the main
+   conversation and let the coordinator derive a new task. Deleting a task is in
+   the row's right-click menu (two-step confirm).
 
 ## Dispatch policy
 
@@ -133,3 +159,10 @@ with its own context, and its final message lands on the task for review.
 - The worker route is a project setting (`model`, `reasoningEffort`,
   `agentPreset`) with the same fields overridable per task; empty means inherit,
   falling back to the Host default.
+
+## Design
+
+[docs/DESIGN.md](docs/DESIGN.md) is the design note: the capability comparison
+against Claude / Cursor Projects, the prototype architecture, the Host and
+Client extension points it builds on, the gaps that need infrastructure rather
+than a plugin, and the verification status.

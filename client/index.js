@@ -69,6 +69,9 @@ window.__ModuleLoader__.load({
       memoryPreamble: 'Preamble',
       memoryChars: 'chars',
       memoryStale: 'superseded',
+      memorySections: 'sections',
+      memoryEnter: 'Open',
+      memoryBack: 'Back to settings',
       save: 'Save',
       policy: 'Dispatch policy',
       concurrency: 'Parallel workers',
@@ -204,6 +207,9 @@ window.__ModuleLoader__.load({
       memoryPreamble: '前言',
       memoryChars: '字符',
       memoryStale: '已过时',
+      memorySections: '节',
+      memoryEnter: '进入',
+      memoryBack: '返回设置',
       save: '保存',
       policy: '派发策略',
       concurrency: '并行执行者',
@@ -530,6 +536,21 @@ window.__ModuleLoader__.load({
 .pj-memory-row-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .pj-memory-row-meta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .pj-memory-body{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-primary)}
+/* The memory is a page of its own, so the settings form keeps one entry row:
+   a long memory used to fill the dialog and push every setting below it out
+   of view. The row is the Host's navigation row — title, tally, affordance. */
+.pj-nav-row{display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;box-sizing:border-box;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.pj-nav-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pj-nav-row-title{flex:none;font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary)}
+.pj-nav-row-meta{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.pj-nav-row-enter{flex:none;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.pj-nav-row-chevron{display:inline-flex;flex:none;align-items:center;justify-content:center;width:12px;height:12px;color:var(--dsw-alias-menu-icon)}
+.pj-nav-row-chevron svg{width:12px;height:12px}
+/* The memory page replaces the form inside the same dialog, so the dialog keeps
+   one scroll source and one focus trap: a bar with the way back and the
+   whole-file editor, then the hint and the section list. */
+.pj-memory-page{display:flex;flex-direction:column;gap:8px;min-width:0}
+.pj-memory-bar{display:flex;align-items:center;gap:8px}
 /* A thread card: icon in the gutter, then a title line, a one-line summary and
    optional chips. Two rows plus chips, and no controls at all — every action
    lives in the right-click menu or on the detail page. */
@@ -1090,6 +1111,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
     }
 
     /**
+     * The settings entry row's tally: how many `## ` sections the memory has
+     * and how big the file is. The count is the Host's own index count, not the
+     * page's row count (the preamble is a row but not a section), and a long
+     * file is rounded to `k` the way the index describes it.
+     */
+    function memorySummary(sections, memory, t) {
+      const chars = String(memory ?? '').length
+      const size = chars < 1000 ? String(chars) : `${Math.round(chars / 100) / 10}k`
+      return `${sections} ${t('memorySections')} · ${size} ${t('memoryChars')}`
+    }
+
+    /**
      * The left column's one-line tally, read straight from the Host's
      * `counts` object. `resolved` is a status, so it is listed like the others:
      * the sidebar and the Threads panel bucket a task the same way, and a board
@@ -1487,13 +1520,20 @@ ${SHARED_CSS}${DISPATCH_RULES}
      * Hold one dialog open for its lifetime: move focus in, trap Tab, close on
      * Escape, lock the page scroll and hand focus back to the trigger.
      *
+     * `onEscape` is the Escape handler when the dialog has an inner page to
+     * leave first: the settings dialog's memory page answers Escape by going
+     * back to the form, while the close button and the mask still dismiss the
+     * whole dialog. Without it, Escape closes the dialog.
+     *
      * A no-op without a document, so the element-tree harness can render the
      * page. `returnFocusRef` is the trigger element's ref; when it is gone the
      * element that had focus when the dialog opened gets it back.
      */
-    function useModalLayer(ref, open, onClose, returnFocusRef) {
+    function useModalLayer(ref, open, onClose, returnFocusRef, onEscape) {
       const closeRef = useRef(onClose)
       closeRef.current = onClose
+      const escapeRef = useRef(onEscape)
+      escapeRef.current = onEscape
       const returnRef = useRef(returnFocusRef)
       returnRef.current = returnFocusRef
       useEffect(() => {
@@ -1517,7 +1557,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
           if (event.key === 'Escape') {
             if (event.shiftKey) return
             event.preventDefault()
-            if (!event.repeat) closeRef.current()
+            // A dialog with an inner page leaves that page first; the close
+            // button and the mask still dismiss the whole dialog.
+            if (!event.repeat) (escapeRef.current || closeRef.current)()
             return
           }
           if (event.key !== 'Tab') return
@@ -1566,6 +1608,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
         title,
         closeLabel,
         onClose,
+        onEscape,
         maskClose = true,
         returnFocusRef,
         className,
@@ -1573,7 +1616,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
         footer,
       } = props
       const dialogRef = useRef(null)
-      useModalLayer(dialogRef, open, onClose, returnFocusRef)
+      useModalLayer(dialogRef, open, onClose, returnFocusRef, onEscape)
       if (!open) return null
       return h(
         'div',
@@ -1629,6 +1672,36 @@ ${SHARED_CSS}${DISPATCH_RULES}
           d: 'M3 4.75L6 7.75l3-3',
           stroke: 'currentColor',
           strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
+    /** The same 12px caret, turned, for a row that opens a page of its own. */
+    function ChevronRightIcon() {
+      return h(
+        'svg',
+        { width: 12, height: 12, viewBox: '0 0 12 12', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'M4.75 3L7.75 6l-3 3',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
+    /** `IconArrowLeftOutlineRegular`: the memory page's way back to the form. */
+    function ArrowLeftIcon({ size }) {
+      return h(
+        OutlineIcon,
+        { size },
+        h('path', {
+          d: 'M13 8H3M6.5 4.5L3 8l3.5 3.5',
+          stroke: 'currentColor',
+          strokeWidth: ICON_STROKE,
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
         }),
@@ -1874,11 +1947,21 @@ ${SHARED_CSS}${DISPATCH_RULES}
         concurrency: 2,
       })
       const [showSettings, setShowSettings] = useState(false)
+      // The settings dialog has two pages: the form and the memory manager.
+      // The memory list used to be a section of the form, and a long memory
+      // pushed every setting below it out of the dialog; now the form keeps one
+      // entry row and the list is a page of its own inside the same dialog.
+      const [settingsView, setSettingsView] = useState('main')
       // Archiving is destructive, so the settings dialog arms it on the first
       // press and only the second one archives.
       const [archiveArmed, setArchiveArmed] = useState(false)
       const newProjectTrigger = useRef(null)
       const settingsTrigger = useRef(null)
+      // The two controls a page switch focuses: the form's memory entry and the
+      // memory page's way back. Switching pages unmounts the focused control,
+      // so the dialog needs a new focus seat.
+      const memoryEntryRef = useRef(null)
+      const memoryBackRef = useRef(null)
       const [confirmDeleteId, setConfirmDeleteId] = useState(null)
       const confirmDeleteAt = useRef(0)
       const [thread, setThread] = useState(null)
@@ -2270,7 +2353,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
       }, [coordinatorArchived, coordinatorSessionId])
 
       // A different project resets the edit buffers, the executor pane, the
-      // armed archive and the Threads filter before they are synced.
+      // armed archive, the settings page and the Threads filter before they are
+      // synced.
       useEffect(() => {
         goalDirtyRef.current = false
         memoryDirtyRef.current = false
@@ -2281,9 +2365,23 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setHiddenGroups({})
         setMemoryPreview(null)
         setMemoryEditorOpen(false)
+        setSettingsView('main')
         setExecTarget((current) => (current ? null : current))
         setMenu(null)
       }, [detail?.project?.id])
+
+      // A page switch inside the settings dialog unmounts the control that had
+      // focus, so the dialog hands focus to the new page's first control. Only
+      // a switch does this: opening the dialog must still land on its own
+      // autofocus target, not on the memory entry.
+      const settingsViewRef = useRef('main')
+      useEffect(() => {
+        const previous = settingsViewRef.current
+        settingsViewRef.current = settingsView
+        if (!showSettings || previous === settingsView) return
+        const target = settingsView === 'memory' ? memoryBackRef.current : memoryEntryRef.current
+        if (target && typeof target.focus === 'function') focusWithoutRing(target)
+      }, [settingsView, showSettings])
 
       useEffect(() => {
         if (!detail) return
@@ -2380,6 +2478,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
 
       const openSettings = () => {
         setArchiveArmed(false)
+        // The dialog always opens on the form, never on whatever page the last
+        // visit ended on.
+        setSettingsView('main')
         setShowSettings(true)
       }
 
@@ -2389,7 +2490,24 @@ ${SHARED_CSS}${DISPATCH_RULES}
         setArchiveArmed(false)
         setMemoryPreview(null)
         setMemoryEditorOpen(false)
+        setSettingsView('main')
         setShowSettings(false)
+      }
+
+      // The memory page is one level below the form: entering it and leaving it
+      // only switch the dialog's page, never close the dialog. A preview or the
+      // editor opened from the page is closed on the way out.
+      const openMemoryPage = () => {
+        setArchiveArmed(false)
+        setMemoryPreview(null)
+        setMemoryEditorOpen(false)
+        setSettingsView('memory')
+      }
+
+      const backToSettings = () => {
+        setMemoryPreview(null)
+        setMemoryEditorOpen(false)
+        setSettingsView('main')
       }
 
       // One POST carries every field the dialog collects. Autonomy is not one of
@@ -2800,8 +2918,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
       }
 
       // The settings list reads the saved memory, not the editor's buffer: a row
-      // is a section the workers can actually read right now.
+      // is a section the workers can actually read right now. The entry row's
+      // tally counts `## ` sections, the same number the Host's index reports.
       const memoryList = memoryRows(detail?.memory || '', t)
+      const memorySectionCount = memorySections(detail?.memory || '').length
 
       const renderSettings = () =>
         h(
@@ -2992,56 +3112,33 @@ ${SHARED_CSS}${DISPATCH_RULES}
               ),
             ),
           ),
+          // The memory is a page of its own: one row here, the section list and
+          // the whole-file editor there. A long memory must not fill the dialog
+          // and push the settings below it out of view.
           h(
             'div',
             { className: 'pj-section' },
             h(
-              'div',
-              { className: 'pj-section-head' },
-              h('h2', { className: 'pj-section-title' }, t('memory')),
-              // The list is for reading one section; editing the whole file is
-              // still one textarea, behind a dialog.
+              'button',
+              {
+                ref: memoryEntryRef,
+                className: 'pj-nav-row',
+                type: 'button',
+                onClick: openMemoryPage,
+              },
+              h('span', { className: 'pj-nav-row-title' }, t('memory')),
               h(
-                'button',
-                {
-                  className: 'pj-btn',
-                  type: 'button',
-                  disabled: busy,
-                  'aria-haspopup': 'dialog',
-                  onClick: () => setMemoryEditorOpen(true),
-                },
-                t('memoryEdit'),
+                'span',
+                { className: 'pj-nav-row-meta' },
+                memorySummary(memorySectionCount, detail?.memory || '', t),
+              ),
+              h('span', { className: 'pj-nav-row-enter' }, t('memoryEnter')),
+              h(
+                'span',
+                { className: 'pj-nav-row-chevron', 'aria-hidden': true },
+                h(ChevronRightIcon, null),
               ),
             ),
-            h('div', { className: 'pj-hint' }, t('memoryHint')),
-            memoryList.length === 0
-              ? h('div', { className: 'pj-hint' }, t('memoryEmpty'))
-              : h(
-                  'div',
-                  { className: 'pj-memory-list' },
-                  memoryList.map((row) =>
-                    h(
-                      'button',
-                      {
-                        key: row.key,
-                        className: 'pj-memory-row',
-                        type: 'button',
-                        title: row.description || row.title,
-                        'aria-haspopup': 'dialog',
-                        onClick: () => setMemoryPreview(row),
-                      },
-                      h(
-                        'span',
-                        { className: 'pj-memory-row-head' },
-                        h('span', { className: 'pj-memory-row-title' }, row.title),
-                        row.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
-                      ),
-                      row.description &&
-                        h('span', { className: 'pj-memory-row-desc' }, row.description),
-                      h('span', { className: 'pj-memory-row-meta' }, memoryMeta(row, t)),
-                    ),
-                  ),
-                ),
           ),
           // The danger zone closes the dialog. Archiving hides the project from
           // the list, so the first press only arms it and the second one acts;
@@ -3107,6 +3204,76 @@ ${SHARED_CSS}${DISPATCH_RULES}
                     ),
             ),
           ),
+        )
+
+      // The section list: one row per "## " section, the preamble first. A row
+      // opens the read-only preview; the whole file is still one textarea.
+      const renderMemoryList = () =>
+        memoryList.length === 0
+          ? h('div', { className: 'pj-hint' }, t('memoryEmpty'))
+          : h(
+              'div',
+              { className: 'pj-memory-list' },
+              memoryList.map((row) =>
+                h(
+                  'button',
+                  {
+                    key: row.key,
+                    className: 'pj-memory-row',
+                    type: 'button',
+                    title: row.description || row.title,
+                    'aria-haspopup': 'dialog',
+                    onClick: () => setMemoryPreview(row),
+                  },
+                  h(
+                    'span',
+                    { className: 'pj-memory-row-head' },
+                    h('span', { className: 'pj-memory-row-title' }, row.title),
+                    row.stale && h('span', { className: 'pj-badge' }, t('memoryStale')),
+                  ),
+                  row.description && h('span', { className: 'pj-memory-row-desc' }, row.description),
+                  h('span', { className: 'pj-memory-row-meta' }, memoryMeta(row, t)),
+                ),
+              ),
+            )
+
+      // The memory page, one level below the settings form: the way back, the
+      // whole-file editor, then the section list. It replaces the form inside
+      // the same dialog, so the dialog keeps one scroll source and one focus
+      // trap; Escape on this page goes back to the form (see `onEscape`).
+      const renderMemoryPage = () =>
+        h(
+          'div',
+          { className: 'pj-memory-page' },
+          h(
+            'div',
+            { className: 'pj-memory-bar' },
+            h(
+              'button',
+              {
+                ref: memoryBackRef,
+                className: 'pj-btn pj-btn-ghost',
+                type: 'button',
+                onClick: backToSettings,
+              },
+              h(ArrowLeftIcon, { size: 14 }),
+              t('memoryBack'),
+            ),
+            h('span', { className: 'pj-spacer' }),
+            h(
+              'button',
+              {
+                className: 'pj-btn',
+                type: 'button',
+                disabled: busy,
+                'aria-haspopup': 'dialog',
+                onClick: () => setMemoryEditorOpen(true),
+              },
+              t('memoryEdit'),
+            ),
+          ),
+          h('div', { className: 'pj-hint' }, t('memoryHint')),
+          renderMemoryList(),
         )
 
       // The collapsed project column: a 44px rail that still shows every
@@ -4045,9 +4212,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
         h(Modal, {
           open: showSettings,
           titleId: 'pj-settings-title',
-          title: t('settings'),
+          // The dialog's title follows its page: the memory manager is a page
+          // of the settings surface, not a second dialog.
+          title: settingsView === 'memory' ? t('memory') : t('settings'),
           closeLabel: t('close'),
           onClose: closeSettings,
+          // Escape leaves the memory page for the form before it closes the
+          // dialog, so one Escape never takes two levels at once. The close
+          // button and the mask still dismiss the whole dialog.
+          onEscape: settingsView === 'memory' ? backToSettings : undefined,
           // The armed archive is a destructive confirmation, so the mask stops
           // dismissing the dialog until it is cancelled or confirmed.
           maskClose: !archiveArmed,
@@ -4058,12 +4231,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
                 error &&
                   h('div', { key: 'error', className: 'pj-error', role: 'alert' }, `${t('error')}: ${error}`),
                 notice && h('div', { key: 'notice', className: 'pj-notice', role: 'status' }, notice),
-                renderSettings(),
+                settingsView === 'memory' ? renderMemoryPage() : renderSettings(),
               ]
             : null,
         }),
-        // A memory section opens as a read-only preview on top of the settings
-        // dialog, and the whole file opens in an editor. Both are dialogs, so
+        // A memory section opens as a read-only preview on top of the memory
+        // page, and the whole file opens in an editor. Both are dialogs, so
         // each surface keeps one scroll source, and Escape closes only the top
         // one (see `MODAL_LAYERS`).
         h(Modal, {

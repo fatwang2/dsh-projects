@@ -2249,7 +2249,7 @@ test('the workspace is a folder picker in both dialogs, never a text field', asy
   }
 })
 
-test('the settings memory is a section list whose rows open a preview dialog', async (t) => {
+test('the settings form keeps one memory entry row and the memory page owns the list', async (t) => {
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
@@ -2258,7 +2258,40 @@ test('the settings memory is a section list whose rows open a preview dialog', a
 
   page.click(page.byLabel('设置')[0])
   const settings = page.byClass('pj-modal-dialog')[0]
-  const rows = page.byClass('pj-memory-row', settings)
+  // The form no longer lists the sections: they used to fill the dialog and
+  // push every setting below them out of view.
+  assert.equal(page.byClass('pj-memory-row', settings).length, 0)
+  assert.equal(page.byClass('pj-memory-list', settings).length, 0)
+  // Every setting is still on the form, in the tree the browser paints.
+  for (const title of ['项目指令', '派发策略', '执行', '危险区']) {
+    assert.ok(
+      page.byClass('pj-section-title', settings).some((node) => page.textOf(node) === title),
+      `the form still shows ${title}`,
+    )
+  }
+  // One row opens the memory page: title, tally and the enter affordance.
+  const entry = page.byClass('pj-nav-row', settings)
+  assert.equal(entry.length, 1)
+  const entryText = page.textOf(entry[0])
+  assert.match(entryText, /共享记忆/)
+  assert.match(entryText, /2 节/)
+  assert.match(entryText, /进入/)
+  assert.equal(
+    page.textOf(page.byClass('pj-nav-row-meta', entry[0])[0]),
+    `2 节 · ${SAMPLE_MEMORY.length} 字符`,
+  )
+  // The whole memory is not a textarea in the dialog, and the editor entry
+  // point moved to the page with the list.
+  assert.equal(page.byLabel('共享记忆').length, 0, 'no memory textarea on the form')
+  assert.equal(page.byText('编辑全文', settings).length, 0, 'editing lives on the memory page')
+
+  // Entering switches the dialog's page; it does not stack a second dialog.
+  page.click(entry[0])
+  assert.equal(page.byClass('pj-modal-dialog').length, 1, 'the page switch keeps one dialog')
+  const memoryPage = page.byClass('pj-modal-dialog')[0]
+  assert.equal(page.textOf(page.byClass('pj-modal-title', memoryPage)[0]), '共享记忆')
+  assert.equal(page.byClass('pj-section-title', memoryPage).length, 0, 'the form is gone')
+  const rows = page.byClass('pj-memory-row', memoryPage)
   assert.equal(rows.length, 2, 'one row per "## " section')
   assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), '项目背景（2026-11-16）')
   assert.equal(
@@ -2269,9 +2302,6 @@ test('the settings memory is a section list whose rows open a preview dialog', a
   assert.match(meta, /字符/)
   assert.match(meta, /2026-11-16/, 'the date in the title is shown')
   assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[1])[0]), '已知坑')
-
-  // The whole memory is no longer one textarea in the dialog.
-  assert.equal(page.byLabel('共享记忆').length, 0, 'no memory textarea in the settings dialog')
 
   // A row opens a read-only preview of that section, stacked on the dialog.
   page.click(rows[1])
@@ -2284,18 +2314,157 @@ test('the settings memory is a section list whose rows open a preview dialog', a
   assert.match(body, /弹窗要能 Esc 关闭/)
   assert.doesNotMatch(body, /项目背景/, 'the preview shows one section, not the file')
 
-  // Closing the preview leaves the settings dialog open.
+  // Closing the preview leaves the memory page open.
   page.click(page.byClass('pj-modal-close', preview)[0])
   assert.equal(page.byClass('pj-modal-dialog').length, 1)
+  assert.equal(page.byClass('pj-memory-row').length, 2, 'the page is still there')
 
   // Editing is still whole-file, behind one explicit entry point.
-  page.click(page.byText('编辑全文', settings)[0])
+  page.click(page.byText('编辑全文', memoryPage)[0])
   const editor = page.byClass('pj-modal-dialog')[1]
   assert.ok(editor, 'the editor opened')
   const textarea = page.byTag('textarea', editor).find((node) => node.props['aria-label'] === '共享记忆')
   assert.ok(textarea, 'the editor is the whole memory')
   assert.equal(textarea.props.value, SAMPLE_MEMORY)
   assert.equal(page.byText('保存', editor)[0].props.disabled, true, 'nothing to save yet')
+  page.click(page.byText('取消', editor)[0])
+  assert.equal(page.byClass('pj-modal-dialog').length, 1)
+
+  // The back control is the page's return path: the dialog stays open and the
+  // form comes back.
+  page.click(page.byText('返回设置')[0])
+  assert.equal(page.byClass('pj-modal-dialog').length, 1, 'going back does not close the dialog')
+  const formAgain = page.byClass('pj-modal-dialog')[0]
+  assert.equal(page.textOf(page.byClass('pj-modal-title', formAgain)[0]), '设置')
+  assert.equal(page.byClass('pj-memory-row', formAgain).length, 0, 'the list is gone')
+  assert.equal(page.byClass('pj-nav-row', formAgain).length, 1, 'the entry row is back')
+  assert.ok(page.byText('保存', formAgain).length >= 1, 'the form is back')
+})
+
+test('a long memory cannot grow the settings form: the list is a page of its own', async (t) => {
+  // Forty sections: on the old form this list alone would have filled the
+  // dialog and pushed every setting below it out of view.
+  const longMemory = Array.from(
+    { length: 40 },
+    (_, index) => `## 第 ${index + 1} 节\n${'内容'.repeat(50)}`,
+  ).join('\n')
+
+  // The same form rendered with a two-section memory: the memory only changes
+  // one row's text, never the form's tree, so the form's height cannot grow
+  // with the file.
+  const shortPage = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => shortPage.unmount())
+  shortPage.click(shortPage.byLabel('设置')[0])
+  const shortNodes = shortPage.nodes(shortPage.byClass('pj-modal-dialog')[0]).length
+  shortPage.unmount()
+
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory: longMemory },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  const settings = page.byClass('pj-modal-dialog')[0]
+  // The form's own content is the five sections it always had, whatever the
+  // memory holds: the length of the file cannot change the form's height.
+  assert.equal(page.byClass('pj-section', settings).length, 5)
+  assert.equal(page.byClass('pj-memory-row', settings).length, 0)
+  assert.equal(
+    page.nodes(settings).length,
+    shortNodes,
+    'the form tree is the same size for a 40-section memory',
+  )
+  const entry = page.byClass('pj-nav-row', settings)[0]
+  assert.match(page.textOf(entry), /40 节/)
+  assert.match(page.textOf(entry), /k 字符/, 'a long file is rounded to k')
+
+  // The page lists all forty, and the back control returns to the form.
+  page.click(entry)
+  assert.equal(page.byClass('pj-memory-row').length, 40, 'the page lists every section')
+  page.click(page.byText('返回设置')[0])
+  assert.equal(page.byClass('pj-memory-row').length, 0, 'the form is back')
+})
+
+test('the entry tally counts sections, while the page also lists the preamble', async (t) => {
+  const memory = `项目总览\n\n${SAMPLE_MEMORY}`
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: SAMPLE_PROJECT, memory },
+  })
+  t.after(() => page.unmount())
+
+  page.click(page.byLabel('设置')[0])
+  const entry = page.byClass('pj-nav-row')[0]
+  assert.match(
+    page.textOf(entry),
+    /2 节/,
+    'the tally is the Host index count: a preamble is not a section',
+  )
+  page.click(entry)
+  const rows = page.byClass('pj-memory-row')
+  assert.equal(rows.length, 3, 'the page lists the preamble too')
+  assert.equal(page.textOf(page.byClass('pj-memory-row-title', rows[0])[0]), '前言')
+})
+
+test('the memory page is a page of the settings dialog, and Escape leaves it first', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // One dialog, two pages: the form and the memory manager.
+  assert.match(source, /const \[settingsView, setSettingsView\] = useState\('main'\)/)
+  assert.match(source, /const openMemoryPage = \(\) => \{/)
+  assert.match(source, /const backToSettings = \(\) => \{/)
+  assert.match(source, /settingsView === 'memory' \? renderMemoryPage\(\) : renderSettings\(\)/)
+  assert.match(source, /title: settingsView === 'memory' \? t\('memory'\) : t\('settings'\)/)
+
+  // Escape is the page's way back; the close button and the mask still dismiss
+  // the whole dialog, so one Escape never takes two levels at once.
+  assert.match(source, /onEscape: settingsView === 'memory' \? backToSettings : undefined/)
+  assert.match(source, /const escapeRef = useRef\(onEscape\)/)
+  assert.match(source, /\(escapeRef\.current \|\| closeRef\.current\)\(\)/)
+  assert.match(source, /onClick: onClose/)
+  assert.match(source, /onClick: maskClose \? onClose : undefined/)
+
+  // The form keeps one row for the memory; the list lives on the page.
+  const form = source.slice(source.indexOf('const renderSettings = () =>'), source.indexOf('const renderMemoryList'))
+  assert.match(form, /className: 'pj-nav-row'/)
+  assert.match(form, /memorySummary\(memorySectionCount, detail\?\.memory \|\| '', t\)/)
+  assert.doesNotMatch(form, /className: 'pj-memory-row'/)
+  assert.doesNotMatch(form, /className: 'pj-memory-list'/)
+  const memoryPage = source.slice(source.indexOf('const renderMemoryList'), source.indexOf('const renderListRail'))
+  assert.match(memoryPage, /className: 'pj-memory-list'/)
+  assert.match(memoryPage, /className: 'pj-memory-row'/)
+  assert.match(memoryPage, /t\('memoryBack'\)/)
+  assert.match(memoryPage, /t\('memoryEdit'\)/)
+  assert.match(memoryPage, /className: 'pj-memory-page'/)
+
+  // Both pages live inside the same dialog and the same focus trap: the page
+  // switch adds no dialog layer.
+  assert.equal([...source.matchAll(/h\(Modal, \{/g)].length, 4)
+
+  // The new rules are theme tokens only.
+  const rules = [...source.matchAll(/\n\.pj-(?:nav-row|memory-page|memory-bar)[^{]*\{[^}]*\}/g)].map(
+    (match) => match[0],
+  )
+  assert.ok(rules.length >= 6, 'the new rules were found')
+  for (const rule of rules) {
+    assert.doesNotMatch(rule, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, `literal colour: ${rule.trim()}`)
+  }
+  assert.match(source, /\.pj-nav-row\{[^}]*var\(--dsw-alias-bg-layer-3\)/)
+  assert.match(source, /\.pj-nav-row-chevron\{[^}]*var\(--dsw-alias-menu-icon\)/)
+
+  // The labels exist in both languages.
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  for (const key of ['memorySections', 'memoryEnter', 'memoryBack']) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+  assert.equal(zh.memoryEnter, '进入')
+  assert.equal(zh.memoryBack, '返回设置')
 })
 
 test('the page top is a window drag region, the way the Host marks its own', async (t) => {

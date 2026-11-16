@@ -1115,7 +1115,7 @@ test('displayed titles are shortened without touching the stored title', () => {
   assert.match(source, /\.pj-exec-task\{[^}]*max-width:220px/)
 })
 
-test('the coordinator prompt enforces brevity as hard rules, not suggestions', () => {
+test('the coordinator prompt enforces reply and brief rules as hard rules, not suggestions', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   const start = source.indexOf('function coordinatorPrompt')
   const end = source.indexOf('function ProjectsIcon', start)
@@ -1192,9 +1192,61 @@ test('the coordinator prompt enforces brevity as hard rules, not suggestions', (
     assert.ok(en.includes(line), `the en prompt lost: ${line}`)
   }
 
+  // The brief rules are the counterpart of the reply rules: the coordinator must
+  // not pre-design the work it hands out. Checked by operative clause in both
+  // languages, including the numeric length cap.
+  for (const line of [
+    '## 任务说明怎么写（硬约束）',
+    '任务说明（brief）只写三件事',
+    '问题是什么、约束是什么、怎么算做完',
+    '不写实现方案',
+    '不要预先设计',
+    '用 X 方案',
+    '改第 N 行',
+    '分三步做',
+    '怎么做由执行者自己判断',
+    '不写行号',
+    '行号会过期',
+    '让执行者自己定位',
+    'brief 一般 ≤ 15 行',
+    '超过必须是因为约束确实多',
+    '不重复项目指令',
+    '项目级约束写在项目指令里',
+    '验收标准要具体',
+    '写清怎么验证',
+    'npm test 全绿',
+    '截图确认 X',
+  ]) {
+    assert.ok(zh.includes(line), `the zh prompt is missing: ${line}`)
+  }
+  for (const line of [
+    '## How to write a task brief (hard rules)',
+    'A brief says three things only',
+    'what the problem is, what the constraints are, and what counts as done',
+    'Never the implementation plan',
+    'Do not pre-design',
+    'use approach X',
+    'change line N',
+    'do it in three steps',
+    "how to do it is the worker's call",
+    'No line numbers',
+    'they go stale',
+    'let the worker locate the code',
+    'a brief is usually ≤ 15 lines',
+    'going over must be justified by genuinely many constraints',
+    'Do not repeat the project instructions',
+    'project-wide constraints belong in the project instructions',
+    'Acceptance criteria must be concrete',
+    'say how to verify',
+    'npm test is green',
+    'screenshot confirms X',
+  ]) {
+    assert.ok(en.includes(line), `the en prompt is missing: ${line}`)
+  }
+
   // The eight job rules and the tools they name are untouched by the style block.
-  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 回答方式'))
-  const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## Reply style'))
+  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 任务说明'))
+  const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## How to write a task brief'))
   for (const job of [zhJob, enJob]) {
     assert.equal([...job.matchAll(/^\d+\. /gm)].length, 8, 'the eight job rules are all present')
     for (const tool of [
@@ -1208,6 +1260,18 @@ test('the coordinator prompt enforces brevity as hard rules, not suggestions', (
     }
   }
 
+  // The brief block sits between the job rules and the reply rules, so it reads
+  // as part of "how you work" rather than as a reply-style afterthought, and it
+  // carries six numbered rules in both languages.
+  assert.ok(zh.indexOf('## 你的职责') < zh.indexOf('## 任务说明'))
+  assert.ok(zh.indexOf('## 任务说明') < zh.indexOf('## 回答方式'))
+  assert.ok(en.indexOf('## Your job') < en.indexOf('## How to write a task brief'))
+  assert.ok(en.indexOf('## How to write a task brief') < en.indexOf('## Reply style'))
+  const zhBrief = zh.slice(zh.indexOf('## 任务说明'), zh.indexOf('## 回答方式'))
+  const enBrief = en.slice(en.indexOf('## How to write a task brief'), en.indexOf('## Reply style'))
+  assert.equal([...zhBrief.matchAll(/^\d+\. /gm)].length, 6)
+  assert.equal([...enBrief.matchAll(/^\d+\. /gm)].length, 6)
+
   // The task list and the counts line are still spliced into both branches.
   assert.match(zh, /## 当前任务\ncounts: 无\n\(还没有任务\)/)
   assert.match(en, /## Current tasks\ncounts: none\n\(none yet\)/)
@@ -1219,11 +1283,11 @@ test('the coordinator prompt enforces brevity as hard rules, not suggestions', (
   assert.equal([...zhRules.matchAll(/^\d+\. /gm)].length, 8)
   assert.equal([...enRules.matchAll(/^\d+\. /gm)].length, 8)
 
-  // The brevity block must not turn the prompt into an essay. Measured before
-  // this change: zh 886 chars, en 2001; after: zh 1147, en 2820. The caps leave
-  // ~10% headroom, so adding another rule stays a deliberate decision.
-  assert.ok(zh.length < 1300, `the zh prompt ballooned to ${zh.length} chars`)
-  assert.ok(en.length < 3100, `the en prompt ballooned to ${en.length} chars`)
+  // The rules must not turn the prompt into an essay. Measured before the brief
+  // block: zh 1147 chars, en 2820; after: zh 1414, en 3569. The caps leave ~10%
+  // headroom, so adding another rule stays a deliberate decision.
+  assert.ok(zh.length < 1560, `the zh prompt ballooned to ${zh.length} chars`)
+  assert.ok(en.length < 3950, `the en prompt ballooned to ${en.length} chars`)
 })
 
 test('the coordinator prompt lists open tasks and counts the resolved ones', () => {

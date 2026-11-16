@@ -14,13 +14,14 @@ with its own context, and its final message lands on the task for review.
     its composer. **Start coordinator** creates the Session and sends the
     coordinator prompt; **Settings** switches this column to instructions,
     shared memory, dispatch policy and workspace.
-  - Column 3 is the executors panel, grouped by status (ready for review,
-    running, queued, failed, blocked). A row is just a status pill, the task
-    title and the worker name — no body text, no controls. Click a row to open
-    its detail view in the same column (brief, full output, stop reason, the
-    executor's own conversation, and a back button). **Resolve** sits at the top
-    right of the detail view; **delete** lives only in the row's right-click
-    menu.
+  - Column 3 is the Threads panel: five collapsible groups (running, ready for
+    review, waiting on you = blocked + failed, idle = queued, resolved — folded
+    by default). A card is a status icon, the title (single line, ellipsised), a
+    relative time, a one-line summary and optional chips (model, task id) — no
+    body text, no controls. Click a card to open its detail view in the same
+    column (brief, full output, stop reason, the executor's own conversation,
+    and a back button). **Resolve** sits at the top right of the detail view;
+    **delete** lives only in the card's right-click menu.
 - The agent gets `projects_list`, `projects_create`, `projects_get`,
   `projects_add_task`, `projects_update_task`, `projects_memory` and
   `projects_dispatch`.

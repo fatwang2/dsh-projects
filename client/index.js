@@ -129,7 +129,6 @@ window.__ModuleLoader__.load({
       counts: 'tasks',
       coordinatorCreated: 'Coordinator session started.',
       coordinatorResumed: 'Coordinator session opened.',
-      coordinatorRulesUpdated: 'Coordinator rules updated and pushed into this session.',
       coordinatorChatFailed: 'The embedded conversation could not start. Open it in the workspace instead.',
       coordinatorArchived: 'This conversation is archived, so new messages do not run. Restore it to continue.',
       restore: 'Restore',
@@ -285,7 +284,6 @@ window.__ModuleLoader__.load({
       counts: '个任务',
       coordinatorCreated: '协调者会话已启动。',
       coordinatorResumed: '已打开协调者会话。',
-      coordinatorRulesUpdated: '协调者规则已更新，已推送到这个会话。',
       coordinatorChatFailed: '内嵌对话启动失败，请在会话中打开。',
       coordinatorArchived: '这个会话已归档，新消息不会运行。恢复后才能继续。',
       restore: '恢复',
@@ -1254,19 +1252,31 @@ ${SHARED_CSS}${DISPATCH_RULES}
       return `${total} ${t('counts')}`
     }
 
-    function coordinatorPrompt(project, locale) {
+    /**
+     * The first user message of a coordinator Session: the board snapshot.
+     *
+     * The rules are deliberately not here. They are a system prompt section the
+     * Host renders from the running plugin on every step
+     * (`projects:coordinator`), so a plugin upgrade reaches a Session that
+     * already exists, and the conversation that follows cannot dilute them. What
+     * stays in the message is the state the model needs at the start of its
+     * first turn: the project instructions and the current board. The goal and
+     * the task list are not in the system prompt on purpose — they change, and a
+     * changing system prompt rewrites the cached prefix on every step.
+     */
+    function coordinatorBoard(project, locale) {
       const zh = String(locale || '').toLowerCase().startsWith('zh')
       const tasks = project.tasks || []
-      // The prompt carries the control plane only. A project that has run for a
-      // week has dozens of accepted tasks; listing them here would make every
-      // coordinator turn pay for history it never reads. The counts line still
-      // says how many are resolved, and projects_get with include_resolved: true
-      // is the way back to their output.
+      // The message carries the control plane only. A project that has run for a
+      // week has dozens of accepted tasks; listing them here would make the
+      // first turn pay for history it never reads. The counts line still says
+      // how many are resolved, and projects_get with include_resolved: true is
+      // the way back to their output.
       const open = tasks.filter((task) => task.status !== 'resolved')
       const tally = {}
       for (const task of tasks) tally[task.status] = (tally[task.status] || 0) + 1
       // Same order and separator as the Host's `projects_get` counts line, so the
-      // prompt and the tool read identically for the same board.
+      // message and the tool read identically for the same board.
       const countsText =
         ['running', 'review', 'queued', 'failed', 'blocked', 'resolved']
           .filter((status) => (tally[status] || 0) > 0)
@@ -1287,152 +1297,22 @@ ${SHARED_CSS}${DISPATCH_RULES}
             ? `已 resolved 的 ${tally.resolved} 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。`
             : `${tally.resolved} resolved task(s) are not listed here; read their output with projects_get and include_resolved: true.`
           : ''
-      // The header changes with the board; the rules below it change when this
-      // plugin is upgraded. They are built separately so the fingerprint can
-      // cover the rules alone: a task moving from queued to running must not
-      // look like a rules change.
-      const header = zh
-        ? [
-            `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`,
-            '',
-            '## 项目目标与指令',
-            project.goal?.trim() || '（未填写）',
-            '',
-            '## 当前任务',
-            `counts: ${countsText}`,
-            taskLines,
-            ...(resolvedNote ? [resolvedNote] : []),
-          ]
-        : [
-            `You are the coordinator of the DSH project "${project.name}" (project_id: ${project.id}).`,
-            '',
-            '## Project instructions',
-            project.goal?.trim() || '(none)',
-            '',
-            '## Current tasks',
-            `counts: ${countsText}`,
-            taskLines,
-            ...(resolvedNote ? [resolvedNote] : []),
-          ]
-      return [...header, '', coordinatorRules(project, locale)].join('\n')
-    }
-
-    /**
-     * The rules half of the coordinator prompt: the job, the brief rules and the
-     * reply rules, without the project header. This is the text a plugin upgrade
-     * changes, so it is the text `coordinatorPromptFingerprint` hashes.
-     */
-    function coordinatorRules(project, locale) {
-      const zh = String(locale || '').toLowerCase().startsWith('zh')
-      if (zh) {
-        return [
-          '## 你的职责',
-          '你只负责四件事：拆解、分派、验收、汇报。',
-          '',
-          '1. 需要读文件、改代码、跑命令、多步排查的工作，一律用 projects_add_task 派生任务交给执行者，不要在对话里自己动手，也不要把命令输出、文件内容、排查过程贴进对话。',
-          '2. 用 projects_add_task 把目标拆成可并行的任务，每个任务要能独立完成；任务说明里写清做什么、在哪里做、如何验收。',
-          '3. 用 projects_dispatch 派发任务；派发后继续响应用户，不要等待。',
-          '4. 执行者交回结果后，用 projects_get 查看产出，用一两句话向用户汇报结论，并请用户在项目页验收。',
-          '5. 用 projects_memory 维护共享记忆，让所有执行者共享结论。',
-          '6. 任务是否完成由人验收：只有用户明确表示通过时，你才用 projects_update_task 把状态设为 resolved；不要替用户宣布任务已完成。',
-          project.autonomy === 'manual'
-            ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
-            : '7. 当前自主程度是自动：你可以直接派发任务。',
-          '8. 派发前先看上面的任务列表：如果这次要做的是某条未完成任务（同一件事）的后续阶段，用 projects_dispatch 的 note 参数继续那条任务，不要新建；只有不同的事才用 projects_add_task 新建任务。任务说明要补充时用 projects_update_task 的 append_brief，不要另起一条任务。',
-          '',
-          '## 任务说明怎么写（硬约束）',
-          '1. 任务说明（brief）只写三件事：问题是什么、约束是什么、怎么算做完。不写实现方案。',
-          '2. 不要预先设计：不写「用 X 方案」「改第 N 行」「分三步做」，怎么做由执行者自己判断。',
-          '3. 不写行号：行号会过期，让执行者自己定位。',
-          '4. 长度上限：brief 一般 ≤ 15 行；超过必须是因为约束确实多（比如安全要求、兼容性要求）。',
-          '5. 不重复项目指令：项目级约束写在项目指令里，brief 里不要重复。',
-          '6. 验收标准要具体：写清怎么验证，比如「npm test 全绿」「截图确认 X」。',
-          '',
-          '## 回答方式（硬约束）',
-          '1. 先判断再展开：简单问题（是什么、能不能、怎么做）直接给答案，不要先分析再回答。',
-          '2. 不要无谓的结构化：不要在回复里用表格、编号清单、分节标题，除非用户明确要求，或内容确实并列。',
-          '3. 不要过程叙述：不写「我先看看」「让我分析一下」「有几种可能」，直接给结论；不要解释你打算怎么做，直接做（拆任务、派发）或直接回答。',
-          '4. 不要重复：同一件事只说一次，不要开头说一遍、结尾再说一遍。',
-          '5. 长度硬上限：一般 ≤ 3 句；需要解释时 ≤ 6 句；超过 6 句必须说明理由（例如用户问了复杂问题）。这是上限，不是目标。',
-          '6. 派任务时只说三件事：派了什么、为什么、等什么；不要复述任务 brief，不要复述任务产出（执行者的 output 已经在任务里）。',
-          '7. 不确定时问一句：一次只问必要的问题，不要列举所有可能性，也不要一次抛多个。',
-          '8. 不要罗列已完成任务清单。',
-        ].join('\n')
-      }
+      // The identity line stays in the message as well as in the system prompt:
+      // it is what the Session title is generated from, and it keeps the first
+      // turn intelligible if a profile ever runs without the prompt service.
       return [
-        '## Your job',
-        'You do four things only: split the goal, dispatch, review, report.',
+        zh
+          ? `DSH 项目「${project.name}」的看板（project_id: ${project.id}）。`
+          : `The board of the DSH project "${project.name}" (project_id: ${project.id}).`,
         '',
-        '1. Anything that needs reading files, editing code, running commands, or multi-step investigation must be derived into a task with projects_add_task. Do not do that work in the conversation, and do not paste command output, file contents, or investigation steps into it.',
-        '2. Use projects_add_task to split the goal into parallel, independently finishable tasks; each brief says what to do, where, and how to verify it.',
-        '3. Use projects_dispatch to start tasks; stay responsive instead of waiting.',
-        '4. When a worker reports back, use projects_get to read its output, report the conclusion to the user in a sentence or two, and ask the user to review it on the Projects page.',
-        '5. Keep shared knowledge in projects_memory so every worker starts informed.',
-        '6. The human accepts tasks: set status "resolved" with projects_update_task only when the user says so, and never declare a task complete on the user\'s behalf.',
-        project.autonomy === 'manual'
-          ? '7. Autonomy is manual: get the user\'s explicit go-ahead in this conversation, mark the task approved with projects_update_task, then dispatch.'
-          : '7. Autonomy is auto: you may dispatch without waiting for approval.',
-        '8. Before dispatching, read the task list above: when the next step is a later stage of an unfinished task (the same piece of work), continue that task with the projects_dispatch note parameter instead of creating a new one; create a task only for different work. To add to a brief, use projects_update_task append_brief rather than opening another task.',
+        zh ? '## 项目目标与指令' : '## Project instructions',
+        project.goal?.trim() || (zh ? '（未填写）' : '(none)'),
         '',
-        '## How to write a task brief (hard rules)',
-        '1. A brief says three things only: what the problem is, what the constraints are, and what counts as done. Never the implementation plan.',
-        '2. Do not pre-design: never write "use approach X", "change line N", or "do it in three steps" — how to do it is the worker\'s call.',
-        '3. No line numbers: they go stale; let the worker locate the code.',
-        '4. Length cap: a brief is usually ≤ 15 lines; going over must be justified by genuinely many constraints (security, compatibility).',
-        '5. Do not repeat the project instructions: project-wide constraints belong in the project instructions, not in every brief.',
-        '6. Acceptance criteria must be concrete: say how to verify, e.g. "npm test is green" or "screenshot confirms X".',
-        '',
-        '## Reply style (hard rules)',
-        '1. Decide first, then expand: for a simple question (what / can it / how), answer directly. Do not analyse before answering.',
-        '2. No needless structure: in your replies, no tables, numbered lists, or section headings unless the user asks for them or the content is genuinely parallel.',
-        '3. No process narration: never write "Let me take a look", "Let me analyse", or "There are several possibilities" — give the conclusion. Do not explain what you are about to do; just do it (split, dispatch) or answer.',
-        '4. No repetition: say each thing once; do not say it at the start and again at the end.',
-        '5. Hard length cap: usually ≤ 3 sentences; ≤ 6 when an explanation is genuinely needed; more than 6 requires a stated reason (e.g. the user asked a complex question). The cap is a ceiling, not a target.',
-        '6. When dispatching, say three things only: what you dispatched, why, and what you are waiting for. Do not restate the task brief. Do not restate task output — the worker output already lives in the task.',
-        '7. When unsure, ask one question instead of listing every possibility. Ask one necessary question at a time, never several at once.',
-        '8. Do not list completed tasks.',
+        zh ? '## 当前任务' : '## Current tasks',
+        `counts: ${countsText}`,
+        taskLines,
+        ...(resolvedNote ? [resolvedNote] : []),
       ].join('\n')
-    }
-
-    /**
-     * A short stable fingerprint of one string (FNV-1a, 32 bit, hex). The client
-     * has no crypto dependency and the value only has to answer "same rules or
-     * not", so a non-cryptographic hash is enough.
-     */
-    function promptFingerprint(value) {
-      const source = String(value ?? '')
-      let hash = 0x811c9dc5
-      for (let index = 0; index < source.length; index += 1) {
-        hash ^= source.charCodeAt(index)
-        hash = Math.imul(hash, 0x01000193) >>> 0
-      }
-      return hash.toString(16).padStart(8, '0')
-    }
-
-    /**
-     * Which rules a coordinator Session has seen. The page records it on the
-     * project as `coordinatorPromptHash`; the next start appends an update only
-     * when the current rules hash to a different value. The board header is
-     * deliberately outside the hash: tasks, counts, goal and name change all the
-     * time and none of them is a rules change.
-     */
-    function coordinatorPromptFingerprint(project, locale) {
-      return promptFingerprint(coordinatorRules(project, locale))
-    }
-
-    /**
-     * The message appended to an existing coordinator Session whose rules are
-     * stale. It is an append, never a replacement: the old rules stay in the
-     * transcript and this note says which version supersedes them. The full
-     * prompt follows, so the same message also refreshes the board snapshot
-     * (goal, tasks, counts) the coordinator reasons about.
-     */
-    function coordinatorUpdatePrompt(prompt, fingerprint, locale) {
-      const zh = String(locale || '').toLowerCase().startsWith('zh')
-      const note = zh
-        ? `协调者规则已更新（版本 ${fingerprint}）。以下是最新的协调者规则，取代之前消息里的旧规则；请按下面的规则继续工作。`
-        : `The coordinator rules have been updated (version ${fingerprint}). The rules below replace the earlier ones — follow them from now on.`
-      return `${note}\n\n${prompt}`
     }
 
     // ---------------------------------------------------------------------
@@ -2702,13 +2582,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
       }, [])
 
       // A project that already has a coordinator Session reopens its
-      // conversation when the project is selected. Opening it is also the only
-      // way an existing Session can learn new rules — the start button is not
-      // on screen while the conversation is open — so `ensure` appends the
-      // update when the recorded fingerprint is stale, and the project records
-      // the fingerprint it now has. `create: false` keeps a page load from
-      // creating a Session: a stale id stays closed, and the start button
-      // creates a fresh coordinator.
+      // conversation when the project is selected. `ensure` binds the Session to
+      // the project (id and locale) before anything else; the rules themselves
+      // need no message at all, because the Host renders them into the system
+      // prompt on every step. `create: false` keeps a page load from creating a
+      // Session: a stale id stays closed, and the start button creates a fresh
+      // coordinator.
       useEffect(() => {
         const coordinatorId = detail?.project?.coordinatorSessionId
         if (!coordinatorId) {
@@ -2729,7 +2608,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
               locale = 'zh'
             }
             const current = detail?.project
-            const result = await threadApi.ensure(current, coordinatorPrompt(current, locale), {
+            const result = await threadApi.ensure(current, coordinatorBoard(current, locale), {
               locale,
               create: false,
             })
@@ -2742,17 +2621,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
               }
             } else {
               setThread({ sessionId: result.sessionId, reference: result.reference })
-              if (result.promptUpdated) setNotice(t('coordinatorRulesUpdated'))
-            }
-            // The message landed: record the fingerprint even when the page has
-            // moved on, so the same update is never appended twice. The write
-            // goes straight to the Host instead of through `refresh`, which
-            // would pull this project back over the one the user selected.
-            if (result.promptUpdated) {
-              await api(`/projects/${current.id}`, {
-                method: 'PATCH',
-                body: JSON.stringify({ coordinatorPromptHash: result.fingerprint }),
-              })
             }
           } catch {
             // A stale id stays closed; the start button creates a fresh coordinator.
@@ -3364,21 +3232,21 @@ ${SHARED_CSS}${DISPATCH_RULES}
           }
           const restored = coordinatorArchived && Boolean(project.coordinatorSessionId)
           if (restored) await threadApi.restoreSession(project.coordinatorSessionId)
-          const result = await threadApi.ensure(project, coordinatorPrompt(project, locale), { locale })
+          const result = await threadApi.ensure(project, coordinatorBoard(project, locale), { locale })
           setThread({ sessionId: result.sessionId, reference: result.reference })
-          const patch = {}
-          if (result.created && result.sessionId !== project.coordinatorSessionId) {
-            patch.coordinatorSessionId = result.sessionId
+          // `ensure` already bound the Session to the project before the first
+          // prompt, so there is nothing left to record. A fresh read is still
+          // needed: the page's copy predates that write, and the board's
+          // "conversation open" state comes from the project it renders. A
+          // failed read is not a failed start — the 4s poll catches up.
+          if (result.created) {
+            try {
+              await refresh(project.id)
+            } catch {
+              // The conversation is already open; the poll will refresh the board.
+            }
           }
-          // Which rules this Session has seen. Recorded only after the message
-          // landed, so a rejected append is retried on the next start instead of
-          // being remembered as delivered.
-          if (result.fingerprint && result.fingerprint !== project.coordinatorPromptHash) {
-            patch.coordinatorPromptHash = result.fingerprint
-          }
-          if (Object.keys(patch).length > 0) await saveProjectPatch(patch)
-          if (patch.coordinatorSessionId) return t('coordinatorCreated')
-          if (result.promptUpdated) return t('coordinatorRulesUpdated')
+          if (result.created) return t('coordinatorCreated')
           if (restored) return t('coordinatorRestored')
           return t('coordinatorResumed')
         })
@@ -5090,13 +4958,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
             if (!sessions || typeof sessions.create !== 'function') {
               throw new Error(translate('sessionUnavailable'))
             }
-            const fingerprint = coordinatorPromptFingerprint(project, options.locale)
-            const stored =
-              typeof project.coordinatorPromptHash === 'string' ? project.coordinatorPromptHash : ''
             const existing = typeof project.coordinatorSessionId === 'string' ? project.coordinatorSessionId : ''
             let sessionId = existing
             let created = false
-            let promptUpdated = false
             let reference
             if (sessionId) {
               try {
@@ -5118,24 +4982,47 @@ ${SHARED_CSS}${DISPATCH_RULES}
               reference = sessions.retain(sessionId, { source: 'projects' })
               await reference.ready
             }
-            // The prompt is sent once, when the Session is created. An existing
-            // Session keeps the rules it was born with, so a plugin upgrade would
-            // never reach it; when the recorded fingerprint differs from the
-            // current rules, append an update message instead of doing nothing.
-            // The same fingerprint sends nothing, so a board change never
-            // re-sends the rules.
-            if (created || stored !== fingerprint) {
-              const message = created ? prompt : coordinatorUpdatePrompt(prompt, fingerprint, options.locale)
-              const result = await reference.binding.session.prompt([{ type: 'text', text: message }], 'queue')
+            // Bind the Session to the project *before* the first prompt. The
+            // Host's `projects:coordinator` system prompt section finds the
+            // project by this id, so the first assembly has to see it; a Session
+            // that is already bound and already carries this locale needs no
+            // write. The locale is the language the board below is rendered in,
+            // and the Host renders the rules in the same one.
+            const bind = {}
+            if (existing !== sessionId) bind.coordinatorSessionId = sessionId
+            if (options.locale && project.coordinatorLocale !== options.locale) {
+              bind.coordinatorLocale = options.locale
+            }
+            if (Object.keys(bind).length > 0) {
+              await api(`/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify(bind) })
+            }
+            // The board snapshot is sent once, when the Session is created. The
+            // rules are not in it: they live in the system prompt, which the
+            // Host re-renders on every step, so an existing Session needs no
+            // message at all — not even after a plugin upgrade.
+            if (created) {
+              const result = await reference.binding.session.prompt([{ type: 'text', text: prompt }], 'queue')
               if (!result || result.ok !== true) {
                 reference.release()
+                // The Session exists but never got its board message. Unbind it
+                // so the next start creates a fresh coordinator instead of
+                // opening an empty Session that looks started.
+                if (bind.coordinatorSessionId) {
+                  try {
+                    await api(`/projects/${project.id}`, {
+                      method: 'PATCH',
+                      body: JSON.stringify({ coordinatorSessionId: '' }),
+                    })
+                  } catch {
+                    // The original failure is the one worth reporting.
+                  }
+                }
                 throw new Error(
                   (result && result.error && result.error.message) || translate('promptRejected'),
                 )
               }
-              promptUpdated = !created
             }
-            return { sessionId, reference, created, promptUpdated, fingerprint }
+            return { sessionId, reference, created }
           },
           retainWorker(childSessionId, parentSessionId) {
             const sessions = ctx.get('sessions')

@@ -134,8 +134,11 @@ install, an upgrade or a removal: they live in `$DSH_HOME/projects/<projectId>/`
     column edges are draggable (both widths and the collapsed state are
     remembered locally).
   - Column 2 is the project's coordinator conversation: the real DSH chat with
-    its composer. **Start coordinator** creates the Session and sends the
-    coordinator prompt. The gear glyph in this column's header opens a
+    its composer. **Start coordinator** creates the Session and sends the board
+    snapshot; the coordinator rules themselves are a **system prompt section**
+    the Host renders on every step, so a plugin upgrade reaches an existing
+    Session and the conversation cannot dilute them. The gear glyph in this
+    column's header opens a
     **settings dialog** with a left nav of two groups: **General** (project
     name, instructions, workspace, **Threads** — concurrency, model and
     reasoning effort — and, as its last section, **archive project**) and
@@ -174,8 +177,9 @@ install, an upgrade or a removal: they live in `$DSH_HOME/projects/<projectId>/`
    directory chooser (the same dialog the workspace picker uses), and a project
    with no folder inherits the coordinator session's directory. Then click
    **Start coordinator**: the page creates the project's coordinator Session,
-   sends the coordinator prompt into it, and shows the conversation beside the
-   board.
+   binds it to the project, sends the board snapshot into it, and shows the
+   conversation beside the board. The rules are not in that message: they are a
+   system prompt section the Host renders for this Session alone.
 2. The coordinator splits the goal with `projects_add_task` and dispatches with
    `projects_dispatch`. Dispatch returns immediately; the coordinator stays
    responsive.

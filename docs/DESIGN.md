@@ -60,7 +60,8 @@ human ── project page (main slot: projects, three columns)
    └── column 3: Threads panel (grouped by status; search/filter glyphs in the
                   header; click a card to open the detail page = the worker session)
                   │
-                  │  "Start coordinator" = create/reuse the Session + send the coordinator prompt
+                  │  "Start coordinator" = create/reuse the Session + send the board snapshot
+                  │  (the rules are a system prompt section the Host renders per step)
                   ▼
         coordinator agent (an ordinary Session, right there in column 2)
                   │ projects_add_task / projects_dispatch
@@ -174,6 +175,18 @@ the final fallback is the Host default)
 5. **An approval point can be data**: `autonomy=manual` + `task.approved`,
    checked by the tool before dispatch and granted by the page. That is closer to
    the Projects product semantics than intercepting tool calls for permissions.
+6. **The coordinator rules are a system prompt section, not a user message**:
+   `ctx.systemPrompt.section({name:'projects:coordinator', order:700, text})`
+   registered through `ctx.inject(['systemPrompt'])`. The provider reads the live
+   Agent off the assembly context (`context.agent.session.id`) and returns text
+   only for the Session a project recorded as its coordinator — every other
+   Session gets `''`, which `renderPrompt` drops, so its prompt is byte-identical
+   to a profile without this plugin. The rules are re-rendered from the running
+   plugin on every step, so a plugin upgrade reaches an existing Session without
+   appending anything (the fingerprint/update-message mechanism this replaced is
+   gone). The goal and the task list stay in the first user message: they are
+   board state, and a changing system prompt would rewrite the cached prefix on
+   every step.
 
 ---
 
@@ -273,9 +286,10 @@ added by forking. They need a server.**
    header → fill in name/instructions in the dialog (workspace, autonomy and
    concurrency are optional) → create.
 3. Click **Start coordinator**: the coordinator conversation appears on the
-   right of the project page (a real DSH session with a composer); the
-   coordinator prompt has already been sent, so continue the conversation there
-   and let it split the work into tasks.
+   right of the project page (a real DSH session with a composer); the board
+   snapshot has already been sent and the Host's `projects:coordinator` system
+   prompt section supplies the rules, so continue the conversation there and let
+   it split the work into tasks.
 4. Back on the project page: in manual mode, click a task row to open its detail
    view, click **Approve**, then ask the coordinator to "dispatch the approved
    tasks".

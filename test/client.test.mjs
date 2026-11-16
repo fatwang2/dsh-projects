@@ -1119,189 +1119,14 @@ test('displayed titles are shortened without touching the stored title', () => {
   assert.match(source, /\.pj-exec-task\{[^}]*max-width:220px/)
 })
 
-test('the coordinator prompt enforces reply and brief rules as hard rules, not suggestions', () => {
+test('the coordinator board message carries the goal and the open tasks, not the rules', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
-  const start = source.indexOf('function coordinatorPrompt')
+  const start = source.indexOf('function coordinatorBoard')
   const end = source.indexOf('function ProjectsIcon', start)
-  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
-  const coordinatorPrompt = new Function(`${source.slice(start, end)}; return coordinatorPrompt;`)()
-  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks: [], autonomy: 'manual' }
-  const zh = coordinatorPrompt(project, 'zh')
-  const en = coordinatorPrompt(project, 'en')
-
-  // The seven new hard rules, each checked by its operative clause rather than
-  // a paraphrase, in the language the human reads. The eighth line is the
-  // pre-existing "do not list completed tasks" rule, kept in place.
-  for (const line of [
-    '先判断再展开',
-    '简单问题（是什么、能不能、怎么做）直接给答案',
-    '不要无谓的结构化',
-    '不要在回复里用表格、编号清单、分节标题',
-    '不要过程叙述',
-    '我先看看',
-    '让我分析一下',
-    '有几种可能',
-    '不要重复',
-    '同一件事只说一次',
-    '长度硬上限',
-    '一般 ≤ 3 句',
-    '需要解释时 ≤ 6 句',
-    '超过 6 句必须说明理由',
-    '派任务时只说三件事',
-    '派了什么、为什么、等什么',
-    '不确定时问一句',
-    '不要列举所有可能性',
-  ]) {
-    assert.ok(zh.includes(line), `the zh prompt is missing: ${line}`)
-  }
-  for (const line of [
-    'Decide first, then expand',
-    'for a simple question (what / can it / how), answer directly',
-    'No needless structure',
-    'no tables, numbered lists, or section headings',
-    'No process narration',
-    'Let me take a look',
-    'Let me analyse',
-    'There are several possibilities',
-    'No repetition',
-    'say each thing once',
-    'Hard length cap',
-    'usually ≤ 3 sentences',
-    '≤ 6 when an explanation is genuinely needed',
-    'more than 6 requires a stated reason',
-    'say three things only',
-    'what you dispatched, why, and what you are waiting for',
-    'When unsure, ask one question',
-    'instead of listing every possibility',
-  ]) {
-    assert.ok(en.includes(line), `the en prompt is missing: ${line}`)
-  }
-
-  // The brevity rules that predate this change survive; the weak "3-5 sentences"
-  // suggestion is the only one that was replaced by the hard cap.
-  for (const line of [
-    '不要复述任务产出',
-    '不要罗列已完成任务清单',
-    '不要解释你打算怎么做',
-    '一次只问必要的问题',
-  ]) {
-    assert.ok(zh.includes(line), `the zh prompt lost: ${line}`)
-  }
-  for (const line of [
-    'Do not restate task output',
-    'Do not list completed tasks',
-    'Do not explain what you are about to do',
-    'Ask one necessary question at a time',
-  ]) {
-    assert.ok(en.includes(line), `the en prompt lost: ${line}`)
-  }
-
-  // The brief rules are the counterpart of the reply rules: the coordinator must
-  // not pre-design the work it hands out. Checked by operative clause in both
-  // languages, including the numeric length cap.
-  for (const line of [
-    '## 任务说明怎么写（硬约束）',
-    '任务说明（brief）只写三件事',
-    '问题是什么、约束是什么、怎么算做完',
-    '不写实现方案',
-    '不要预先设计',
-    '用 X 方案',
-    '改第 N 行',
-    '分三步做',
-    '怎么做由执行者自己判断',
-    '不写行号',
-    '行号会过期',
-    '让执行者自己定位',
-    'brief 一般 ≤ 15 行',
-    '超过必须是因为约束确实多',
-    '不重复项目指令',
-    '项目级约束写在项目指令里',
-    '验收标准要具体',
-    '写清怎么验证',
-    'npm test 全绿',
-    '截图确认 X',
-  ]) {
-    assert.ok(zh.includes(line), `the zh prompt is missing: ${line}`)
-  }
-  for (const line of [
-    '## How to write a task brief (hard rules)',
-    'A brief says three things only',
-    'what the problem is, what the constraints are, and what counts as done',
-    'Never the implementation plan',
-    'Do not pre-design',
-    'use approach X',
-    'change line N',
-    'do it in three steps',
-    "how to do it is the worker's call",
-    'No line numbers',
-    'they go stale',
-    'let the worker locate the code',
-    'a brief is usually ≤ 15 lines',
-    'going over must be justified by genuinely many constraints',
-    'Do not repeat the project instructions',
-    'project-wide constraints belong in the project instructions',
-    'Acceptance criteria must be concrete',
-    'say how to verify',
-    'npm test is green',
-    'screenshot confirms X',
-  ]) {
-    assert.ok(en.includes(line), `the en prompt is missing: ${line}`)
-  }
-
-  // The eight job rules and the tools they name are untouched by the style block.
-  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 任务说明'))
-  const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## How to write a task brief'))
-  for (const job of [zhJob, enJob]) {
-    assert.equal([...job.matchAll(/^\d+\. /gm)].length, 8, 'the eight job rules are all present')
-    for (const tool of [
-      'projects_add_task',
-      'projects_dispatch',
-      'projects_get',
-      'projects_update_task',
-      'projects_memory',
-    ]) {
-      assert.ok(job.includes(tool), `the job rules still name ${tool}`)
-    }
-  }
-
-  // The brief block sits between the job rules and the reply rules, so it reads
-  // as part of "how you work" rather than as a reply-style afterthought, and it
-  // carries six numbered rules in both languages.
-  assert.ok(zh.indexOf('## 你的职责') < zh.indexOf('## 任务说明'))
-  assert.ok(zh.indexOf('## 任务说明') < zh.indexOf('## 回答方式'))
-  assert.ok(en.indexOf('## Your job') < en.indexOf('## How to write a task brief'))
-  assert.ok(en.indexOf('## How to write a task brief') < en.indexOf('## Reply style'))
-  const zhBrief = zh.slice(zh.indexOf('## 任务说明'), zh.indexOf('## 回答方式'))
-  const enBrief = en.slice(en.indexOf('## How to write a task brief'), en.indexOf('## Reply style'))
-  assert.equal([...zhBrief.matchAll(/^\d+\. /gm)].length, 6)
-  assert.equal([...enBrief.matchAll(/^\d+\. /gm)].length, 6)
-
-  // The task list and the counts line are still spliced into both branches.
-  assert.match(zh, /## 当前任务\ncounts: 无\n\(还没有任务\)/)
-  assert.match(en, /## Current tasks\ncounts: none\n\(none yet\)/)
-
-  // Both languages carry the same number of hard rules, so a rule added to one
-  // branch cannot silently go missing from the other.
-  const zhRules = zh.slice(zh.indexOf('## 回答方式'))
-  const enRules = en.slice(en.indexOf('## Reply style'))
-  assert.equal([...zhRules.matchAll(/^\d+\. /gm)].length, 8)
-  assert.equal([...enRules.matchAll(/^\d+\. /gm)].length, 8)
-
-  // The rules must not turn the prompt into an essay. Measured before the brief
-  // block: zh 1147 chars, en 2820; after: zh 1414, en 3569. The caps leave ~10%
-  // headroom, so adding another rule stays a deliberate decision.
-  assert.ok(zh.length < 1560, `the zh prompt ballooned to ${zh.length} chars`)
-  assert.ok(en.length < 3950, `the en prompt ballooned to ${en.length} chars`)
-})
-
-test('the coordinator prompt lists open tasks and counts the resolved ones', () => {
-  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
-  const start = source.indexOf('function coordinatorPrompt')
-  const end = source.indexOf('function ProjectsIcon', start)
-  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
+  assert.ok(start > 0 && end > start, 'coordinatorBoard is followed by the icon')
   // The function closes over nothing but its two arguments, so the test can run
   // the real source instead of only matching it.
-  const coordinatorPrompt = new Function(`${source.slice(start, end)}; return coordinatorPrompt;`)()
+  const coordinatorBoard = new Function(`${source.slice(start, end)}; return coordinatorBoard;`)()
 
   const tasks = [
     { id: 't-open', status: 'running', title: '正在跑的活' },
@@ -1313,9 +1138,12 @@ test('the coordinator prompt lists open tasks and counts the resolved ones', () 
   ]
   const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks }
 
-  // The prompt carries the control plane: one open task, and a counts line that
-  // still says how much accepted work exists. Not one resolved title leaks in.
-  const zh = coordinatorPrompt(project, 'zh')
+  // The message carries the control plane: the goal, one open task, and a counts
+  // line that still says how much accepted work exists. Not one resolved title
+  // leaks in.
+  const zh = coordinatorBoard(project, 'zh')
+  assert.match(zh, /^DSH 项目「示例项目」的看板（project_id: p1）。/)
+  assert.match(zh, /## 项目目标与指令\n把项目页做成看板/)
   assert.match(zh, /## 当前任务\ncounts: 1 running, 20 resolved\n/)
   assert.match(zh, /- t-open \[running\] 正在跑的活/)
   assert.doesNotMatch(zh, /\[resolved\]/)
@@ -1325,7 +1153,16 @@ test('the coordinator prompt lists open tasks and counts the resolved ones', () 
     /已 resolved 的 20 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。/,
   )
 
-  const en = coordinatorPrompt(project, 'en')
+  // The rules are the system prompt's job now: the Host renders them from the
+  // running plugin on every step, so the message must not carry a copy that
+  // could drift from them or be diluted by the conversation.
+  assert.doesNotMatch(zh, /## 你的职责/)
+  assert.doesNotMatch(zh, /## 任务说明怎么写/)
+  assert.doesNotMatch(zh, /## 回答方式/)
+
+  const en = coordinatorBoard(project, 'en')
+  assert.match(en, /^The board of the DSH project "示例项目" \(project_id: p1\)\./)
+  assert.match(en, /## Project instructions\n把项目页做成看板/)
   assert.match(en, /## Current tasks\ncounts: 1 running, 20 resolved\n/)
   assert.match(en, /- t-open \[running\] 正在跑的活/)
   assert.doesNotMatch(en, /\[resolved\]/)
@@ -1334,40 +1171,17 @@ test('the coordinator prompt lists open tasks and counts the resolved ones', () 
     en,
     /20 resolved task\(s\) are not listed here; read their output with projects_get and include_resolved: true\./,
   )
+  assert.doesNotMatch(en, /## Your job/)
 
   // A board where everything is accepted still reports its size, and a brand new
   // project keeps its original empty-state line.
-  const allDone = coordinatorPrompt({ ...project, tasks: tasks.slice(1) }, 'zh')
+  const allDone = coordinatorBoard({ ...project, tasks: tasks.slice(1) }, 'zh')
   assert.match(allDone, /counts: 20 resolved/)
   assert.match(allDone, /\(没有未完成的任务\)/)
-  const empty = coordinatorPrompt({ ...project, tasks: [] }, 'zh')
+  const empty = coordinatorBoard({ ...project, tasks: [] }, 'zh')
   assert.match(empty, /counts: 无/)
   assert.match(empty, /\(还没有任务\)/)
   assert.doesNotMatch(empty, /include_resolved/)
-})
-
-test('the coordinator prompt says to continue a task instead of opening a new one', () => {
-  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
-  const start = source.indexOf('function coordinatorPrompt')
-  const end = source.indexOf('function ProjectsIcon', start)
-  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
-  const coordinatorPrompt = new Function(`${source.slice(start, end)}; return coordinatorPrompt;`)()
-  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks: [] }
-
-  // The rule has to be in both prompts: the coordinator decides between "continue
-  // this task" and "create another one" before every dispatch, in the language the
-  // human reads.
-  const zh = coordinatorPrompt(project, 'zh')
-  assert.match(zh, /派发前先看上面的任务列表/)
-  assert.match(zh, /projects_dispatch 的 note 参数继续那条任务/)
-  assert.match(zh, /只有不同的事才用 projects_add_task 新建任务/)
-  assert.match(zh, /append_brief/)
-
-  const en = coordinatorPrompt(project, 'en')
-  assert.match(en, /Before dispatching, read the task list above/)
-  assert.match(en, /continue that task with the projects_dispatch note parameter/)
-  assert.match(en, /create a task only for different work/)
-  assert.match(en, /append_brief/)
 })
 
 test('the panel groups threads into five fixed sections in reference order', () => {
@@ -4207,29 +4021,20 @@ test('the worktree surfaces read the Host fields and stay on theme tokens', () =
 })
 
 // ---------------------------------------------------------------------------
-// Coordinator rules: pushed into an existing Session when they change
+// Coordinator Session: bound before the first prompt, rules in the system prompt
 //
-// `coordinatorPrompt` used to be sent once, when the Session was created, so a
-// plugin upgrade never reached a project that already had a coordinator. The
-// page now records a fingerprint of the rules on the project and appends an
-// update message when the current rules hash to a different value.
-
-/** The client's own prompt helpers, extracted from source like the prompt tests. */
-function coordinatorSource() {
-  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
-  const start = source.indexOf('function coordinatorPrompt')
-  const end = source.indexOf('function ProjectsIcon', start)
-  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
-  return new Function(
-    `${source.slice(start, end)}; return { coordinatorPrompt, coordinatorRules, coordinatorPromptFingerprint, coordinatorUpdatePrompt };`,
-  )()
-}
+// The rules used to be the first user message, and a fingerprint on the project
+// decided whether an existing Session got an update message. They are now a
+// system prompt section the Host renders from the running plugin on every step
+// (`projects:coordinator`), so the page has nothing to append: it binds the
+// Session to the project *before* the first prompt (the section looks the
+// project up by session id) and sends the board snapshot once.
 
 /**
  * Stand-in for the `sessions` service. The coordinator flow creates or retains
- * one Session and queues its prompt through the binding, so the recorder keeps
- * every call: which Session was created or retained, and what text went into
- * which one.
+ * one Session and queues its board message through the binding, so the recorder
+ * keeps every call: which Session was created or retained, and what text went
+ * into which one.
  */
 function createSessions() {
   const calls = []
@@ -4237,6 +4042,8 @@ function createSessions() {
     calls,
     /** When set, `prompt` resolves with it instead of `{ ok: true }`. */
     failPrompt: null,
+    /** Runs inside `prompt`, so a test can assert what the Host already saw. */
+    beforePrompt: null,
     async create(options) {
       calls.push({ kind: 'create', options })
       return 'sess-new'
@@ -4252,6 +4059,7 @@ function createSessions() {
           session: {
             async prompt(parts, mode) {
               calls.push({ kind: 'prompt', sessionId, parts, mode })
+              if (sessions.beforePrompt) sessions.beforePrompt({ sessionId, parts, mode })
               return sessions.failPrompt || { ok: true }
             },
           },
@@ -4262,36 +4070,7 @@ function createSessions() {
   return sessions
 }
 
-test('the rules fingerprint tracks the rules, not the board', () => {
-  const { coordinatorPrompt, coordinatorPromptFingerprint, coordinatorUpdatePrompt } = coordinatorSource()
-  const base = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks: [], autonomy: 'manual' }
-  const fingerprint = coordinatorPromptFingerprint(base, 'zh')
-  assert.match(fingerprint, /^[0-9a-f]{8}$/)
-
-  // The board is not the rules: renaming the project, editing its goal or
-  // moving a task changes the prompt but must not look like a plugin upgrade,
-  // or every start would append the rules again.
-  assert.equal(coordinatorPromptFingerprint({ ...base, name: '改名', goal: '新目标' }, 'zh'), fingerprint)
-  assert.equal(
-    coordinatorPromptFingerprint({ ...base, tasks: [{ id: 't1', status: 'running', title: '跑着' }] }, 'zh'),
-    fingerprint,
-  )
-
-  // A rule change is: the autonomy rule and the language both live in the rules.
-  assert.notEqual(coordinatorPromptFingerprint({ ...base, autonomy: 'auto' }, 'zh'), fingerprint)
-  assert.notEqual(coordinatorPromptFingerprint(base, 'en'), fingerprint)
-
-  // The update message names its version and carries the whole new prompt, so
-  // the coordinator also gets a fresh board snapshot in the same message.
-  const prompt = coordinatorPrompt(base, 'zh')
-  const update = coordinatorUpdatePrompt(prompt, fingerprint, 'zh')
-  assert.ok(update.startsWith(`协调者规则已更新（版本 ${fingerprint}）`))
-  assert.ok(update.includes(prompt), 'the new prompt is attached to the note')
-  const english = coordinatorUpdatePrompt(coordinatorPrompt(base, 'en'), fingerprint, 'en')
-  assert.ok(english.startsWith(`The coordinator rules have been updated (version ${fingerprint})`))
-})
-
-test('starting the coordinator sends the prompt once and records the rules fingerprint', async (t) => {
+test('starting the coordinator binds the Session before the board message and sends no rules', async (t) => {
   const sessions = createSessions()
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
@@ -4299,6 +4078,13 @@ test('starting the coordinator sends the prompt once and records the rules finge
     services: { sessions },
   })
   t.after(() => page.unmount())
+
+  // The bind has to be on the Host before the first assembly, so the assertion
+  // runs from inside `prompt`: the PATCH must already be in the request log.
+  let seenBeforePrompt = null
+  sessions.beforePrompt = () => {
+    seenBeforePrompt = page.requests.filter((request) => request.method === 'PATCH')
+  }
 
   const start = page.byText('启动协调者')[0]
   assert.ok(start, 'the start button is on screen when no Session exists')
@@ -4314,141 +4100,98 @@ test('starting the coordinator sends the prompt once and records the rules finge
   assert.equal(prompts.length, 1)
   assert.equal(prompts[0].sessionId, 'sess-new')
   assert.equal(prompts[0].mode, 'queue')
-  assert.match(prompts[0].parts[0].text, /^你是 DSH 项目「示例项目」的协调者/)
-  assert.match(prompts[0].parts[0].text, /## 你的职责/)
 
-  // The board records both the Session and the fingerprint of the rules it got,
-  // so the next start has something to compare against.
-  const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
-  assert.ok(patch, 'the page patched the project')
-  assert.equal(patch.body.coordinatorSessionId, 'sess-new')
-  assert.match(patch.body.coordinatorPromptHash, /^[0-9a-f]{8}$/)
+  // The message is the board snapshot, not the rules: the Host's system prompt
+  // section owns the rules, and a second copy here would be a second source of
+  // truth that the conversation can dilute.
+  const text = prompts[0].parts[0].text
+  assert.match(text, /^DSH 项目「示例项目」的看板（project_id: p1）。/)
+  assert.match(text, /## 项目目标与指令/)
+  assert.match(text, /## 当前任务/)
+  assert.doesNotMatch(text, /## 你的职责/)
+  assert.doesNotMatch(text, /## 回答方式/)
+
+  // The bind landed first: the Host knows which Session is the coordinator
+  // before the first model step can assemble a prompt.
+  assert.ok(seenBeforePrompt, 'the prompt ran after the bind')
+  assert.deepEqual(seenBeforePrompt.map((request) => request.body), [
+    { coordinatorSessionId: 'sess-new', coordinatorLocale: 'zh' },
+  ])
+
+  // Nothing records a rules fingerprint any more: the system prompt is rendered
+  // from the running plugin, so there is no version for the page to remember.
+  assert.equal(
+    page.requests.some((request) => request.body && 'coordinatorPromptHash' in request.body),
+    false,
+  )
   assert.equal(page.textOf(page.byClass('pj-notice')[0]), '协调者会话已启动。')
 })
 
-test('an unchanged rules fingerprint sends nothing to an existing coordinator', async (t) => {
-  const { coordinatorPromptFingerprint } = coordinatorSource()
+test('opening an existing coordinator sends nothing and rewrites nothing', async (t) => {
   const sessions = createSessions()
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: {
-      project: {
-        ...SAMPLE_PROJECT,
-        coordinatorSessionId: 'sess-1',
-        coordinatorPromptHash: coordinatorPromptFingerprint(SAMPLE_PROJECT, 'zh'),
-      },
+      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorLocale: 'zh' },
       memory: SAMPLE_MEMORY,
     },
     services: { sessions },
   })
   t.after(() => page.unmount())
 
-  // Opening the project reopens the conversation; the rules it already has are
-  // the current rules, so nothing is queued and nothing is rewritten.
+  // The Session is already bound and already speaks this locale, so the page
+  // neither creates nor prompts nor writes: the rules are the Host's job and
+  // they are already in every assembly.
   assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
   const retain = sessions.calls.find((call) => call.kind === 'retain')
   assert.ok(retain, 'the existing Session is retained')
   assert.equal(retain.sessionId, 'sess-1')
   assert.deepEqual(sessions.calls.filter((call) => call.kind === 'prompt'), [])
-  assert.equal(
-    page.requests.filter((request) => request.method === 'PATCH').length,
-    0,
-    'nothing new to record',
-  )
+  assert.equal(page.requests.filter((request) => request.method === 'PATCH').length, 0)
   assert.equal(page.byText('启动协调者').length, 0, 'the conversation is open, not the start button')
 })
 
-test('a changed rules fingerprint appends the new rules to the existing coordinator', async (t) => {
-  const { coordinatorPrompt, coordinatorPromptFingerprint } = coordinatorSource()
-  const current = coordinatorPromptFingerprint(SAMPLE_PROJECT, 'zh')
+test('a locale change re-binds the existing coordinator without a message', async (t) => {
   const sessions = createSessions()
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: {
-      project: {
-        ...SAMPLE_PROJECT,
-        coordinatorSessionId: 'sess-1',
-        // What a previous plugin version recorded: stale by definition.
-        coordinatorPromptHash: 'deadbeef',
-      },
+      // Bound by a page that rendered English rules.
+      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorLocale: 'en' },
       memory: SAMPLE_MEMORY,
     },
     services: { sessions },
   })
   t.after(() => page.unmount())
 
-  // One message, queued into the existing Session — an append, not a new
-  // Session and not a replacement of the transcript.
-  const prompts = sessions.calls.filter((call) => call.kind === 'prompt')
-  assert.equal(prompts.length, 1)
-  assert.equal(prompts[0].sessionId, 'sess-1')
-  assert.equal(prompts[0].mode, 'queue')
-  const text = prompts[0].parts[0].text
-  assert.ok(text.startsWith(`协调者规则已更新（版本 ${current}）`))
-  assert.ok(text.includes(coordinatorPrompt(SAMPLE_PROJECT, 'zh')), 'the new prompt is attached')
-  assert.match(text, /## 你的职责/)
-  assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
-
-  // The new fingerprint replaces the stale one; the Session id is untouched.
+  // The rules themselves are re-rendered by the Host on every step, so a locale
+  // change is one field on the project — never a message in the transcript.
   const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
-  assert.ok(patch, 'the page recorded the new fingerprint')
-  assert.deepEqual(patch.body, { coordinatorPromptHash: current })
-  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '协调者规则已更新，已推送到这个会话。')
+  assert.ok(patch, 'the page recorded the new locale')
+  assert.deepEqual(patch.body, { coordinatorLocale: 'zh' })
+  assert.deepEqual(sessions.calls.filter((call) => call.kind === 'prompt'), [])
+  assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
 })
 
-test('a rejected rules update is not recorded, so the next start retries it', async (t) => {
+test('a rejected board message unbinds the Session so the next start retries', async (t) => {
   const sessions = createSessions()
   sessions.failPrompt = { ok: false, error: { message: 'session is archived' } }
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
-    detail: {
-      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorPromptHash: 'deadbeef' },
-      memory: SAMPLE_MEMORY,
-    },
+    detail: { project: { ...SAMPLE_PROJECT }, memory: SAMPLE_MEMORY },
     services: { sessions },
   })
   t.after(() => page.unmount())
 
-  // The message never landed, so the stale fingerprint stays on the board and
-  // the conversation stays closed: the start button is the retry path.
-  assert.equal(sessions.calls.filter((call) => call.kind === 'prompt').length, 1)
-  assert.equal(page.requests.filter((request) => request.method === 'PATCH').length, 0)
-  assert.equal(page.byText('启动协调者').length, 1, 'the start button is the retry path')
-})
-
-test('the start button retries a rules update the page could not push on open', async (t) => {
-  const { coordinatorPromptFingerprint } = coordinatorSource()
-  const current = coordinatorPromptFingerprint(SAMPLE_PROJECT, 'zh')
-  const sessions = createSessions()
-  sessions.failPrompt = { ok: false, error: { message: 'session is archived' } }
-  const page = await mountPage({
-    projects: [{ ...SAMPLE_PROJECT }],
-    detail: {
-      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorPromptHash: 'deadbeef' },
-      memory: SAMPLE_MEMORY,
-    },
-    services: { sessions },
-  })
-  t.after(() => page.unmount())
-
-  // The auto-open push failed, so the conversation stayed closed and nothing was
-  // recorded; the start button is the retry path.
-  assert.equal(page.byText('启动协调者').length, 1)
-  assert.equal(page.requests.filter((request) => request.method === 'PATCH').length, 0)
-
-  sessions.failPrompt = null
   page.click(page.byText('启动协调者')[0])
   await page.settle()
 
-  // The retry appends the update to the same Session (never a new one) and
-  // records the fingerprint it now has.
-  const prompts = sessions.calls.filter((call) => call.kind === 'prompt')
-  assert.equal(prompts.length, 2)
-  assert.equal(prompts[1].sessionId, 'sess-1')
-  assert.ok(prompts[1].parts[0].text.startsWith(`协调者规则已更新（版本 ${current}）`))
-  assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
-  const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
-  assert.ok(patch, 'the retry recorded the new fingerprint')
-  assert.deepEqual(patch.body, { coordinatorPromptHash: current })
-  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '协调者规则已更新，已推送到这个会话。')
+  // The Session exists but never got its board message, so it is unbound again:
+  // the next start creates a fresh coordinator instead of opening an empty one.
+  const unbind = page.requests.find(
+    (request) => request.method === 'PATCH' && request.body && request.body.coordinatorSessionId === '',
+  )
+  assert.ok(unbind, 'the failed Session is unbound')
+  assert.equal(page.textOf(page.byClass('pj-error')[0]), '出错了: session is archived')
+  assert.equal(page.byText('启动协调者').length, 1, 'the start button is the retry path')
 })

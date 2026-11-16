@@ -23,6 +23,9 @@
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+// The sync pair is only used once, at load, to prime the coordinator index from
+// the projects already on disk; prompt assembly cannot await a directory scan.
+import { readFileSync, readdirSync } from 'node:fs'
 import { chmod, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -219,6 +222,18 @@ const SESSION_DELETE_REFUSED =
   + 'The task was not deleted.'
 /** Delete-action spellings that mean "remove the session", all of which refuse. */
 const SESSION_DELETE_SPELLINGS = ['1', 'true', 'delete', 'remove', 'yes']
+/**
+ * Where the coordinator rules sit in the assembled system prompt.
+ *
+ * 700 puts them with the deployment's policy sections (plan policy 500, team
+ * policy 600) and before the tool guidance (1000+), so the model reads "you are
+ * this project's coordinator, these are your rules" before the documentation of
+ * the `projects_*` tools the rules tell it to use. External contributions may
+ * use any finite order; this number is ours, not a host allocation.
+ */
+const COORDINATOR_SECTION_ORDER = 700
+/** Stable name of the coordinator section; a duplicate registration throws. */
+const COORDINATOR_SECTION_NAME = 'projects:coordinator'
 /** Live dispatch controllers, so unloading the plugin stops its workers. */
 const controllers = new Map()
 /**
@@ -531,12 +546,12 @@ function normalizeProject(raw) {
     ...(typeof raw.coordinatorSessionId === 'string' && raw.coordinatorSessionId
       ? { coordinatorSessionId: raw.coordinatorSessionId }
       : {}),
-    // The fingerprint of the coordinator rules the Session was created with.
-    // The page compares it with the current rules and appends an update when
-    // they differ. The host treats it as an opaque token: the client owns the
-    // algorithm, so it is only bounded here.
-    ...(typeof raw.coordinatorPromptHash === 'string' && raw.coordinatorPromptHash
-      ? { coordinatorPromptHash: text(raw.coordinatorPromptHash, 64) }
+    // The language the coordinator rules are written in. The page records the
+    // locale it renders the board in when it binds the Session; the system
+    // prompt section reads it back. A project created before this field existed
+    // falls back to the language of its own instructions.
+    ...(typeof raw.coordinatorLocale === 'string' && raw.coordinatorLocale
+      ? { coordinatorLocale: text(raw.coordinatorLocale, 16) }
       : {}),
     createdAt: Number(raw.createdAt) || Date.now(),
     updatedAt: Number(raw.updatedAt) || Date.now(),
@@ -562,6 +577,64 @@ async function readProject(id) {
 async function writeProject(project) {
   await mkdir(projectDir(project.id), { recursive: true })
   await writeFileAtomic(projectFile(project.id), `${JSON.stringify(project, null, 2)}\n`)
+  rememberCoordinator(project)
+}
+
+/**
+ * Coordinator Sessions, keyed by session id, carrying the project facts the
+ * system-prompt section needs.
+ *
+ * The section's text provider is synchronous — it runs inside prompt assembly —
+ * so it cannot read `project.json`. `writeProject` is the only writer of the
+ * store, so it keeps this index current; `primeCoordinatorIndex()` fills it once
+ * at load for projects written by an earlier plugin version or by a previous
+ * host process.
+ *
+ * The entry is a copy, not the project object: a caller that mutates its project
+ * after writing must not change what the next assembly renders before the write
+ * that persists the change.
+ */
+const coordinatorSessions = new Map()
+
+function rememberCoordinator(project) {
+  for (const [sessionId, remembered] of coordinatorSessions) {
+    if (remembered.id === project.id) coordinatorSessions.delete(sessionId)
+  }
+  const sessionId = typeof project.coordinatorSessionId === 'string' ? project.coordinatorSessionId.trim() : ''
+  if (!sessionId) return
+  coordinatorSessions.set(sessionId, {
+    id: project.id,
+    name: project.name,
+    autonomy: project.autonomy,
+    // Resolved once, here: the fallback reads the goal, and the cache does not
+    // keep the goal itself (the section never renders it).
+    coordinatorLocale: coordinatorLocale(project),
+  })
+}
+
+/**
+ * Fill the coordinator index from the projects already on disk.
+ *
+ * Runs synchronously once at plugin load: prompt assembly is synchronous, so a
+ * lazy async scan could miss the first step of a Session that was already
+ * running when the plugin loaded. A corrupt or foreign directory is skipped —
+ * the same tolerance `listProjects` has.
+ */
+function primeCoordinatorIndex() {
+  let entries
+  try {
+    entries = readdirSync(rootDir(), { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    try {
+      rememberCoordinator(normalizeProject(JSON.parse(readFileSync(projectFile(entry.name), 'utf8'))))
+    } catch {
+      // A half-written or foreign directory must not break prompt assembly.
+    }
+  }
 }
 
 async function listProjects() {
@@ -1752,13 +1825,13 @@ async function updateProject(id, patch) {
     if (value) project.coordinatorSessionId = value
     else delete project.coordinatorSessionId
   }
-  // Which coordinator rules the Session has seen. Written by the page after the
-  // update message landed; an empty value clears it, which makes the next start
-  // push the rules once more.
-  if (patch?.coordinatorPromptHash !== undefined) {
-    const value = text(patch.coordinatorPromptHash, 64)
-    if (value) project.coordinatorPromptHash = value
-    else delete project.coordinatorPromptHash
+  // The language the coordinator rules are rendered in. Written by the page in
+  // the same request that binds the Session, before the first prompt, so the
+  // first assembly already has it.
+  if (patch?.coordinatorLocale !== undefined) {
+    const value = text(patch.coordinatorLocale, 16)
+    if (value) project.coordinatorLocale = value
+    else delete project.coordinatorLocale
   }
   // Archiving hides the board, so every retained checkout goes with it. Cleanup
   // failures are collected rather than thrown: the archive must still succeed,
@@ -2359,6 +2432,140 @@ function languageRule(language) {
     'This prompt being in English is not a reason to answer in English, and neither are tool names, code, file paths or the shared project memory.',
   )
   return lines
+}
+
+/**
+ * The language the coordinator rules are written in.
+ *
+ * The page records the locale it renders the board in when it binds the
+ * Session, so the rules and the first user message speak the same language.
+ * Projects that predate that field fall back to the language of their own
+ * instructions — the same signal the worker prompt uses, and a better one than
+ * the UI locale when the two disagree.
+ */
+function coordinatorLocale(project) {
+  const stored = typeof project.coordinatorLocale === 'string' ? project.coordinatorLocale.trim() : ''
+  if (stored) return stored
+  return replyLanguage(project, { brief: '' }) || 'en'
+}
+
+/**
+ * The rules half of the coordinator prompt: the job, the brief rules and the
+ * reply rules.
+ *
+ * This is the body of the `projects:coordinator` system prompt section, so it is
+ * re-rendered from the running plugin on every step. That is the whole point of
+ * moving it out of the first user message: a user message is diluted by the
+ * conversation that follows it, while a system section is re-read on every step
+ * and a plugin upgrade reaches a Session that already exists without appending
+ * anything to its transcript.
+ */
+function coordinatorRules(project, locale) {
+  const zh = String(locale || '').toLowerCase().startsWith('zh')
+  if (zh) {
+    return [
+      '## 你的职责',
+      '你只负责四件事：拆解、分派、验收、汇报。',
+      '',
+      '1. 需要读文件、改代码、跑命令、多步排查的工作，一律用 projects_add_task 派生任务交给执行者，不要在对话里自己动手，也不要把命令输出、文件内容、排查过程贴进对话。',
+      '2. 用 projects_add_task 把目标拆成可并行的任务，每个任务要能独立完成；任务说明里写清做什么、在哪里做、如何验收。',
+      '3. 用 projects_dispatch 派发任务；派发后继续响应用户，不要等待。',
+      '4. 执行者交回结果后，用 projects_get 查看产出，用一两句话向用户汇报结论，并请用户在项目页验收。',
+      '5. 用 projects_memory 维护共享记忆，让所有执行者共享结论。',
+      '6. 任务是否完成由人验收：只有用户明确表示通过时，你才用 projects_update_task 把状态设为 resolved；不要替用户宣布任务已完成。',
+      project.autonomy === 'manual'
+        ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
+        : '7. 当前自主程度是自动：你可以直接派发任务。',
+      '8. 派发前先看当前任务列表（第一条用户消息里的「## 当前任务」，或 projects_get）：如果这次要做的是某条未完成任务（同一件事）的后续阶段，用 projects_dispatch 的 note 参数继续那条任务，不要新建；只有不同的事才用 projects_add_task 新建任务。任务说明要补充时用 projects_update_task 的 append_brief，不要另起一条任务。',
+      '',
+      '## 任务说明怎么写（硬约束）',
+      '1. 任务说明（brief）只写三件事：问题是什么、约束是什么、怎么算做完。不写实现方案。',
+      '2. 不要预先设计：不写「用 X 方案」「改第 N 行」「分三步做」，怎么做由执行者自己判断。',
+      '3. 不写行号：行号会过期，让执行者自己定位。',
+      '4. 长度上限：brief 一般 ≤ 15 行；超过必须是因为约束确实多（比如安全要求、兼容性要求）。',
+      '5. 不重复项目指令：项目级约束写在项目指令里，brief 里不要重复。',
+      '6. 验收标准要具体：写清怎么验证，比如「npm test 全绿」「截图确认 X」。',
+      '',
+      '## 回答方式（硬约束）',
+      '1. 先判断再展开：简单问题（是什么、能不能、怎么做）直接给答案，不要先分析再回答。',
+      '2. 不要无谓的结构化：不要在回复里用表格、编号清单、分节标题，除非用户明确要求，或内容确实并列。',
+      '3. 不要过程叙述：不写「我先看看」「让我分析一下」「有几种可能」，直接给结论；不要解释你打算怎么做，直接做（拆任务、派发）或直接回答。',
+      '4. 不要重复：同一件事只说一次，不要开头说一遍、结尾再说一遍。',
+      '5. 长度硬上限：一般 ≤ 3 句；需要解释时 ≤ 6 句；超过 6 句必须说明理由（例如用户问了复杂问题）。这是上限，不是目标。',
+      '6. 派任务时只说三件事：派了什么、为什么、等什么；不要复述任务 brief，不要复述任务产出（执行者的 output 已经在任务里）。',
+      '7. 不确定时问一句：一次只问必要的问题，不要列举所有可能性，也不要一次抛多个。',
+      '8. 不要罗列已完成任务清单。',
+    ].join('\n')
+  }
+  return [
+    '## Your job',
+    'You do four things only: split the goal, dispatch, review, report.',
+    '',
+    '1. Anything that needs reading files, editing code, running commands, or multi-step investigation must be derived into a task with projects_add_task. Do not do that work in the conversation, and do not paste command output, file contents, or investigation steps into it.',
+    '2. Use projects_add_task to split the goal into parallel, independently finishable tasks; each brief says what to do, where, and how to verify it.',
+    '3. Use projects_dispatch to start tasks; stay responsive instead of waiting.',
+    '4. When a worker reports back, use projects_get to read its output, report the conclusion to the user in a sentence or two, and ask the user to review it on the Projects page.',
+    '5. Keep shared knowledge in projects_memory so every worker starts informed.',
+    '6. The human accepts tasks: set status "resolved" with projects_update_task only when the user says so, and never declare a task complete on the user\'s behalf.',
+    project.autonomy === 'manual'
+      ? '7. Autonomy is manual: get the user\'s explicit go-ahead in this conversation, mark the task approved with projects_update_task, then dispatch.'
+      : '7. Autonomy is auto: you may dispatch without waiting for approval.',
+    '8. Before dispatching, read the current task list (the "## Current tasks" section of the first user message, or projects_get): when the next step is a later stage of an unfinished task (the same piece of work), continue that task with the projects_dispatch note parameter instead of creating a new one; create a task only for different work. To add to a brief, use projects_update_task append_brief rather than opening another task.',
+    '',
+    '## How to write a task brief (hard rules)',
+    '1. A brief says three things only: what the problem is, what the constraints are, and what counts as done. Never the implementation plan.',
+    '2. Do not pre-design: never write "use approach X", "change line N", or "do it in three steps" — how to do it is the worker\'s call.',
+    '3. No line numbers: they go stale; let the worker locate the code.',
+    '4. Length cap: a brief is usually ≤ 15 lines; going over must be justified by genuinely many constraints (security, compatibility).',
+    '5. Do not repeat the project instructions: project-wide constraints belong in the project instructions, not in every brief.',
+    '6. Acceptance criteria must be concrete: say how to verify, e.g. "npm test is green" or "screenshot confirms X".',
+    '',
+    '## Reply style (hard rules)',
+    '1. Decide first, then expand: for a simple question (what / can it / how), answer directly. Do not analyse before answering.',
+    '2. No needless structure: in your replies, no tables, numbered lists, or section headings unless the user asks for them or the content is genuinely parallel.',
+    '3. No process narration: never write "Let me take a look", "Let me analyse", or "There are several possibilities" — give the conclusion. Do not explain what you are about to do; just do it (split, dispatch) or answer.',
+    '4. No repetition: say each thing once; do not say it at the start and again at the end.',
+    '5. Hard length cap: usually ≤ 3 sentences; ≤ 6 when an explanation is genuinely needed; more than 6 requires a stated reason (e.g. the user asked a complex question). The cap is a ceiling, not a target.',
+    '6. When dispatching, say three things only: what you dispatched, why, and what you are waiting for. Do not restate the task brief. Do not restate task output — the worker output already lives in the task.',
+    '7. When unsure, ask one question instead of listing every possibility. Ask one necessary question at a time, never several at once.',
+    '8. Do not list completed tasks.',
+  ].join('\n')
+}
+
+/**
+ * The whole system prompt section for one coordinator Session: who the
+ * coordinator is, plus the rules.
+ *
+ * The project goal and the task list deliberately stay in the first user
+ * message. They are board state: the goal is long and the task list changes on
+ * every dispatch, and a system prompt that changes rewrites the cached prefix on
+ * every step. The rules are the part that must survive the conversation, so the
+ * rules are the part that lives here.
+ */
+function coordinatorSectionText(project) {
+  const locale = coordinatorLocale(project)
+  const zh = String(locale).toLowerCase().startsWith('zh')
+  const header = zh
+    ? `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`
+    : `You are the coordinator of the DSH project "${project.name}" (project_id: ${project.id}).`
+  return `${header}\n\n${coordinatorRules(project, locale)}`
+}
+
+/**
+ * The section text provider.
+ *
+ * `assembleContextFor(agent)` puts the live Agent on the assembly context, so
+ * the provider can name its Session without a scope lookup. Any other Session —
+ * a worker, a subagent, an unrelated conversation in the same profile — gets an
+ * empty string, which the renderer drops, so its prompt is byte-identical to a
+ * profile without this plugin.
+ */
+function coordinatorSectionFor(context) {
+  const session = context && context.agent && context.agent.session
+  const sessionId = session && typeof session.id === 'string' ? session.id : ''
+  if (!sessionId) return ''
+  const project = coordinatorSessions.get(sessionId)
+  return project ? coordinatorSectionText(project) : ''
 }
 
 /**
@@ -3775,6 +3982,37 @@ export function apply(ctx) {
     controllers.clear()
   }, 'projects: stop workers on unload')
 
+  // One synchronous scan so a coordinator Session that was already running when
+  // the plugin loaded still finds its project on the next assembly.
+  primeCoordinatorIndex()
+
+  // The coordinator rules belong in the system prompt, not in the first user
+  // message: a user message is diluted by everything that follows it, while a
+  // system section is re-rendered on every step. The registration is global —
+  // one section for the whole profile — but its provider returns text only for
+  // the Session a project recorded as its coordinator (`coordinatorSectionFor`),
+  // so every other Session assembles exactly the prompt it had before.
+  //
+  // `inject` rather than a static dependency: a profile that mounts no prompt
+  // registry still gets the tools and the routes, and a registry that loads
+  // later still gets the section. The child fiber owns the registration, so
+  // unloading this plugin removes the section with it.
+  ctx.inject(['systemPrompt'], (promptCtx) => {
+    try {
+      promptCtx.effect(
+        () =>
+          promptCtx.systemPrompt.section({
+            name: COORDINATOR_SECTION_NAME,
+            order: COORDINATOR_SECTION_ORDER,
+            text: coordinatorSectionFor,
+          }),
+        'projects: coordinator system prompt section',
+      )
+    } catch (error) {
+      console.warn(`projects: could not register the coordinator prompt section: ${messageOf(error)}`)
+    }
+  })
+
   let disposeRoute
   try {
     disposeRoute = ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler: createRouteHandler(ctx) })
@@ -3815,3 +4053,12 @@ export { compactMemory }
  * of leaving an entry behind. Nothing in the plugin calls these exports.
  */
 export { memoryWriteKey, memoryWriteLockCount, withMemoryWriteLock }
+
+/**
+ * Test seams for the coordinator system prompt. The section is registered on the
+ * host's `systemPrompt` service, so the tests can read it back through a fake
+ * service; these exports let them exercise the pieces the registration hides —
+ * the text provider's Session lookup and the load-time index priming — without
+ * standing up a whole prompt assembly. Nothing in the plugin calls them.
+ */
+export { coordinatorSectionFor, coordinatorSectionText, primeCoordinatorIndex }

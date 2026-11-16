@@ -3335,7 +3335,7 @@ test('the panel buckets tasks by status, so resolved is one bucket', async (t) =
   )
 })
 
-test('the five group glyphs are pairwise distinct, and review is a thick still arc not a radio ring', async (t) => {
+test('the five group glyphs are pairwise distinct, and review is a still ring around a three-quarter pie', async (t) => {
   const project = {
     ...SAMPLE_PROJECT,
     tasks: [
@@ -3368,15 +3368,17 @@ test('the five group glyphs are pairwise distinct, and review is a thick still a
   }
 
   // A glyph's drawn structure: its tag plus the shapes it is made of, geometry
-  // included, so two glyphs cannot pass as equal just by sharing tags.
+  // and paint included, so two glyphs cannot pass as equal just by sharing tags
+  // or by drawing the same circle with a different paint.
   const structure = (glyph) => {
     if (!glyph) return 'none'
     const shapes = (glyph.children || []).filter((child) => child && typeof child === 'object')
     return `${glyph.type}[${shapes
       .map((child) => {
         const props = child.props || {}
-        if (child.type === 'path') return `path:${props.d}`
-        if (child.type === 'circle') return `circle:${props.cx},${props.cy},${props.r}`
+        const paint = `${props.stroke || 'none'}/${props.fill || 'none'}`
+        if (child.type === 'path') return `path:${props.d}:${paint}`
+        if (child.type === 'circle') return `circle:${props.cx},${props.cy},${props.r}:${paint}`
         return String(child.type)
       })
       .join('|')}]`
@@ -3442,10 +3444,12 @@ test('the five group glyphs are pairwise distinct, and review is a thick still a
   assert.ok(arcBox.minY >= 0 && arcBox.maxY <= 16, `the arc fits the grid: ${JSON.stringify(arcBox)}`)
   assert.ok(arcBox.width > 11 && arcBox.height > 11, `the arc is not a speck: ${JSON.stringify(arcBox)}`)
 
-  // Ready-for-review is the same open-arc idea, told apart from Working by
-  // weight and by stillness: a thick band, three quarters of a ring, with a 90°
-  // bite in the top-right quadrant and no spin. At 14px the band reads as a
-  // filled ring with a hole, and the bite stays clear of the round caps.
+  // Ready-for-review is a complete ring with a filled three-quarter pie inside
+  // it: the circle is drawn all the way round, but its inside is not filled
+  // yet, so the glyph says "not turned all the way round" without reusing
+  // Working's open arc. Two layers, two paints — the outer ring is stroked, the
+  // inner pie is filled — and neither moves.
+  const angleOf = (point) => ((Math.atan2(point[1] - 8, point[0] - 8) * 180) / Math.PI + 360) % 360
   const review = glyphs.review
   assert.match(review.props.className, /pj-thread-review/, 'the review colour rule still applies')
   assert.doesNotMatch(
@@ -3453,76 +3457,94 @@ test('the five group glyphs are pairwise distinct, and review is a thick still a
     /pj-thread-spinner/,
     'review is static: only Working carries the spin class',
   )
-  assert.equal(review.children.length, 1, 'one arc, not a ring plus a dot')
-  const reviewArc = review.children[0]
-  assert.equal(reviewArc.type, 'path')
-  assert.equal(reviewArc.props.stroke, 'currentColor')
-  assert.equal(reviewArc.props.fill, undefined, 'the arc is stroked, never filled')
-  assert.equal(reviewArc.props.strokeLinecap, 'round')
+  assert.equal(review.children.length, 2, 'a ring and a pie, not one thick arc')
+  const [reviewRing, reviewPie] = review.children
+
+  // The outer layer is a closed circle — a `circle` cannot carry a gap — drawn
+  // thin, so it reads as a ring rather than as a filled band.
+  assert.equal(reviewRing.type, 'circle')
+  assert.equal(reviewRing.props.cx, 8)
+  assert.equal(reviewRing.props.cy, 8)
+  assert.equal(reviewRing.props.r, 6.4)
+  assert.equal(reviewRing.props.stroke, 'currentColor')
+  assert.equal(reviewRing.props.fill, undefined, 'the ring is stroked, never filled')
+  assert.equal(reviewRing.props.strokeDasharray, undefined, 'the ring has no gap')
   assert.ok(
-    reviewArc.props.strokeWidth >= 3.2 && reviewArc.props.strokeWidth <= 3.6,
-    `the band is thick enough to read as a filled ring: ${reviewArc.props.strokeWidth}`,
+    reviewRing.props.strokeWidth >= 1.5 && reviewRing.props.strokeWidth <= 1.7,
+    `the ring is a thin line: ${reviewRing.props.strokeWidth}`,
   )
-  assert.doesNotMatch(reviewArc.props.d, /[zZ]/, 'the arc is open')
-  assert.doesNotMatch(reviewArc.props.d, /[lLhHvVaA]/, 'the arc is drawn from curves only')
 
-  // The bite: measure both ends against the centre. The arc runs clockwise from
-  // 3 o'clock (0°) to 12 o'clock (270°), so it covers 270° and the missing 90°
-  // sits at 315° — the top-right quadrant, where Working's bite is not.
-  const angleOf = (point) => ((Math.atan2(point[1] - 8, point[0] - 8) * 180) / Math.PI + 360) % 360
-  const reviewPoints = pathPoints(reviewArc.props.d)
-  const reviewStart = reviewPoints[0]
-  const reviewEnd = reviewPoints[reviewPoints.length - 1]
-  const reviewStartAngle = angleOf(reviewStart)
-  const reviewEndAngle = angleOf(reviewEnd)
-  assert.ok(Math.abs(reviewStartAngle - 0) < 1, `the arc starts at 3 o'clock: ${reviewStartAngle}`)
-  assert.ok(Math.abs(reviewEndAngle - 270) < 1, `the arc ends at 12 o'clock: ${reviewEndAngle}`)
-  const reviewSweep = (reviewEndAngle - reviewStartAngle + 360) % 360
-  assert.ok(Math.abs(reviewSweep - 270) < 2, `the arc is three quarters of the ring: ${reviewSweep}`)
-  const reviewBite = 360 - reviewSweep
-  assert.ok(reviewBite >= 80 && reviewBite <= 100, `the missing quarter is about 90°: ${reviewBite}`)
-  const reviewBiteMid = (reviewStartAngle + reviewSweep + reviewBite / 2) % 360
-  assert.ok(Math.abs(reviewBiteMid - 315) < 2, `the bite sits in the top-right quadrant: ${reviewBiteMid}`)
-
-  // One centre, one radius: every sampled point is on the ring.
-  const bandRadius = Math.hypot(reviewStart[0] - 8, reviewStart[1] - 8)
-  for (const [x, y] of reviewPoints) {
-    assert.ok(Math.abs(Math.hypot(x - 8, y - 8) - bandRadius) < 0.05, `the arc is a circle: ${x},${y}`)
+  // The inner layer is a filled 270° sector on a 3.6 radius, its two radial
+  // edges running back to the centre. The arc is cubics only, so no straight
+  // segment catches the eye at 14px.
+  assert.equal(reviewPie.type, 'path')
+  assert.equal(reviewPie.props.fill, 'currentColor')
+  assert.equal(reviewPie.props.stroke, undefined, 'the pie is filled, never stroked')
+  assert.doesNotMatch(reviewPie.props.d, /[aA]/, 'the arc is drawn from curves only')
+  const piePoints = pathPoints(reviewPie.props.d)
+  // The last two points are the radial edge's inner end and the `Z` back to the
+  // start, so the arc itself is everything before them.
+  const pieArc = piePoints.slice(0, -2)
+  const pieStart = pieArc[0]
+  const pieEnd = pieArc[pieArc.length - 1]
+  const pieRadius = Math.hypot(pieStart[0] - 8, pieStart[1] - 8)
+  assert.ok(Math.abs(pieRadius - 3.6) < 0.01, `the pie sits on a 3.6 radius: ${pieRadius}`)
+  for (const [x, y] of pieArc) {
+    assert.ok(
+      Math.abs(Math.hypot(x - 8, y - 8) - pieRadius) < 0.05,
+      `the pie's edge is a circle: ${x},${y}`,
+    )
   }
 
-  // 14px: the hole survives, and so does the bite between the round caps.
+  // The pie runs clockwise from 3 o'clock (0°) to 12 o'clock (270°), so it
+  // covers 270° and the missing 90° sits at 315° — the top-right quadrant,
+  // where Working's bite is not.
+  const pieStartAngle = angleOf(pieStart)
+  const pieEndAngle = angleOf(pieEnd)
+  assert.ok(Math.abs(pieStartAngle - 0) < 1, `the pie starts at 3 o'clock: ${pieStartAngle}`)
+  assert.ok(Math.abs(pieEndAngle - 270) < 1, `the pie ends at 12 o'clock: ${pieEndAngle}`)
+  const pieSweep = (pieEndAngle - pieStartAngle + 360) % 360
+  assert.ok(Math.abs(pieSweep - 270) < 2, `the pie fills three quarters: ${pieSweep}`)
+  const pieBite = 360 - pieSweep
+  assert.ok(pieBite >= 80 && pieBite <= 100, `the missing quarter is about 90°: ${pieBite}`)
+  const pieBiteMid = (pieStartAngle + pieSweep + pieBite / 2) % 360
+  assert.ok(Math.abs(pieBiteMid - 315) < 2, `the bite sits in the top-right quadrant: ${pieBiteMid}`)
+
+  // Both radial edges run to the centre, so the sector is a pie, not a band.
+  const pieCentre = piePoints[piePoints.length - 2]
+  assert.ok(Math.hypot(pieCentre[0] - 8, pieCentre[1] - 8) < 0.01, 'the pie closes at the centre')
+  const pieClose = piePoints[piePoints.length - 1]
+  assert.ok(
+    Math.hypot(pieClose[0] - pieStart[0], pieClose[1] - pieStart[1]) < 0.01,
+    'the pie closes back on its start',
+  )
+
+  // 14px: the gutter between the ring and the pie survives, the pie is a real
+  // blob rather than a speck, and the missing quarter opens wide enough to see.
   const scale14 = 14 / 16
-  const hole = 2 * (bandRadius - reviewArc.props.strokeWidth / 2) * scale14
-  assert.ok(hole >= 5, `the band keeps a hole at 14px: ${hole.toFixed(2)}px`)
-  const capClear =
-    (Math.hypot(reviewEnd[0] - reviewStart[0], reviewEnd[1] - reviewStart[1]) -
-      reviewArc.props.strokeWidth) *
-    scale14
-  assert.ok(capClear >= 3, `the bite clears the caps at 14px: ${capClear.toFixed(2)}px`)
+  const gutter = (reviewRing.props.r - reviewRing.props.strokeWidth / 2 - pieRadius) * scale14
+  assert.ok(gutter >= 1, `the ring keeps a gutter around the pie at 14px: ${gutter.toFixed(2)}px`)
+  const pieDiameter = 2 * pieRadius * scale14
+  assert.ok(pieDiameter >= 5.5, `the pie is a real fill at 14px: ${pieDiameter.toFixed(2)}px`)
+  const notch = pieRadius * Math.SQRT2 * scale14
+  assert.ok(notch >= 3.5, `the missing quarter stays open at 14px: ${notch.toFixed(2)}px`)
 
-  // The grid: the band's ink stays inside the 16 box.
-  const reviewBox = inkBox(reviewArc.props.d, reviewArc.props.strokeWidth)
-  assert.ok(
-    reviewBox.minX >= 0 && reviewBox.maxX <= 16,
-    `the band fits the grid: ${JSON.stringify(reviewBox)}`,
-  )
-  assert.ok(
-    reviewBox.minY >= 0 && reviewBox.maxY <= 16,
-    `the band fits the grid: ${JSON.stringify(reviewBox)}`,
-  )
-  assert.ok(
-    reviewBox.width > 12 && reviewBox.height > 12,
-    `the band is not a speck: ${JSON.stringify(reviewBox)}`,
-  )
+  // The grid: the ring's ink stays inside the 16 box, and its outer edge is
+  // 7.2 — the same contour as Waiting's ring, so the family does not jump.
+  const ringOuter = reviewRing.props.r + reviewRing.props.strokeWidth / 2
+  assert.ok(ringOuter <= 8, `the ring fits the grid: ${ringOuter}`)
+  assert.ok(ringOuter >= 6.5, `the ring is not a speck: ${ringOuter}`)
 
-  // Working and Ready-for-review share a silhouette, so the pair is told apart
-  // by the two things the eye reads at 14px — the band's weight (thin vs thick)
-  // and whether it moves — and their bites sit in different quadrants.
-  assert.ok(
-    reviewArc.props.strokeWidth - arc.props.strokeWidth >= 1.5,
-    `review is visibly heavier than Working: ${reviewArc.props.strokeWidth} vs ${arc.props.strokeWidth}`,
+  // Working and Ready-for-review both sit on a 16-grid circle, so the pair is
+  // told apart by shape rather than by weight: Working is one open stroked arc,
+  // review is a closed ring plus a filled pie, and their bites sit in different
+  // quadrants.
+  assert.notEqual(
+    review.children.length,
+    running.children.length,
+    'review is two layers, Working one arc',
   )
-  assert.notEqual(reviewArc.props.d, arc.props.d, 'the two arcs are not the same path')
+  assert.equal(arc.props.fill, undefined, 'Working has no filled layer')
   const workingPoints = pathPoints(arc.props.d)
   const workingStartAngle = angleOf(workingPoints[0])
   const workingEndAngle = angleOf(workingPoints[workingPoints.length - 1])
@@ -3530,8 +3552,8 @@ test('the five group glyphs are pairwise distinct, and review is a thick still a
   const workingBiteMid = (workingStartAngle + workingSweep + (360 - workingSweep) / 2) % 360
   assert.ok(Math.abs(workingBiteMid - 225) < 2, `Working's bite is top-left: ${workingBiteMid}`)
   assert.ok(
-    Math.abs(reviewBiteMid - workingBiteMid) > 45,
-    `the two bites sit in different quadrants: Working ${workingBiteMid}, review ${reviewBiteMid}`,
+    Math.abs(pieBiteMid - workingBiteMid) > 45,
+    `the two bites sit in different quadrants: Working ${workingBiteMid}, review ${pieBiteMid}`,
   )
 
   // Idle is a ring of dots: eight filled dots on one radius, nothing stroked.

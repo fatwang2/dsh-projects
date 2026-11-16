@@ -1929,18 +1929,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
     ]
 
     /**
-     * The group glyph: thin open arc, thick open arc, warning ring, dotted
+     * The group glyph: thin open arc, ring around a pie, warning ring, dotted
      * ring, filled check disc.
      *
      * The five follow the reference Threads panel, and each silhouette is
-     * different on purpose: a thin open arc that spins (Working), a thick open
-     * arc that stands still (Ready-for-review — the work is done but not
-     * accepted, so the ring is nearly closed and the bite says "not turned all
-     * the way round yet"), a ring around a bar (Waiting), a ring of dots
-     * (Idle), a filled disc with a knocked-out check (Resolved, the one glyph
-     * that means accepted). All five sit on the same 16 grid, so they read as
-     * one family at 14px; only the ink is drawn, and every colour is
-     * `currentColor` or a `--dsw-*` token, so the theme owns the palette.
+     * different on purpose: a thin open arc that spins (Working), a closed ring
+     * around a filled three-quarter pie that stands still (Ready-for-review —
+     * the work is done but not accepted, so the pie says the circle is not
+     * filled yet), a ring around a bar (Waiting), a ring of dots (Idle), a
+     * filled disc with a knocked-out check (Resolved, the one glyph that means
+     * accepted). All five sit on the same 16 grid, so they read as one family
+     * at 14px; only the ink is drawn, and every colour is `currentColor` or a
+     * `--dsw-*` token, so the theme owns the palette.
      */
     function ThreadIcon({ kind }) {
       if (kind === 'spinner') {
@@ -1966,13 +1966,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
         )
       }
       if (kind === 'review') {
-        // Three quarters of a ring, drawn thick (3.4) so it reads as a filled
-        // band rather than a hairline, and still — the work is finished, the
-        // ring just has not turned all the way round. The 90° bite sits in the
-        // top-right quadrant (from 3 o'clock round to 12 o'clock), which keeps
-        // it apart from Working's thin arc, whose bite is at the top-left and
-        // which spins. Cubics only, so the arc has no straight segment to catch
-        // the eye at 14px.
+        // A complete ring with a three-quarter pie inside it: the work is
+        // finished, but the circle is not filled yet, so the glyph reads as
+        // "not turned all the way round" without borrowing Working's open-arc
+        // silhouette. Two layers, two paints — the ring is stroked at 1.6 and
+        // the pie is filled, both in `currentColor` — and the 90° the pie is
+        // missing sits in the top-right quadrant (from 12 o'clock round to 3
+        // o'clock), away from Working's top-left bite. The ring keeps a 2-unit
+        // gutter around the pie so the two layers stay apart at 14px, and
+        // nothing here animates.
         return h(
           'svg',
           {
@@ -1983,11 +1985,12 @@ ${SHARED_CSS}${DISPATCH_RULES}
             fill: 'none',
             'aria-hidden': true,
           },
+          h('circle', { cx: 8, cy: 8, r: 6.4, stroke: 'currentColor', strokeWidth: 1.6 }),
+          // The pie: a 270° sector on a 3.6 radius, drawn from cubics only, with
+          // its two radial edges running back to the centre and closing.
           h('path', {
-            d: 'M13.5 8C13.5 11.04 11.04 13.5 8 13.5C4.96 13.5 2.5 11.04 2.5 8C2.5 4.96 4.96 2.5 8 2.5',
-            stroke: 'currentColor',
-            strokeWidth: 3.4,
-            strokeLinecap: 'round',
+            d: 'M11.6 8C11.6 9.99 9.99 11.6 8 11.6C6.01 11.6 4.4 9.99 4.4 8C4.4 6.01 6.01 4.4 8 4.4L8 8Z',
+            fill: 'currentColor',
           }),
         )
       }

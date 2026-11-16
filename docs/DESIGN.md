@@ -23,8 +23,8 @@ to end on the Host side:
 - Host: project store + same-origin `/projects-api/*` routes + 8 `projects_*`
   tools + subagent dispatch and write-back
 - Client: a **Projects** entry in the left sidebar + a full-page board in
-  `main` (project list / coordinator conversation / settings and archive
-  dialogs / task board / approval)
+  `main` (project list / coordinator conversation / settings dialog with the
+  archive action / task board / approval)
 - Zero Host changes: only public extension points were used (slot, tool,
   webServer, subagents, locale)
 
@@ -56,7 +56,7 @@ human ── project page (main slot: projects, three columns)
    │              the fold glyph collapses the column to 44px)
    ├── column 2: main conversation (the coordinator, a real embedded Session);
    │              the gear glyph in the header opens the settings dialog
-   │              (its bottom is the archive danger zone)
+   │              (two groups: General, with archive last, and Shared memory)
    └── column 3: Threads panel (grouped by status; search/filter glyphs in the
                   header; click a card to open the detail page = the worker session)
                   │
@@ -241,7 +241,7 @@ added by forking. They need a server.**
 | Data on disk | four files under `$DSH_HOME/projects/<id>/`: `project.json` (project + tasks), `memory.md` (live memory), `memory-archive.md` (sections moved out by compaction, append-only and never injected), `memory.bak.md` (a full backup before each compaction, never deleted automatically). Cleaned up after testing |
 | Client module | the module id, `inject`, all four slot registrations (`sidebar.panellist` / `main` / `projects.conversation` / `tool.call.toolview`) and icon rendering are covered by unit tests |
 | Theme tokens | every `--dsw-*` token the page uses exists in the theme package, and there are no literal colour values |
-| Settings and archiving | settings is a **dialog** (triggered by the gear glyph in column 2's header, `role="dialog"` + `aria-modal`): instructions, shared memory, dispatch policy, worker model/effort, workspace, and **a danger zone at the very bottom** — archive the project (the first click only arms it, the second runs it; while armed, clicking the mask does not dismiss it; unarchiving is not dangerous, so one click is enough). Creating a project is a dialog too (triggered by the `+` glyph in column 1's header): name, instructions, workspace (+ choose folder), autonomy, concurrency, and cancel/create at the bottom |
+| Settings and archiving | settings is a **dialog** (triggered by the gear glyph in column 2's header, `role="dialog"` + `aria-modal`) with a left nav of **two groups**: **General** and **Shared memory**. **General** holds the project name, the instructions, the workspace, a **Threads** section (concurrency, model and reasoning effort) and, as its last section, **archive project** (the first click only arms it, the second runs it; while armed, clicking the mask does not dismiss it; unarchiving is not dangerous, so one click is enough). **Shared memory** holds the memory editor and its section list. Creating a project is a dialog too (triggered by the `+` glyph in column 1's header): name, instructions, workspace (+ choose folder), autonomy, concurrency, and cancel/create at the bottom |
 | Icons | the sidebar entry is a hand-drawn **stacked-card** icon: a 24 grid, stroked (`stroke-width` 1.8, round caps and joins), `currentColor`, so it recolours with the theme; the plugin-market icon `icon.svg` follows the Host's plugin-icon convention instead: a **36 grid, filled colour, padded content** (like the Host's other plugins). The header triggers (`+` / gear / fold / search / filter) are the Host's 16-grid outline glyphs, 1.4 stroke, `currentColor` |
 | Directory picking | creating a project and project settings both call `ctx.uiWorkspace.pickDirectory()` (the same native directory chooser as the Host workspace picker); it can be left empty and cleared; the actual dialog is unverified (needs a GUI session) |
 | Embedded conversation | the project page declares the session sub-slot `projects.conversation` and renders a real session (composer included) with `renderFactorySlot('conversation.content', …)`; a `SessionProvider` binds the coordinator session and an error boundary catches failures; rendering is unverified (needs a GUI session) |
@@ -271,8 +271,8 @@ added by forking. They need a server.**
    **Delete and archive session** (the latter only when the task has a worker
    session).
 6. Settings and archiving are both in the gear dialog in column 2's header: save
-   after editing; archiving is in the danger zone at the very bottom of the
-   dialog and needs two clicks.
+   after editing; archiving is the last section of the **General** group (below
+   **Threads**) and needs two clicks.
 
 ### How to uninstall
 

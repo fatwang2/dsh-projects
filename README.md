@@ -96,10 +96,11 @@ install, an upgrade or a removal: they live in `$DSH_HOME/projects/<projectId>/`
   - Column 2 is the project's coordinator conversation: the real DSH chat with
     its composer. **Start coordinator** creates the Session and sends the
     coordinator prompt. The gear glyph in this column's header opens a
-    **settings dialog** — instructions, shared memory, dispatch policy, worker
-    model/effort and workspace — whose bottom is a danger zone that **archives**
-    the project behind a two-step confirm (arm, then confirm; the mask does not
-    dismiss it while armed).
+    **settings dialog** with a left nav of two groups: **General** (project
+    name, instructions, workspace, **Threads** — concurrency, model and
+    reasoning effort — and, as its last section, **archive project**) and
+    **Shared memory**. Archiving takes two clicks (arm, then confirm; the mask
+    does not dismiss it while armed).
   - Column 3 is the Threads panel: five collapsible groups (running, ready for
     review, waiting on you = blocked + failed, idle = queued, resolved — folded
     by default). The panel head carries two glyphs: **search** (unfolds a field
@@ -152,16 +153,16 @@ install, an upgrade or a removal: they live in `$DSH_HOME/projects/<projectId>/`
    conversation and let the coordinator derive a new task. Deleting a task is in
    the row's right-click menu (two-step confirm).
 
-## Dispatch policy
+## Autonomy and Threads
 
 - **Manual** (default): a task needs human approval on the page before the
   coordinator may dispatch it. This is the approval point.
 - **Auto**: the coordinator dispatches without waiting.
-- **Parallel workers** caps how many tasks run at once (1-8). This is
-  deliberately aligned with the Host's own subagent pool
-  (`maxActiveSubagents`, default 8), so the plugin never admits a worker the
-  Host would reject: the ninth task is refused in the plugin with
-  `Concurrency limit reached (8/8 workers running)`.
+- **Concurrency** — the first field of the settings dialog's **Threads**
+  section — caps how many tasks run at once (1-8). It is deliberately aligned
+  with the Host's own subagent pool (`maxActiveSubagents`, default 8), so the
+  plugin never admits a worker the Host would reject: the ninth task is refused
+  in the plugin with `Concurrency limit reached (8/8 workers running)`.
 
 ## Data and limits
 

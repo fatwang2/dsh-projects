@@ -2,7 +2,7 @@
   "name": "@fatwang2/dsh-projects",
   "version": "0.1.0",
   "type": "module",
-  "description": "Project board for DeepSeek Harness: one goal, shared memory, and parallel worker agents.",
+  "description": "Adds a Projects board to the left sidebar. One goal, many parallel tasks: a coordinator splits the work, workers run each task in the project folder, and you review the results.",
   "license": "MIT",
   "publishConfig": {
     "access": "public"

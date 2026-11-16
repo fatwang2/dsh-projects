@@ -531,6 +531,13 @@ function normalizeProject(raw) {
     ...(typeof raw.coordinatorSessionId === 'string' && raw.coordinatorSessionId
       ? { coordinatorSessionId: raw.coordinatorSessionId }
       : {}),
+    // The fingerprint of the coordinator rules the Session was created with.
+    // The page compares it with the current rules and appends an update when
+    // they differ. The host treats it as an opaque token: the client owns the
+    // algorithm, so it is only bounded here.
+    ...(typeof raw.coordinatorPromptHash === 'string' && raw.coordinatorPromptHash
+      ? { coordinatorPromptHash: text(raw.coordinatorPromptHash, 64) }
+      : {}),
     createdAt: Number(raw.createdAt) || Date.now(),
     updatedAt: Number(raw.updatedAt) || Date.now(),
     tasks: Array.isArray(raw.tasks) ? raw.tasks.slice(0, MAX_TASKS).map(normalizeTask) : [],
@@ -1744,6 +1751,14 @@ async function updateProject(id, patch) {
     const value = text(patch.coordinatorSessionId, 128)
     if (value) project.coordinatorSessionId = value
     else delete project.coordinatorSessionId
+  }
+  // Which coordinator rules the Session has seen. Written by the page after the
+  // update message landed; an empty value clears it, which makes the next start
+  // push the rules once more.
+  if (patch?.coordinatorPromptHash !== undefined) {
+    const value = text(patch.coordinatorPromptHash, 64)
+    if (value) project.coordinatorPromptHash = value
+    else delete project.coordinatorPromptHash
   }
   // Archiving hides the board, so every retained checkout goes with it. Cleanup
   // failures are collected rather than thrown: the archive must still succeed,

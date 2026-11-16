@@ -2945,6 +2945,33 @@ test('the coordinator session is never archived', async () => {
   assert.equal(detail.body.project.tasks.length, 1, 'the task survives a refused archive')
 })
 
+test('the coordinator rules fingerprint is a project field the page can record', async () => {
+  const created = await call('projects_create', { name: 'Rules fingerprint', autonomy: 'manual' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+
+  // The page writes the fingerprint the Session was created with. The host does
+  // not interpret it: the client owns the algorithm, so it is stored as an
+  // opaque, bounded token.
+  const patched = await request('PATCH', `/projects-api/projects/${projectId}`, {
+    coordinatorPromptHash: '1a2b3c4d',
+  })
+  assert.equal(patched.status, 200)
+  assert.equal(patched.body.project.coordinatorPromptHash, '1a2b3c4d')
+
+  // The read path normalizes it back, so the next start can compare it.
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.coordinatorPromptHash, '1a2b3c4d')
+
+  // An empty value clears it: the next start then pushes the rules once more.
+  const cleared = await request('PATCH', `/projects-api/projects/${projectId}`, {
+    coordinatorPromptHash: '',
+  })
+  assert.equal(cleared.status, 200)
+  assert.equal('coordinatorPromptHash' in cleared.body.project, false)
+  const after = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal('coordinatorPromptHash' in after.body.project, false)
+})
+
 test('a failed archive keeps the task on the board', async () => {
   const { projectId, taskId } = await projectWithWorker('archive failure')
   fakeWorkspaceRegistry = createRegistry()

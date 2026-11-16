@@ -129,6 +129,7 @@ window.__ModuleLoader__.load({
       counts: 'tasks',
       coordinatorCreated: 'Coordinator session started.',
       coordinatorResumed: 'Coordinator session opened.',
+      coordinatorRulesUpdated: 'Coordinator rules updated and pushed into this session.',
       coordinatorChatFailed: 'The embedded conversation could not start. Open it in the workspace instead.',
       coordinatorArchived: 'This conversation is archived, so new messages do not run. Restore it to continue.',
       restore: 'Restore',
@@ -284,6 +285,7 @@ window.__ModuleLoader__.load({
       counts: '个任务',
       coordinatorCreated: '协调者会话已启动。',
       coordinatorResumed: '已打开协调者会话。',
+      coordinatorRulesUpdated: '协调者规则已更新，已推送到这个会话。',
       coordinatorChatFailed: '内嵌对话启动失败，请在会话中打开。',
       coordinatorArchived: '这个会话已归档，新消息不会运行。恢复后才能继续。',
       restore: '恢复',
@@ -1285,18 +1287,45 @@ ${SHARED_CSS}${DISPATCH_RULES}
             ? `已 resolved 的 ${tally.resolved} 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。`
             : `${tally.resolved} resolved task(s) are not listed here; read their output with projects_get and include_resolved: true.`
           : ''
+      // The header changes with the board; the rules below it change when this
+      // plugin is upgraded. They are built separately so the fingerprint can
+      // cover the rules alone: a task moving from queued to running must not
+      // look like a rules change.
+      const header = zh
+        ? [
+            `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`,
+            '',
+            '## 项目目标与指令',
+            project.goal?.trim() || '（未填写）',
+            '',
+            '## 当前任务',
+            `counts: ${countsText}`,
+            taskLines,
+            ...(resolvedNote ? [resolvedNote] : []),
+          ]
+        : [
+            `You are the coordinator of the DSH project "${project.name}" (project_id: ${project.id}).`,
+            '',
+            '## Project instructions',
+            project.goal?.trim() || '(none)',
+            '',
+            '## Current tasks',
+            `counts: ${countsText}`,
+            taskLines,
+            ...(resolvedNote ? [resolvedNote] : []),
+          ]
+      return [...header, '', coordinatorRules(project, locale)].join('\n')
+    }
+
+    /**
+     * The rules half of the coordinator prompt: the job, the brief rules and the
+     * reply rules, without the project header. This is the text a plugin upgrade
+     * changes, so it is the text `coordinatorPromptFingerprint` hashes.
+     */
+    function coordinatorRules(project, locale) {
+      const zh = String(locale || '').toLowerCase().startsWith('zh')
       if (zh) {
         return [
-          `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`,
-          '',
-          '## 项目目标与指令',
-          project.goal?.trim() || '（未填写）',
-          '',
-          '## 当前任务',
-          `counts: ${countsText}`,
-          taskLines,
-          ...(resolvedNote ? [resolvedNote] : []),
-          '',
           '## 你的职责',
           '你只负责四件事：拆解、分派、验收、汇报。',
           '',
@@ -1331,16 +1360,6 @@ ${SHARED_CSS}${DISPATCH_RULES}
         ].join('\n')
       }
       return [
-        `You are the coordinator of the DSH project "${project.name}" (project_id: ${project.id}).`,
-        '',
-        '## Project instructions',
-        project.goal?.trim() || '(none)',
-        '',
-        '## Current tasks',
-        `counts: ${countsText}`,
-        taskLines,
-        ...(resolvedNote ? [resolvedNote] : []),
-        '',
         '## Your job',
         'You do four things only: split the goal, dispatch, review, report.',
         '',
@@ -1373,6 +1392,47 @@ ${SHARED_CSS}${DISPATCH_RULES}
         '7. When unsure, ask one question instead of listing every possibility. Ask one necessary question at a time, never several at once.',
         '8. Do not list completed tasks.',
       ].join('\n')
+    }
+
+    /**
+     * A short stable fingerprint of one string (FNV-1a, 32 bit, hex). The client
+     * has no crypto dependency and the value only has to answer "same rules or
+     * not", so a non-cryptographic hash is enough.
+     */
+    function promptFingerprint(value) {
+      const source = String(value ?? '')
+      let hash = 0x811c9dc5
+      for (let index = 0; index < source.length; index += 1) {
+        hash ^= source.charCodeAt(index)
+        hash = Math.imul(hash, 0x01000193) >>> 0
+      }
+      return hash.toString(16).padStart(8, '0')
+    }
+
+    /**
+     * Which rules a coordinator Session has seen. The page records it on the
+     * project as `coordinatorPromptHash`; the next start appends an update only
+     * when the current rules hash to a different value. The board header is
+     * deliberately outside the hash: tasks, counts, goal and name change all the
+     * time and none of them is a rules change.
+     */
+    function coordinatorPromptFingerprint(project, locale) {
+      return promptFingerprint(coordinatorRules(project, locale))
+    }
+
+    /**
+     * The message appended to an existing coordinator Session whose rules are
+     * stale. It is an append, never a replacement: the old rules stay in the
+     * transcript and this note says which version supersedes them. The full
+     * prompt follows, so the same message also refreshes the board snapshot
+     * (goal, tasks, counts) the coordinator reasons about.
+     */
+    function coordinatorUpdatePrompt(prompt, fingerprint, locale) {
+      const zh = String(locale || '').toLowerCase().startsWith('zh')
+      const note = zh
+        ? `协调者规则已更新（版本 ${fingerprint}）。以下是最新的协调者规则，取代之前消息里的旧规则；请按下面的规则继续工作。`
+        : `The coordinator rules have been updated (version ${fingerprint}). The rules below replace the earlier ones — follow them from now on.`
+      return `${note}\n\n${prompt}`
     }
 
     // ---------------------------------------------------------------------
@@ -2642,30 +2702,58 @@ ${SHARED_CSS}${DISPATCH_RULES}
       }, [])
 
       // A project that already has a coordinator Session reopens its
-      // conversation when the project is selected.
+      // conversation when the project is selected. Opening it is also the only
+      // way an existing Session can learn new rules — the start button is not
+      // on screen while the conversation is open — so `ensure` appends the
+      // update when the recorded fingerprint is stale, and the project records
+      // the fingerprint it now has. `create: false` keeps a page load from
+      // creating a Session: a stale id stays closed, and the start button
+      // creates a fresh coordinator.
       useEffect(() => {
         const coordinatorId = detail?.project?.coordinatorSessionId
         if (!coordinatorId) {
           setThread((current) => (current ? null : current))
           return
         }
-        if (!threadApi || typeof threadApi.retain !== 'function') return undefined
+        if (!threadApi || typeof threadApi.ensure !== 'function') return undefined
         if (thread && thread.sessionId === coordinatorId) return undefined
         let cancelled = false
         const open = async () => {
           try {
             const archived = Array.isArray(archivedSessionIds) && archivedSessionIds.includes(coordinatorId)
             if (archived) await threadApi.restoreSession(coordinatorId)
-            const reference = threadApi.retain(coordinatorId)
+            let locale = 'zh'
+            try {
+              locale = typeof getLocale === 'function' ? getLocale() : 'zh'
+            } catch {
+              locale = 'zh'
+            }
+            const current = detail?.project
+            const result = await threadApi.ensure(current, coordinatorPrompt(current, locale), {
+              locale,
+              create: false,
+            })
+            if (!result) return
             if (cancelled) {
               try {
-                reference.release()
+                result.reference.release()
               } catch {
                 // Already released.
               }
-              return
+            } else {
+              setThread({ sessionId: result.sessionId, reference: result.reference })
+              if (result.promptUpdated) setNotice(t('coordinatorRulesUpdated'))
             }
-            setThread({ sessionId: coordinatorId, reference })
+            // The message landed: record the fingerprint even when the page has
+            // moved on, so the same update is never appended twice. The write
+            // goes straight to the Host instead of through `refresh`, which
+            // would pull this project back over the one the user selected.
+            if (result.promptUpdated) {
+              await api(`/projects/${current.id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ coordinatorPromptHash: result.fingerprint }),
+              })
+            }
           } catch {
             // A stale id stays closed; the start button creates a fresh coordinator.
           }
@@ -3276,12 +3364,21 @@ ${SHARED_CSS}${DISPATCH_RULES}
           }
           const restored = coordinatorArchived && Boolean(project.coordinatorSessionId)
           if (restored) await threadApi.restoreSession(project.coordinatorSessionId)
-          const result = await threadApi.ensure(project, coordinatorPrompt(project, locale))
+          const result = await threadApi.ensure(project, coordinatorPrompt(project, locale), { locale })
           setThread({ sessionId: result.sessionId, reference: result.reference })
+          const patch = {}
           if (result.created && result.sessionId !== project.coordinatorSessionId) {
-            await saveProjectPatch({ coordinatorSessionId: result.sessionId })
-            return t('coordinatorCreated')
+            patch.coordinatorSessionId = result.sessionId
           }
+          // Which rules this Session has seen. Recorded only after the message
+          // landed, so a rejected append is retried on the next start instead of
+          // being remembered as delivered.
+          if (result.fingerprint && result.fingerprint !== project.coordinatorPromptHash) {
+            patch.coordinatorPromptHash = result.fingerprint
+          }
+          if (Object.keys(patch).length > 0) await saveProjectPatch(patch)
+          if (patch.coordinatorSessionId) return t('coordinatorCreated')
+          if (result.promptUpdated) return t('coordinatorRulesUpdated')
           if (restored) return t('coordinatorRestored')
           return t('coordinatorResumed')
         })
@@ -4988,14 +5085,18 @@ ${SHARED_CSS}${DISPATCH_RULES}
           restoreSession(sessionId) {
             return restoreSession(sessionId)
           },
-          async ensure(project, prompt) {
+          async ensure(project, prompt, options = {}) {
             const sessions = ctx.get('sessions')
             if (!sessions || typeof sessions.create !== 'function') {
               throw new Error(translate('sessionUnavailable'))
             }
+            const fingerprint = coordinatorPromptFingerprint(project, options.locale)
+            const stored =
+              typeof project.coordinatorPromptHash === 'string' ? project.coordinatorPromptHash : ''
             const existing = typeof project.coordinatorSessionId === 'string' ? project.coordinatorSessionId : ''
             let sessionId = existing
             let created = false
+            let promptUpdated = false
             let reference
             if (sessionId) {
               try {
@@ -5008,28 +5109,33 @@ ${SHARED_CSS}${DISPATCH_RULES}
               }
             }
             if (!sessionId) {
+              // The caller asked for an existing Session only (the page's
+              // auto-open path): a stale id reports "nothing to open" instead of
+              // creating one behind the user's back.
+              if (options.create === false) return null
               sessionId = await sessions.create(project.workspace ? { cwd: project.workspace } : {})
               created = true
               reference = sessions.retain(sessionId, { source: 'projects' })
               await reference.ready
             }
-            if (created) {
-              const result = await reference.binding.session.prompt([{ type: 'text', text: prompt }], 'queue')
+            // The prompt is sent once, when the Session is created. An existing
+            // Session keeps the rules it was born with, so a plugin upgrade would
+            // never reach it; when the recorded fingerprint differs from the
+            // current rules, append an update message instead of doing nothing.
+            // The same fingerprint sends nothing, so a board change never
+            // re-sends the rules.
+            if (created || stored !== fingerprint) {
+              const message = created ? prompt : coordinatorUpdatePrompt(prompt, fingerprint, options.locale)
+              const result = await reference.binding.session.prompt([{ type: 'text', text: message }], 'queue')
               if (!result || result.ok !== true) {
                 reference.release()
                 throw new Error(
                   (result && result.error && result.error.message) || translate('promptRejected'),
                 )
               }
+              promptUpdated = !created
             }
-            return { sessionId, reference, created }
-          },
-          retain(sessionId) {
-            const sessions = ctx.get('sessions')
-            if (!sessions || typeof sessions.retain !== 'function') {
-              throw new Error(translate('sessionUnavailable'))
-            }
-            return sessions.retain(sessionId, { source: 'projects' })
+            return { sessionId, reference, created, promptUpdated, fingerprint }
           },
           retainWorker(childSessionId, parentSessionId) {
             const sessions = ctx.get('sessions')

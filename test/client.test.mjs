@@ -68,6 +68,10 @@ const SLOT_KEYS = ['sidebar.panellist', 'main', 'projects.conversation', 'tool.c
  */
 function applyWithFakes(options = {}) {
   const undeclared = new Set(options.undeclared || [])
+  // Services the page reads through `ctx.get` — `sessions` for the coordinator
+  // flow. Everything not named here stays undefined, as on a host that lacks
+  // the service, so the "sessionUnavailable" path is still reachable.
+  const services = options.services || {}
   const registrations = []
   const dictionaries = []
   const declared = new Set(SLOT_KEYS.filter((key) => !undeclared.has(key)))
@@ -81,8 +85,8 @@ function applyWithFakes(options = {}) {
     effect(fn) {
       return fn()
     },
-    get() {
-      return undefined
+    get(name) {
+      return services[name]
     },
     locale: {
       register(namespace, dicts) {
@@ -2358,6 +2362,11 @@ function createPageHarness({ projects = [], detail = null, viewport = 0, memoryB
       // `h(Modal, { children, footer })` carries its children in props; a host
       // element carries them as positional arguments.
       const props = node.children.length > 0 ? { ...node.props, children: node.children } : node.props
+      // A class component (the error boundary around the embedded conversation)
+      // cannot be called like a function: instantiate it and render its output.
+      if (node.type.prototype && typeof node.type.prototype.render === 'function') {
+        return expand(new node.type(props).render())
+      }
       return expand(node.type(props))
     }
     return { ...node, children: flatten(node.children).map(expand) }
@@ -2625,7 +2634,7 @@ function createPageHarness({ projects = [], detail = null, viewport = 0, memoryB
 
 /** Mount the real page against the Host's stubbed routes. */
 async function mountPage(options) {
-  const { registrations } = applyWithFakes()
+  const { registrations } = applyWithFakes({ services: options.services })
   const main = registrations.find((entry) => entry.options.name === 'main')
   const page = createPageHarness(options)
   page.mount(main.component({}))
@@ -4195,4 +4204,251 @@ test('the worktree surfaces read the Host fields and stay on theme tokens', () =
   assert.match(en.worktreeIsolationHint, /git repository/)
   assert.match(zh.archiveWarning, /worktree 会被删除/)
   assert.match(en.archiveWarning, /Worktrees created for its tasks are removed/)
+})
+
+// ---------------------------------------------------------------------------
+// Coordinator rules: pushed into an existing Session when they change
+//
+// `coordinatorPrompt` used to be sent once, when the Session was created, so a
+// plugin upgrade never reached a project that already had a coordinator. The
+// page now records a fingerprint of the rules on the project and appends an
+// update message when the current rules hash to a different value.
+
+/** The client's own prompt helpers, extracted from source like the prompt tests. */
+function coordinatorSource() {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function coordinatorPrompt')
+  const end = source.indexOf('function ProjectsIcon', start)
+  assert.ok(start > 0 && end > start, 'coordinatorPrompt is followed by the icon')
+  return new Function(
+    `${source.slice(start, end)}; return { coordinatorPrompt, coordinatorRules, coordinatorPromptFingerprint, coordinatorUpdatePrompt };`,
+  )()
+}
+
+/**
+ * Stand-in for the `sessions` service. The coordinator flow creates or retains
+ * one Session and queues its prompt through the binding, so the recorder keeps
+ * every call: which Session was created or retained, and what text went into
+ * which one.
+ */
+function createSessions() {
+  const calls = []
+  const sessions = {
+    calls,
+    /** When set, `prompt` resolves with it instead of `{ ok: true }`. */
+    failPrompt: null,
+    async create(options) {
+      calls.push({ kind: 'create', options })
+      return 'sess-new'
+    },
+    retain(sessionId, options) {
+      calls.push({ kind: 'retain', sessionId, options })
+      return {
+        ready: Promise.resolve(),
+        release() {
+          calls.push({ kind: 'release', sessionId })
+        },
+        binding: {
+          session: {
+            async prompt(parts, mode) {
+              calls.push({ kind: 'prompt', sessionId, parts, mode })
+              return sessions.failPrompt || { ok: true }
+            },
+          },
+        },
+      }
+    },
+  }
+  return sessions
+}
+
+test('the rules fingerprint tracks the rules, not the board', () => {
+  const { coordinatorPrompt, coordinatorPromptFingerprint, coordinatorUpdatePrompt } = coordinatorSource()
+  const base = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', tasks: [], autonomy: 'manual' }
+  const fingerprint = coordinatorPromptFingerprint(base, 'zh')
+  assert.match(fingerprint, /^[0-9a-f]{8}$/)
+
+  // The board is not the rules: renaming the project, editing its goal or
+  // moving a task changes the prompt but must not look like a plugin upgrade,
+  // or every start would append the rules again.
+  assert.equal(coordinatorPromptFingerprint({ ...base, name: '改名', goal: '新目标' }, 'zh'), fingerprint)
+  assert.equal(
+    coordinatorPromptFingerprint({ ...base, tasks: [{ id: 't1', status: 'running', title: '跑着' }] }, 'zh'),
+    fingerprint,
+  )
+
+  // A rule change is: the autonomy rule and the language both live in the rules.
+  assert.notEqual(coordinatorPromptFingerprint({ ...base, autonomy: 'auto' }, 'zh'), fingerprint)
+  assert.notEqual(coordinatorPromptFingerprint(base, 'en'), fingerprint)
+
+  // The update message names its version and carries the whole new prompt, so
+  // the coordinator also gets a fresh board snapshot in the same message.
+  const prompt = coordinatorPrompt(base, 'zh')
+  const update = coordinatorUpdatePrompt(prompt, fingerprint, 'zh')
+  assert.ok(update.startsWith(`协调者规则已更新（版本 ${fingerprint}）`))
+  assert.ok(update.includes(prompt), 'the new prompt is attached to the note')
+  const english = coordinatorUpdatePrompt(coordinatorPrompt(base, 'en'), fingerprint, 'en')
+  assert.ok(english.startsWith(`The coordinator rules have been updated (version ${fingerprint})`))
+})
+
+test('starting the coordinator sends the prompt once and records the rules fingerprint', async (t) => {
+  const sessions = createSessions()
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: { project: { ...SAMPLE_PROJECT }, memory: SAMPLE_MEMORY },
+    services: { sessions },
+  })
+  t.after(() => page.unmount())
+
+  const start = page.byText('启动协调者')[0]
+  assert.ok(start, 'the start button is on screen when no Session exists')
+  page.click(start)
+  await page.settle()
+
+  // One Session, created in the project folder and then retained by the page.
+  assert.deepEqual(
+    sessions.calls.filter((call) => call.kind === 'create').map((call) => call.options),
+    [{ cwd: SAMPLE_PROJECT.workspace }],
+  )
+  const prompts = sessions.calls.filter((call) => call.kind === 'prompt')
+  assert.equal(prompts.length, 1)
+  assert.equal(prompts[0].sessionId, 'sess-new')
+  assert.equal(prompts[0].mode, 'queue')
+  assert.match(prompts[0].parts[0].text, /^你是 DSH 项目「示例项目」的协调者/)
+  assert.match(prompts[0].parts[0].text, /## 你的职责/)
+
+  // The board records both the Session and the fingerprint of the rules it got,
+  // so the next start has something to compare against.
+  const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
+  assert.ok(patch, 'the page patched the project')
+  assert.equal(patch.body.coordinatorSessionId, 'sess-new')
+  assert.match(patch.body.coordinatorPromptHash, /^[0-9a-f]{8}$/)
+  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '协调者会话已启动。')
+})
+
+test('an unchanged rules fingerprint sends nothing to an existing coordinator', async (t) => {
+  const { coordinatorPromptFingerprint } = coordinatorSource()
+  const sessions = createSessions()
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: {
+      project: {
+        ...SAMPLE_PROJECT,
+        coordinatorSessionId: 'sess-1',
+        coordinatorPromptHash: coordinatorPromptFingerprint(SAMPLE_PROJECT, 'zh'),
+      },
+      memory: SAMPLE_MEMORY,
+    },
+    services: { sessions },
+  })
+  t.after(() => page.unmount())
+
+  // Opening the project reopens the conversation; the rules it already has are
+  // the current rules, so nothing is queued and nothing is rewritten.
+  assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
+  const retain = sessions.calls.find((call) => call.kind === 'retain')
+  assert.ok(retain, 'the existing Session is retained')
+  assert.equal(retain.sessionId, 'sess-1')
+  assert.deepEqual(sessions.calls.filter((call) => call.kind === 'prompt'), [])
+  assert.equal(
+    page.requests.filter((request) => request.method === 'PATCH').length,
+    0,
+    'nothing new to record',
+  )
+  assert.equal(page.byText('启动协调者').length, 0, 'the conversation is open, not the start button')
+})
+
+test('a changed rules fingerprint appends the new rules to the existing coordinator', async (t) => {
+  const { coordinatorPrompt, coordinatorPromptFingerprint } = coordinatorSource()
+  const current = coordinatorPromptFingerprint(SAMPLE_PROJECT, 'zh')
+  const sessions = createSessions()
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: {
+      project: {
+        ...SAMPLE_PROJECT,
+        coordinatorSessionId: 'sess-1',
+        // What a previous plugin version recorded: stale by definition.
+        coordinatorPromptHash: 'deadbeef',
+      },
+      memory: SAMPLE_MEMORY,
+    },
+    services: { sessions },
+  })
+  t.after(() => page.unmount())
+
+  // One message, queued into the existing Session — an append, not a new
+  // Session and not a replacement of the transcript.
+  const prompts = sessions.calls.filter((call) => call.kind === 'prompt')
+  assert.equal(prompts.length, 1)
+  assert.equal(prompts[0].sessionId, 'sess-1')
+  assert.equal(prompts[0].mode, 'queue')
+  const text = prompts[0].parts[0].text
+  assert.ok(text.startsWith(`协调者规则已更新（版本 ${current}）`))
+  assert.ok(text.includes(coordinatorPrompt(SAMPLE_PROJECT, 'zh')), 'the new prompt is attached')
+  assert.match(text, /## 你的职责/)
+  assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
+
+  // The new fingerprint replaces the stale one; the Session id is untouched.
+  const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
+  assert.ok(patch, 'the page recorded the new fingerprint')
+  assert.deepEqual(patch.body, { coordinatorPromptHash: current })
+  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '协调者规则已更新，已推送到这个会话。')
+})
+
+test('a rejected rules update is not recorded, so the next start retries it', async (t) => {
+  const sessions = createSessions()
+  sessions.failPrompt = { ok: false, error: { message: 'session is archived' } }
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: {
+      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorPromptHash: 'deadbeef' },
+      memory: SAMPLE_MEMORY,
+    },
+    services: { sessions },
+  })
+  t.after(() => page.unmount())
+
+  // The message never landed, so the stale fingerprint stays on the board and
+  // the conversation stays closed: the start button is the retry path.
+  assert.equal(sessions.calls.filter((call) => call.kind === 'prompt').length, 1)
+  assert.equal(page.requests.filter((request) => request.method === 'PATCH').length, 0)
+  assert.equal(page.byText('启动协调者').length, 1, 'the start button is the retry path')
+})
+
+test('the start button retries a rules update the page could not push on open', async (t) => {
+  const { coordinatorPromptFingerprint } = coordinatorSource()
+  const current = coordinatorPromptFingerprint(SAMPLE_PROJECT, 'zh')
+  const sessions = createSessions()
+  sessions.failPrompt = { ok: false, error: { message: 'session is archived' } }
+  const page = await mountPage({
+    projects: [{ ...SAMPLE_PROJECT }],
+    detail: {
+      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorPromptHash: 'deadbeef' },
+      memory: SAMPLE_MEMORY,
+    },
+    services: { sessions },
+  })
+  t.after(() => page.unmount())
+
+  // The auto-open push failed, so the conversation stayed closed and nothing was
+  // recorded; the start button is the retry path.
+  assert.equal(page.byText('启动协调者').length, 1)
+  assert.equal(page.requests.filter((request) => request.method === 'PATCH').length, 0)
+
+  sessions.failPrompt = null
+  page.click(page.byText('启动协调者')[0])
+  await page.settle()
+
+  // The retry appends the update to the same Session (never a new one) and
+  // records the fingerprint it now has.
+  const prompts = sessions.calls.filter((call) => call.kind === 'prompt')
+  assert.equal(prompts.length, 2)
+  assert.equal(prompts[1].sessionId, 'sess-1')
+  assert.ok(prompts[1].parts[0].text.startsWith(`协调者规则已更新（版本 ${current}）`))
+  assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
+  const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
+  assert.ok(patch, 'the retry recorded the new fingerprint')
+  assert.deepEqual(patch.body, { coordinatorPromptHash: current })
+  assert.equal(page.textOf(page.byClass('pj-notice')[0]), '协调者规则已更新，已推送到这个会话。')
 })

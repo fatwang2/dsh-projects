@@ -124,6 +124,11 @@ function applyWithFakes(options = {}) {
 before(async () => {
   globalThis.window = {
     navigator: { language: 'zh-CN' },
+    // The page's menus and dialogs attach dismissal listeners to the window;
+    // the harness only needs the registration to succeed. There is deliberately
+    // no `localStorage`, so stored preferences fall back to their defaults.
+    addEventListener() {},
+    removeEventListener() {},
     __ModuleLoader__: {
       load(value) {
         registration = value
@@ -541,9 +546,14 @@ test('both dictionaries carry the same keys and no add-task surface', () => {
     assert.equal(retired in en, false, `EN still has ${retired}`)
     assert.equal(retired in zh, false, `ZH still has ${retired}`)
   }
-  // `done` is no longer a status; completion is the human-owned `resolved`.
+  // `done` is no longer a status; completion is the status value `resolved`,
+  // which the pill, the groups and the counts line all label.
   assert.equal('done' in en, false)
   assert.equal('done' in zh, false)
+  for (const key of ['queued', 'running', 'review', 'failed', 'blocked', 'resolved']) {
+    assert.equal(typeof en[key], 'string', `EN is missing the status label ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing the status label ${key}`)
+  }
 
   // The empty state points at the coordinator instead of an inline form.
   assert.match(en.emptyTasks, /coordinator/i)
@@ -593,7 +603,7 @@ test('both dictionaries carry the same keys and no add-task surface', () => {
   assert.notEqual(translate('resolve'), 'resolve')
 })
 
-test('the task list is a read-only row and status is never written', () => {
+test('the task list is a read-only row and the only task write is the status toggle', () => {
   const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
 
   // No add-task handler, state or POST to the tasks route.
@@ -601,16 +611,20 @@ test('the task list is a read-only row and status is never written', () => {
   assert.doesNotMatch(source, /\bshowNewTask\b/)
   assert.doesNotMatch(source, /\bnewTask\b/)
 
-  // Every task write goes through patchTask, and none of them carries a status.
-  // The Host rejects any task PATCH field other than `resolved`, so the page
-  // must not even try to write `approved` (the coordinator owns that flag).
+  // Every task write goes through patchTask, and the only field it may carry is
+  // `status` — the Host's PATCH accepts nothing else from the page, and only
+  // the two values `resolved` / `review`. `approved` has its own route.
   const patches = [...source.matchAll(/patchTask\([^)]*\)/g)].map((match) => match[0])
   assert.ok(patches.length >= 1, 'the detail page keeps its resolve control')
   for (const call of patches) {
-    assert.doesNotMatch(call, /status/, `a task patch writes status: ${call}`)
     assert.doesNotMatch(call, /approved/, `a task patch writes approved: ${call}`)
+    assert.doesNotMatch(call, /resolved: /, `a task patch writes the retired boolean: ${call}`)
   }
-  assert.match(source, /toggleResolved[\s\S]{0,120}resolved: !task\.resolved/)
+  assert.match(
+    source,
+    /toggleResolved[\s\S]{0,160}patchTask\(task\.id, \{ status: task\.status === 'resolved' \? 'review' : 'resolved' \}\)/,
+    'the toggle writes status resolved / review, never a boolean',
+  )
 
   // Approval has its own narrow Host route: it never rides the task PATCH, and
   // the returned task is folded back into the board.
@@ -630,6 +644,12 @@ test('the task list is a read-only row and status is never written', () => {
   assert.doesNotMatch(source, /['"]done['"]/)
   assert.doesNotMatch(source, /pj-pill-done/)
   assert.doesNotMatch(source, /pj-task-title/)
+
+  // Nothing reads the retired `resolved` boolean off a task any more: the one
+  // status enum answers "is this task accepted?".
+  assert.doesNotMatch(source, /task\.resolved|execTask\?*\.resolved/)
+  assert.match(source, /task\.status === 'resolved'/)
+  assert.match(source, /execTask\?\.status === 'resolved'/)
 
   // One thread card = group glyph + title line (with a relative time) + a
   // one-line summary + optional chips, and no controls at all.
@@ -938,13 +958,18 @@ test('the panel groups threads into five fixed sections in reference order', () 
   assert.match(block, /statuses: \['blocked', 'failed'\]/, 'failed waits on the human too')
   assert.match(block, /statuses: \['queued'\]/)
   assert.match(block, /key: 'resolved', icon: 'none'/, 'Resolved carries no glyph')
+  // `resolved` is a status value, so the group claims it like every other group
+  // claims its own statuses instead of outranking them from outside the enum.
+  assert.match(block, /key: 'resolved', icon: 'none', titleKey: 'groupResolved', statuses: \['resolved'\]/)
 
-  // The human verdict outranks the system state.
+  // Bucketing reads `status` and nothing else: one enum, one bucket per task.
   const bucket = source.slice(
     source.indexOf('function threadGroups'),
     source.indexOf('function threadIconOf'),
   )
-  assert.match(bucket, /if \(task\.resolved\) \{[\s\S]{0,120}buckets\.get\('resolved'\)\.push\(task\)/)
+  assert.match(bucket, /THREAD_GROUPS\.find\(\(entry\) => entry\.statuses\.includes\(task\.status\)\)/)
+  assert.doesNotMatch(bucket, /task\.resolved/)
+  assert.doesNotMatch(bucket, /buckets\.get\('resolved'\)\.push\(task\)/)
 
   // Only Resolved starts folded, and the folded set persists.
   assert.match(source, /const DEFAULT_COLLAPSED = \{ resolved: true \}/)
@@ -1833,18 +1858,34 @@ function createPageHarness({ projects = [], detail = null } = {}) {
     flush()
   }
 
-  // The Host's read-only routes, keyed by the path the page asks for.
+  // The Host's routes, keyed by the path the page asks for. A write is recorded
+  // and applied to the in-memory board, so the page's follow-up refresh reads
+  // the new state back — the same round trip the real Host performs.
   const routes = {
     '/projects': { projects },
     '/models': SAMPLE_MODELS,
   }
   if (detail) routes[`/projects/${detail.project.id}`] = detail
+  const requests = []
   const originalFetch = globalThis.fetch
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
     const path = String(url).replace('/projects-api', '')
-    const body = routes[path]
-    if (body === undefined) return { ok: false, status: 404, json: async () => ({ error: 'not_found' }) }
-    return { ok: true, status: 200, json: async () => body }
+    const method = (init && init.method) || 'GET'
+    const body = init && typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+    requests.push({ method, path, body })
+    if (method !== 'GET') {
+      const match = /^\/projects\/([^/]+)\/tasks\/([^/]+)(\/approve)?$/.exec(path)
+      const board = match ? routes[`/projects/${match[1]}`] : undefined
+      const task = board && (board.project.tasks || []).find((entry) => entry.id === match[2])
+      if (!task) return { ok: false, status: 404, json: async () => ({ error: 'not_found' }) }
+      // The approve route takes no body; the task PATCH takes the status.
+      if (match[3]) task.approved = true
+      else Object.assign(task, body || {})
+      return { ok: true, status: 200, json: async () => ({ task }) }
+    }
+    const payload = routes[path]
+    if (payload === undefined) return { ok: false, status: 404, json: async () => ({ error: 'not_found' }) }
+    return { ok: true, status: 200, json: async () => payload }
   }
 
   const nodes = (from) => {
@@ -1906,6 +1947,8 @@ function createPageHarness({ projects = [], detail = null } = {}) {
       reactImpl = DEFAULT_REACT
     },
     tree: () => tree,
+    /** Every `/projects-api` call the page made, in order: `{ method, path, body }`. */
+    requests,
     nodes,
     textOf,
     byClass,
@@ -1913,6 +1956,13 @@ function createPageHarness({ projects = [], detail = null } = {}) {
     byLabel,
     byText,
     byDrag,
+    /** The Threads group whose header label starts with `name` (`'已解决'`). */
+    groupNamed(name) {
+      return byClass('pj-group').find((group) => {
+        const label = byClass('pj-group-label', group)[0]
+        return label && textOf(label).startsWith(name)
+      })
+    },
     click(node) {
       assert.equal(typeof node.props.onClick, 'function', 'the clicked node is a control')
       node.props.onClick({ preventDefault() {}, stopPropagation() {} })
@@ -2079,4 +2129,201 @@ test('the two column heads share one height, and the search row clears the divid
 
   // The search field is no longer flush against the head's bottom border.
   assert.match(source, /\.pj-exec-tools\{[^}]*padding:12px 14px 10px\}/)
+})
+
+// ---------------------------------------------------------------------------
+// The one status enum
+//
+// `resolved` is a status value, not a second boolean. These tests drive the
+// real page: a click is an `onClick`, the PATCH body is what the page would
+// send, and the board the follow-up refresh reads back is the Host's answer.
+
+test('the resolve toggle writes status resolved / review, never the retired boolean', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [{ id: 't1', title: '写测试', brief: '写一个测试', output: '', status: 'review' }],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  // Open the task's detail pane: its header owns the resolve toggle.
+  page.click(page.byClass('pj-task-row')[0])
+  await page.settle()
+
+  const toggle = page.byLabel('解决')[0]
+  assert.ok(toggle, 'the header renders the resolve control')
+  assert.equal(toggle.props['aria-pressed'], 'false')
+  page.click(toggle)
+  await page.settle()
+
+  const patches = page.requests.filter((entry) => entry.method === 'PATCH')
+  assert.equal(patches.length, 1, 'one click is one PATCH')
+  assert.equal(patches[0].path, '/projects/p1/tasks/t1')
+  assert.deepEqual(
+    patches[0].body,
+    { status: 'resolved' },
+    'the body is the status enum, not the retired resolved boolean',
+  )
+
+  // The board came back resolved, and every surface reads the one status value:
+  // the pill, the badge and the toggle.
+  assert.equal(page.textOf(page.byClass('pj-pill-resolved')[0]), '已解决')
+  assert.ok(
+    page.byClass('pj-badge').some((node) => page.textOf(node) === '已解决'),
+    'the resolved badge follows status === resolved',
+  )
+  const back = page.byLabel('取消解决')[0]
+  assert.ok(back, 'the same control now offers to take the acceptance back')
+  assert.equal(back.props['aria-pressed'], 'true')
+
+  // The second press writes `review`: that is how the page un-accepts a task.
+  page.click(back)
+  await page.settle()
+  const second = page.requests.filter((entry) => entry.method === 'PATCH')[1]
+  assert.deepEqual(second.body, { status: 'review' })
+  assert.equal(page.byLabel('解决')[0].props['aria-pressed'], 'false')
+  assert.equal(page.byClass('pj-pill-resolved').length, 0)
+})
+
+test('the row context menu resolves and unresolves through the status enum', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [{ id: 't1', title: '写测试', brief: '', output: '', status: 'review' }],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  const openMenu = () => {
+    const row = page.byClass('pj-task-row')[0]
+    assert.ok(row, 'the task card is on the board')
+    row.props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 8, clientY: 8 })
+  }
+
+  openMenu()
+  const menu = page.byClass('pj-menu')[0]
+  assert.ok(menu, 'the right-click menu opened')
+  page.click(page.byText('解决', menu)[0])
+  await page.settle()
+  assert.deepEqual(page.requests.filter((entry) => entry.method === 'PATCH')[0].body, {
+    status: 'resolved',
+  })
+
+  // The card moved into the folded Resolved group; unfold it and the menu now
+  // offers the inverse action for the same status value.
+  const resolvedGroup = page.groupNamed('已解决')
+  assert.ok(resolvedGroup, 'the resolved bucket exists')
+  page.click(page.byClass('pj-group-title', resolvedGroup)[0])
+  openMenu()
+  const reopened = page.byClass('pj-menu')[0]
+  assert.ok(reopened, 'the menu opened on the resolved card')
+  page.click(page.byText('取消解决', reopened)[0])
+  await page.settle()
+  assert.deepEqual(page.requests.filter((entry) => entry.method === 'PATCH')[1].body, {
+    status: 'review',
+  })
+})
+
+test('the panel buckets tasks by status, so resolved is one bucket', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    tasks: [
+      { id: 't1', title: '待验收的', status: 'review' },
+      { id: 't2', title: '已验收的', status: 'resolved' },
+      { id: 't3', title: '排队中的', status: 'queued' },
+    ],
+  }
+  const page = await mountPage({
+    projects: [project],
+    detail: { project, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  // Empty groups are hidden; the three populated ones carry their own count.
+  assert.deepEqual(
+    page.byClass('pj-group-label').map((node) => page.textOf(node)),
+    ['待验收 · 1', '空闲 · 1', '已解决 · 1'],
+  )
+
+  const groupNamed = (name) => {
+    const group = page.groupNamed(name)
+    assert.ok(group, `the ${name} group rendered`)
+    return group
+  }
+  assert.equal(
+    page.byClass('pj-task-row', groupNamed('已解决')).length,
+    0,
+    'Resolved starts folded',
+  )
+
+  // Unfolded, the resolved task is the only card in Resolved, and the review
+  // group holds only the review task: one status, one bucket.
+  page.click(page.byClass('pj-group-title', groupNamed('已解决'))[0])
+  const resolvedCards = page.byClass('pj-task-row', groupNamed('已解决'))
+  assert.equal(resolvedCards.length, 1)
+  assert.equal(page.textOf(page.byClass('pj-task-name', resolvedCards[0])[0]), '已验收的')
+  const reviewCards = page.byClass('pj-task-row', groupNamed('待验收'))
+  assert.deepEqual(
+    reviewCards.map((card) => page.textOf(page.byClass('pj-task-name', card)[0])),
+    ['待验收的'],
+  )
+})
+
+test('the sidebar tally counts resolved tasks, the way the panel buckets them', async (t) => {
+  const project = {
+    ...SAMPLE_PROJECT,
+    counts: { queued: 0, running: 0, review: 1, failed: 0, blocked: 0, resolved: 2 },
+    tasks: [
+      { id: 't1', title: '待验收的', status: 'review' },
+      { id: 't2', title: '已验收的', status: 'resolved' },
+      { id: 't3', title: '也验收了', status: 'resolved' },
+    ],
+  }
+  // A board whose only work was accepted reads as accepted, not as a bare
+  // total: the fallback branch is for an empty tally, not for resolved work.
+  const acceptedOnly = {
+    ...SAMPLE_PROJECT,
+    id: 'p2',
+    name: '全部完成',
+    counts: { queued: 0, running: 0, review: 0, failed: 0, blocked: 0, resolved: 3 },
+    tasks: [],
+  }
+  const page = await mountPage({
+    projects: [project, acceptedOnly],
+    detail: { project, memory: SAMPLE_MEMORY },
+  })
+  t.after(() => page.unmount())
+
+  assert.deepEqual(
+    page.byClass('pj-list-meta').map((node) => page.textOf(node)),
+    ['1 待验收 · 2 已解决', '3 已解决'],
+  )
+  // The panel agrees with the sidebar: the same two tasks are in Resolved.
+  const resolvedHeader = page
+    .byClass('pj-group-label')
+    .find((node) => page.textOf(node).startsWith('已解决'))
+  assert.equal(page.textOf(resolvedHeader), '已解决 · 2')
+})
+
+test('the status pill covers resolved with its own label and theme colour', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // A pill rule per status value, `resolved` included: accepted work reads as
+  // done (success), not as something still waiting on the human (warn).
+  const rule = source.match(/\.pj-pill-resolved\{[^}]*\}/)
+  assert.ok(rule, 'the resolved pill has its own rule')
+  assert.match(rule[0], /var\(--dsw-alias-state-success-primary\)/)
+  assert.doesNotMatch(rule[0], /#[0-9a-fA-F]{3,8}\b|rgba?\(/, 'theme tokens only')
+
+  // The dispatch card's resolved chip reads the status too, not a boolean.
+  const cardStart = source.indexOf('function ProjectsDispatchRow')
+  const cardEnd = source.indexOf('/** Contain a failing embedded conversation', cardStart)
+  const card = source.slice(cardStart, cardEnd)
+  assert.match(card, /task\.status === 'resolved'/)
+  assert.doesNotMatch(card, /task\.resolved/)
 })

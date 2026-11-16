@@ -10,9 +10,13 @@
  * The page is a viewer and a human control surface: it creates projects,
  * approves tasks for dispatch, resolves finished work, edits the shared memory
  * and reads worker output. Tasks themselves are derived by the coordinator
- * through the `projects_add_task` tool, and `task.status` is system-owned: the
- * page renders it and never writes it. The only task field a human writes is
- * `resolved`.
+ * through the `projects_add_task` tool.
+ *
+ * `task.status` is the one task-status enum (`queued | running | review |
+ * failed | blocked | resolved`) and the page writes exactly one field of it:
+ * `status`, and only two of its values — `resolved` accepts the work, `review`
+ * takes that acceptance back. There is no second `resolved` boolean; a task is
+ * in exactly one bucket, so the sidebar tally and the Resolved group agree.
  */
 
 window.__ModuleLoader__.load({
@@ -102,6 +106,7 @@ window.__ModuleLoader__.load({
       review: 'Ready for review',
       failed: 'Failed',
       blocked: 'Blocked',
+      resolved: 'Resolved',
       status: 'Status',
       delete: 'Delete',
       error: 'Something went wrong',
@@ -232,6 +237,7 @@ window.__ModuleLoader__.load({
       review: '待验收',
       failed: '失败',
       blocked: '受阻',
+      resolved: '已解决',
       status: '状态',
       delete: '删除',
       error: '出错了',
@@ -311,6 +317,10 @@ window.__ModuleLoader__.load({
 .pj-pill-review{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, transparent);color:var(--dsw-alias-state-warn-primary)}
 .pj-pill-failed{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);color:var(--dsw-alias-state-error-primary)}
 .pj-pill-blocked{background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent);color:var(--dsw-alias-state-warn-primary);border:1px dashed color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent)}
+/* resolved is a status like the others, so it gets its own pill rule rather
+   than borrowing review: accepted work reads as done (success), not as
+   something still waiting on the human. */
+.pj-pill-resolved{background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent);color:var(--dsw-alias-state-success-primary)}
 `
 
     /** The dispatch card's own rules; the board sheet interpolates them too. */
@@ -740,16 +750,17 @@ ${SHARED_CSS}${DISPATCH_RULES}
     // Threads panel helpers
     //
     // The right column is a Threads panel: five fixed groups, one card per task
-    // with a title line, a one-line summary and optional chips. Everything here
-    // is display-only; no helper reads or writes `task.status`.
+    // with a title line, a one-line summary and optional chips. The groups are
+    // a partition of the one status enum, so every task lands in exactly one of
+    // them and the panel cannot disagree with the sidebar tally.
 
-    /** The five groups, in render order. `resolved` outranks every status. */
+    /** The five groups, in render order: one slice of the status enum each. */
     const THREAD_GROUPS = [
       { key: 'running', icon: 'spinner', titleKey: 'groupRunning', statuses: ['running'] },
       { key: 'review', icon: 'review', titleKey: 'groupReview', statuses: ['review'] },
       { key: 'waiting', icon: 'waiting', titleKey: 'groupWaiting', statuses: ['blocked', 'failed'] },
       { key: 'idle', icon: 'idle', titleKey: 'groupIdle', statuses: ['queued'] },
-      { key: 'resolved', icon: 'none', titleKey: 'groupResolved', statuses: [] },
+      { key: 'resolved', icon: 'none', titleKey: 'groupResolved', statuses: ['resolved'] },
     ]
 
     /** The first non-empty line of a text, stripped of light markdown noise. */
@@ -917,16 +928,13 @@ ${SHARED_CSS}${DISPATCH_RULES}
     }
 
     /**
-     * Bucket tasks into the five groups. A resolved task lands in `Resolved`
-     * whatever its status is: the human verdict outranks the system state.
+     * Bucket tasks into the five groups. `status` is the only input: `resolved`
+     * is one of its values, so accepted work lands in `Resolved` and nowhere
+     * else, exactly where the sidebar's `counts.resolved` counts it.
      */
     function threadGroups(tasks) {
       const buckets = new Map(THREAD_GROUPS.map((group) => [group.key, []]))
       for (const task of tasks) {
-        if (task.resolved) {
-          buckets.get('resolved').push(task)
-          continue
-        }
         const group = THREAD_GROUPS.find((entry) => entry.statuses.includes(task.status))
         if (group) buckets.get(group.key).push(task)
       }
@@ -935,9 +943,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
 
     /** The glyph a card shows: the same one its group carries. */
     function threadIconOf(task) {
-      if (task.resolved) return 'none'
-      const group = THREAD_GROUPS.find((entry) => entry.statuses.includes(task.status))
-      return group ? group.icon : 'none'
+      return threadIconForStatus(task.status)
     }
 
     /** The glyph for a bare status, when no task record is loaded yet. */
@@ -1066,9 +1072,16 @@ ${SHARED_CSS}${DISPATCH_RULES}
       return parts.join(' · ')
     }
 
+    /**
+     * The left column's one-line tally, read straight from the Host's
+     * `counts` object. `resolved` is a status, so it is listed like the others:
+     * the sidebar and the Threads panel bucket a task the same way, and a board
+     * the panel shows as "Resolved · 37" can no longer read "36 ready for
+     * review" here.
+     */
     function countsLine(project, t) {
       const counts = project.counts || {}
-      const parts = ['running', 'review', 'queued', 'failed', 'blocked']
+      const parts = ['running', 'review', 'queued', 'failed', 'blocked', 'resolved']
         .filter((status) => (counts[status] || 0) > 0)
         .map((status) => `${counts[status]} ${t(status)}`)
       if (parts.length) return parts.join(' · ')
@@ -1083,10 +1096,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
       const tasks = project.tasks || []
       const taskLines = tasks.length
         ? tasks
-            .map(
-              (task) =>
-                `- ${task.id} [${task.status}${task.resolved ? ', resolved' : ''}] ${task.title}`,
-            )
+            .map((task) => `- ${task.id} [${task.status}] ${task.title}`)
             .join('\n')
         : zh
           ? '(还没有任务)'
@@ -1109,7 +1119,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
           '3. 用 projects_dispatch 派发任务；派发后继续响应用户，不要等待。',
           '4. 执行者交回结果后，用 projects_get 查看产出，用一两句话向用户汇报结论，并请用户在项目页验收。',
           '5. 用 projects_memory 维护共享记忆，让所有执行者共享结论。',
-          '6. 任务是否完成由人 resolve，你不要改 task.status，也不要替用户宣布任务已完成。',
+          '6. 任务是否完成由人验收：只有用户明确表示通过时，你才用 projects_update_task 把状态设为 resolved；不要替用户宣布任务已完成。',
           project.autonomy === 'manual'
             ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
             : '7. 当前自主程度是自动：你可以直接派发任务。',
@@ -1139,7 +1149,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
         '3. Use projects_dispatch to start tasks; stay responsive instead of waiting.',
         '4. When a worker reports back, use projects_get to read its output, report the conclusion to the user in a sentence or two, and ask the user to review it on the Projects page.',
         '5. Keep shared knowledge in projects_memory so every worker starts informed.',
-        '6. The human resolves tasks; never write task.status and never declare a task complete on the user\'s behalf.',
+        '6. The human accepts tasks: set status "resolved" with projects_update_task only when the user says so, and never declare a task complete on the user\'s behalf.',
         project.autonomy === 'manual'
           ? '7. Autonomy is manual: get the user\'s explicit go-ahead in this conversation, mark the task approved with projects_update_task, then dispatch.'
           : '7. Autonomy is auto: you may dispatch without waiting for approval.',
@@ -1666,8 +1676,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
      *
      * The card is the only button and carries no other control: it shows the
      * task the call dispatched and opens that task's conversation in the
-     * board's right column. It reads, never writes — `task.status` stays
-     * system-owned, so the pill is display-only.
+     * board's right column. It reads, never writes — the pill and the badge
+     * only display `task.status`, which the human accepts elsewhere.
      *
      * The call's arguments arrive lazily and may still be streaming, so every
      * read is total: a missing `task_id` degrades to the "dispatching" label
@@ -1723,7 +1733,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
         h('span', { className: 'pj-dispatch-name' }, title),
         stamp ? h('span', { className: 'pj-dispatch-time' }, stamp) : null,
         h(StatusPill, { status, t }),
-        task && task.resolved ? h('span', { className: 'pj-chip' }, t('resolvedBadge')) : null,
+        task && task.status === 'resolved' ? h('span', { className: 'pj-chip' }, t('resolvedBadge')) : null,
       ].filter(Boolean)
       return h(
         'div',
@@ -2194,6 +2204,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
       // The open detail pane follows the polled board, so a status change or a
       // late output shows up without reopening the task.
       const execTask = execTarget ? taskList.find((task) => task.id === execTarget.taskId) || null : null
+      // The header's resolve control is a toggle over one status value: the
+      // filled glyph and the "unresolve" label both mean `status === 'resolved'`.
+      const execAccepted = execTask?.status === 'resolved'
       const execTitle = execTask?.title || execTarget?.title || ''
       // The detail header's one secondary line: the model and reasoning effort
       // a dispatch would use right now (task override, else project default,
@@ -2370,9 +2383,11 @@ ${SHARED_CSS}${DISPATCH_RULES}
           return ''
         })
 
-      // `resolved` is the only task field the task PATCH accepts; status is
-      // system-owned and approval has its own narrow route below.
-      const toggleResolved = (task) => patchTask(task.id, { resolved: !task.resolved })
+      // `status` is the only task field the task PATCH accepts, and only two of
+      // its values: `resolved` accepts the work, `review` takes that acceptance
+      // back. Approval has its own narrow route below.
+      const toggleResolved = (task) =>
+        patchTask(task.id, { status: task.status === 'resolved' ? 'review' : 'resolved' })
 
       // Fold one authoritative task returned by the Host back into the board so
       // the badge flips without waiting for the next poll.
@@ -2384,7 +2399,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
         })
 
       // Approval is its own Host route (`POST .../tasks/:taskId/approve`, no
-      // body, idempotent): the task PATCH rejects every field but `resolved`.
+      // body, idempotent): the task PATCH rejects every field but `status`.
       const approveTask = (task) =>
         run(async () => {
           const data = await api(`/projects/${projectId}/tasks/${task.id}/approve`, { method: 'POST' })
@@ -3050,11 +3065,14 @@ ${SHARED_CSS}${DISPATCH_RULES}
           setMenu(null)
           void deleteTask(task.id, { archive: true })
         }
+        // `resolved` is a status value now, so the row's label and its filled
+        // glyph both read the same field the PATCH writes.
+        const accepted = task.status === 'resolved'
         const entries = [
           {
             key: 'resolve',
-            icon: h(ResolveIcon, { done: Boolean(task.resolved) }),
-            label: task.resolved ? t('unresolve') : t('resolve'),
+            icon: h(ResolveIcon, { done: accepted }),
+            label: accepted ? t('unresolve') : t('resolve'),
             onSelect: () => {
               setMenu(null)
               void toggleResolved(task)
@@ -3338,9 +3356,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
             : h('div', { className: 'pj-empty' }, t('noConversation')),
         )
 
-      // Five fixed groups, in reference order. A resolved task always lands in
-      // `Resolved`, whatever its system state is. The search box filters on the
-      // title and the one-line summary before the bucketing happens.
+      // Five fixed groups, in reference order: each one is a slice of the status
+      // enum, so a task lands in exactly one and `resolved` is simply its last
+      // bucket. The search box filters on the title and the one-line summary
+      // before the bucketing happens.
       const needle = query.trim().toLowerCase()
       const visibleTasks = needle
         ? taskList.filter((task) =>
@@ -3601,15 +3620,15 @@ ${SHARED_CSS}${DISPATCH_RULES}
                       h(
                         'button',
                         {
-                          className: `pj-icon-btn${execTask.resolved ? ' pj-on' : ''}`,
+                          className: `pj-icon-btn${execAccepted ? ' pj-on' : ''}`,
                           type: 'button',
                           disabled: busy,
-                          title: execTask.resolved ? t('unresolve') : t('resolve'),
-                          'aria-label': execTask.resolved ? t('unresolve') : t('resolve'),
-                          'aria-pressed': execTask.resolved ? 'true' : 'false',
+                          title: execAccepted ? t('unresolve') : t('resolve'),
+                          'aria-label': execAccepted ? t('unresolve') : t('resolve'),
+                          'aria-pressed': execAccepted ? 'true' : 'false',
                           onClick: () => void toggleResolved(execTask),
                         },
-                        h(ResolveIcon, { done: Boolean(execTask.resolved) }),
+                        h(ResolveIcon, { done: execAccepted }),
                       ),
                     execTask &&
                       project &&
@@ -3634,7 +3653,7 @@ ${SHARED_CSS}${DISPATCH_RULES}
                       execMeta &&
                         h('span', { className: 'pj-detail-meta-text', title: execMetaTitle }, execMeta),
                       execTask?.approved && h('span', { className: 'pj-badge' }, t('approvedBadge')),
-                      execTask?.resolved && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
+                      execAccepted && h('span', { className: 'pj-badge' }, t('resolvedBadge')),
                       h('span', { className: 'pj-spacer' }),
                       execTarget.sessionId &&
                         h(

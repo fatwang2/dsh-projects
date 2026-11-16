@@ -1,9 +1,18 @@
 {
   "name": "@fatwang2/dsh-projects",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "type": "module",
   "description": "Adds a Projects board to the left sidebar. One goal, many parallel tasks: a coordinator splits the work, workers run each task in the project folder, and you review the results.",
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "projects", "task-board", "orchestration", "multi-agent", "worktree"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "projects",
+    "task-board",
+    "orchestration",
+    "multi-agent",
+    "worktree"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fatwang2/dsh-projects.git"

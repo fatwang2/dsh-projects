@@ -10,7 +10,7 @@
  *
  * Dispatch is the coordinator/worker seam: `projects_dispatch` starts a local
  * subagent (the worker) with a prompt composed from the project instructions,
- * the shared memory and the task brief. The worker runs in the project
+ * an index of the shared memory and the task brief. The worker runs in the project
  * workspace; `subagent/end` writes its final message back onto the task as the
  * delivered output. The coordinator never executes a task itself.
  *
@@ -31,10 +31,32 @@ const BODY_LIMIT = 2 * 1024 * 1024
 const MAX_GOAL = 16_000
 const MAX_BRIEF = 8_000
 const MAX_OUTPUT = 4_000
+/**
+ * Healthy size of the shared memory. Appends past this still succeed — silently
+ * dropping a worker's findings would be worse than a fat file — but the tool
+ * result says so, so the coordinator can compress instead of growing it forever.
+ */
+const MEMORY_BUDGET = 64_000
+/**
+ * Absolute ceiling for one write. This is a runaway guard, not the budget: it
+ * has to stay above whatever is already on disk, because slicing a file at a
+ * value below its current size would delete stored memory. The page round-trips
+ * the whole memory through `POST /projects/:id/memory`, so a ceiling under the
+ * current size would also make the memory editor unsaveable.
+ */
 const MAX_MEMORY = 200_000
+/**
+ * Hard cap on the memory index injected into a worker prompt. The prompt has to
+ * stay small no matter how large the memory grows, so the index is truncated
+ * rather than the prompt.
+ */
+const MEMORY_INDEX_LIMIT = 2_000
+/** The same index for the tool: the discovery path may be a little longer. */
+const MEMORY_INDEX_TOOL_LIMIT = 8_000
 const MAX_TASKS = 200
 const MAX_MODEL = 200
 const MAX_PRESET = 120
+const MAX_EFFORT = 60
 /**
  * Upper bound on `project.concurrency`, the number of workers this plugin will
  * admit at once for one project. Kept as one constant so the clamp, the update
@@ -123,6 +145,22 @@ function presetValue(value) {
 }
 
 /**
+ * A stored reasoning effort. Efforts are *provider-owned opaque ids* — the LLM
+ * layer brands them `ReasoningEffortId` but never enumerates them globally, so
+ * this is deliberately a free string, not a fixed enum: DeepSeek advertises
+ * `off|low|high|max`, another adapter may advertise `minimal|medium|xhigh`.
+ * Empty means "let the provider apply its own default", so a non-string or blank
+ * value normalizes to '' rather than to a bogus level.
+ *
+ * The page learns the legal values per model from `GET /projects-api/models`
+ * (`models[].efforts`); dispatch does not pre-validate, because the catalog is
+ * advisory and a stale list must not block a dispatch the provider would accept.
+ */
+function effortValue(value) {
+  return text(value, MAX_EFFORT).trim()
+}
+
+/**
  * Translate a stored selection into the `agentOptions` route the subagent
  * service expects. The first `/` separates provider from model, so a model id
  * that itself contains a slash (`siliconflow/deepseek-ai/DeepSeek-V3`) survives
@@ -175,6 +213,7 @@ function normalizeTask(raw) {
     // mean "use the host default"; dispatch resolves the chain.
     model: modelValue(raw.model),
     agentPreset: presetValue(raw.agentPreset),
+    reasoningEffort: effortValue(raw.reasoningEffort),
     createdAt: Number(raw.createdAt) || Date.now(),
     updatedAt: Number(raw.updatedAt) || Date.now(),
   }
@@ -200,6 +239,7 @@ function normalizeProject(raw) {
     // host default; a task may override it.
     model: modelValue(raw.model),
     agentPreset: presetValue(raw.agentPreset),
+    reasoningEffort: effortValue(raw.reasoningEffort),
     ...(typeof raw.coordinatorSessionId === 'string' && raw.coordinatorSessionId
       ? { coordinatorSessionId: raw.coordinatorSessionId }
       : {}),
@@ -259,7 +299,109 @@ async function readMemory(id) {
 
 async function writeMemory(id, contents) {
   await mkdir(projectDir(id), { recursive: true })
-  await writeFileAtomic(memoryFile(id), contents.slice(0, MAX_MEMORY))
+  const text = String(contents ?? '')
+  const next = text.length > MAX_MEMORY ? text.slice(0, MAX_MEMORY) : text
+  await writeFileAtomic(memoryFile(id), next)
+  return { length: next.length, truncated: next.length < text.length }
+}
+
+/**
+ * Split the memory into its `## ` sections. Everything before the first heading
+ * is the preamble and is reported separately, so a section lookup never has to
+ * guess what to do with loose text.
+ */
+function memorySections(memory) {
+  const sections = []
+  let current = null
+  for (const line of String(memory ?? '').split('\n')) {
+    if (line.startsWith('## ')) {
+      current = { title: line.slice(3).trim(), lines: [] }
+      sections.push(current)
+      continue
+    }
+    if (current) current.lines.push(line)
+  }
+  return sections.map((section) => {
+    const body = section.lines.join('\n').trim()
+    return { title: section.title, body, chars: body.length }
+  })
+}
+
+function memoryPreamble(memory) {
+  const text = String(memory ?? '')
+  if (text.startsWith('## ')) return ''
+  const at = text.indexOf('\n## ')
+  return (at === -1 ? text : text.slice(0, at)).trim()
+}
+
+/**
+ * The memory as an index: one line per section with its size, never the text.
+ * This is what a worker prompt gets, so the prompt stays bounded no matter how
+ * much history the project accumulates. `limit` is a hard cap on the returned
+ * string; when it does not fit, whole sections are dropped and counted.
+ */
+function memoryIndex(memory, limit = MEMORY_INDEX_LIMIT) {
+  const text = String(memory ?? '').trim()
+  if (!text) return '(empty)'
+  const sections = memorySections(text)
+  if (sections.length === 0) {
+    return `${text.length} characters, no "## " headings. Read it with projects_memory {action:"read"}.`
+  }
+  const header =
+    `${sections.length} section(s), ${text.length} characters. ` +
+    'Read one with projects_memory {action:"read", section:"<title>"} — do not assume you know what a section says.'
+  const entries = []
+  const preamble = memoryPreamble(text)
+  if (preamble) entries.push(`- (preamble before the first heading) (${preamble.length} chars)`)
+  for (const section of sections) entries.push(`- ${section.title} (${section.chars} chars)`)
+  // Reserve room for the "…and N more" note so the note itself cannot push the
+  // result past the cap.
+  const room = Math.max(0, limit - header.length - 1 - 160)
+  const shown = []
+  let used = 0
+  for (const entry of entries) {
+    if (used + entry.length + 1 > room) break
+    shown.push(entry)
+    used += entry.length + 1
+  }
+  const omitted = entries.length - shown.length
+  const lines = [header, ...shown]
+  if (omitted > 0) lines.push(`- …and ${omitted} more section(s) not listed (index capped at ${limit} characters).`)
+  return lines.join('\n')
+}
+
+/**
+ * Find one section by title. Deliberately forgiving: exact match first, then
+ * prefix, then "contains", all case-insensitive, because callers copy titles by
+ * hand and often shorten them.
+ */
+function findMemorySection(memory, needle) {
+  const wanted = String(needle ?? '').trim().toLowerCase()
+  if (!wanted) return null
+  const sections = memorySections(memory)
+  return (
+    sections.find((section) => section.title.toLowerCase() === wanted) ||
+    sections.find((section) => section.title.toLowerCase().startsWith(wanted)) ||
+    sections.find((section) => section.title.toLowerCase().includes(wanted)) ||
+    null
+  )
+}
+
+/** A warning suffix for memory writes, or '' when everything is fine. */
+function memoryWarning({ length, truncated }) {
+  const notes = []
+  if (truncated) {
+    notes.push(
+      `WARNING: the memory hit the ${MAX_MEMORY}-character write ceiling and the tail was cut (only the tail: nothing before it was dropped).`,
+    )
+  }
+  if (length > MEMORY_BUDGET) {
+    notes.push(
+      `WARNING: the shared memory is now ${length} characters, ${length - MEMORY_BUDGET} over the ${MEMORY_BUDGET}-character budget. ` +
+        'Workers only receive an index, but the file should be compressed: read it with action "index", then replace it with a condensed version using action "write".',
+    )
+  }
+  return notes.length ? ` ${notes.join(' ')}` : ''
 }
 
 function counts(tasks) {
@@ -294,6 +436,7 @@ async function createProject(input) {
     concurrency: input?.concurrency,
     model: input?.model,
     agentPreset: input?.agentPreset,
+    reasoningEffort: input?.reasoningEffort,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     tasks: [],
@@ -314,6 +457,7 @@ async function updateProject(id, patch) {
   // not a task status, so it does not touch the read-only status contract.
   if (patch?.model !== undefined) project.model = modelValue(patch.model)
   if (patch?.agentPreset !== undefined) project.agentPreset = presetValue(patch.agentPreset)
+  if (patch?.reasoningEffort !== undefined) project.reasoningEffort = effortValue(patch.reasoningEffort)
   if (patch?.coordinatorSessionId !== undefined) {
     const value = text(patch.coordinatorSessionId, 128)
     if (value) project.coordinatorSessionId = value
@@ -335,6 +479,7 @@ async function addTask(id, input) {
     approved: input?.approved === true,
     model: input?.model,
     agentPreset: input?.agentPreset,
+    reasoningEffort: input?.reasoningEffort,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   })
@@ -362,6 +507,7 @@ async function updateTask(projectId, taskId, patch) {
   if (patch?.resolved !== undefined) task.resolved = patch.resolved === true
   if (patch?.model !== undefined) task.model = modelValue(patch.model)
   if (patch?.agentPreset !== undefined) task.agentPreset = presetValue(patch.agentPreset)
+  if (patch?.reasoningEffort !== undefined) task.reasoningEffort = effortValue(patch.reasoningEffort)
   task.updatedAt = Date.now()
   project.updatedAt = Date.now()
   await writeProject(project)
@@ -437,7 +583,12 @@ function workerPrompt(project, task, memory) {
     project.goal.trim() || '(none)',
     '',
     '## Shared project memory',
-    memory.trim() || '(empty)',
+    // An index, not the text. The memory is a long append-only log; injecting it
+    // whole made every worker pay for history it does not need. The worker can
+    // pull the one section it needs with projects_memory.
+    memoryIndex(memory),
+    '',
+    `The list above is an index of the shared memory, not its contents. Read a section before relying on it: projects_memory {project_id:"${project.id}", action:"read", section:"<title>"}.`,
     '',
     '## Your task',
     `Title: ${task.title}`,
@@ -483,6 +634,22 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   // with an undefined model, both of which the service would reject or misread.
   const route = modelRoute(task.model || project.model)
   const agentPreset = presetValue(task.agentPreset || project.agentPreset)
+  // Effort precedence mirrors the model: the task override wins, then the project
+  // default, and an empty result means "let the provider apply its own default".
+  //
+  // The route-change rule in the subagent service only *drops an inherited*
+  // effort when the provider/model differs from the parent and the caller gave
+  // none. We always set the effort explicitly when one is configured, so that
+  // rule can never silently discard the user's choice; when none is configured
+  // we send no effort at all and the provider default applies, which is exactly
+  // what "unset" means. Never send '' — an empty id is not a valid effort.
+  const effort = effortValue(task.reasoningEffort || project.reasoningEffort)
+  const agentOptions = route === undefined && !effort
+    ? undefined
+    : {
+      ...(route === undefined ? {} : route),
+      ...(effort ? { reasoningEffort: effort } : {}),
+    }
   let started
   try {
     started = await subagents.startActivation({
@@ -492,7 +659,7 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
       parent: exec.agent,
       ...(cwd === undefined ? {} : { cwd }),
       ...(agentPreset ? { agentPreset } : {}),
-      ...(route === undefined ? {} : { agentOptions: route }),
+      ...(agentOptions === undefined ? {} : { agentOptions }),
       signal: controller.signal,
       delivery: 'parent',
     })
@@ -512,7 +679,8 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   await writeProject(project)
   const routeNote = route === undefined ? '' : ` model=${route.provider ? `${route.provider}/` : ''}${route.model}`
   const presetNote = agentPreset ? ` preset=${agentPreset}` : ''
-  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${presetNote}. It runs in the background; its final message lands on the task when it settles.`
+  const effortNote = effort ? ` effort=${effort}` : ''
+  return `Dispatched task ${task.id} to worker ${started.name} (session ${started.childId})${routeNote}${effortNote}${presetNote}. It runs in the background; its final message lands on the task when it settles.`
 }
 
 async function settleWorker(info) {
@@ -542,6 +710,42 @@ const modelCache = new Map()
 const MODEL_CACHE_MS = 60_000
 
 /**
+ * Read the reasoning levels one exact provider/model route accepts.
+ *
+ * Efforts are provider-owned opaque ids, so nothing here is enumerated locally:
+ * the adapter answers, and an adapter that reports no `reasoning` (or throws)
+ * yields `{ efforts: [] }` — "this route exposes no choice", which is different
+ * from "the effort is empty". Never let one model's failure blank the picker.
+ *
+ * The display field is `name`, matching the Host's own `ModelReasoningEffort`
+ * shape (`{ id, name, description? }`) that the page's pickers read; the model
+ * entries above keep `label` because that is their existing contract.
+ */
+async function reasoningOf(llm, providerId, modelId) {
+  let resolved
+  try {
+    resolved = await llm.resolveModelInfo(providerId, modelId)
+  } catch {
+    return { efforts: [] }
+  }
+  const reasoning = resolved && typeof resolved === 'object' ? resolved.reasoning : undefined
+  if (!reasoning || !Array.isArray(reasoning.efforts)) return { efforts: [] }
+  const efforts = []
+  for (const effort of reasoning.efforts) {
+    if (!effort || typeof effort.id !== 'string' || !effort.id) continue
+    efforts.push({
+      id: effort.id,
+      name: typeof effort.name === 'string' && effort.name ? effort.name : effort.id,
+      ...(typeof effort.description === 'string' && effort.description ? { description: effort.description } : {}),
+    })
+  }
+  const defaultEffort = typeof reasoning.defaultEffort === 'string' && reasoning.defaultEffort
+    ? reasoning.defaultEffort
+    : undefined
+  return { efforts, ...(defaultEffort === undefined ? {} : { defaultEffort }) }
+}
+
+/**
  * Enumerate the LLM routes a worker may be pinned to, for the page's model
  * picker.
  *
@@ -554,6 +758,16 @@ const MODEL_CACHE_MS = 60_000
  *
  * Each entry's `id` is the `provider/model` route string that `project.model` and
  * `task.model` store, so the picker can round-trip a choice without guessing.
+ *
+ * Each entry also carries `efforts`: the reasoning levels that exact route
+ * accepts, as `{ id, name, description? }`, plus `defaultEffort` when the
+ * adapter declares one. `listModels()` does NOT expose reasoning — only
+ * `resolveModelInfo(provider, model)` returns `reasoning` — so this costs one
+ * extra adapter call per model. That is the same projection the Host's own model
+ * selector builds (`dsh-api-session-controller/src/catalog.ts`), and it is
+ * isolated per model: a route whose metadata cannot be resolved still appears in
+ * the picker with `efforts: []`, so the page can degrade that row to free text
+ * instead of losing the model.
  */
 async function listModelChoices(ctx) {
   const llm = ctx.get('llm')
@@ -576,6 +790,7 @@ async function listModelChoices(ctx) {
   const cached = modelCache.get(cacheKey)
   if (cached && Date.now() - cached.at < MODEL_CACHE_MS) return { models: cached.models, enumerable: true }
 
+  const canResolve = typeof llm.resolveModelInfo === 'function'
   const models = []
   for (const providerId of ids) {
     let advertised
@@ -586,12 +801,15 @@ async function listModelChoices(ctx) {
     }
     for (const model of Array.isArray(advertised) ? advertised : []) {
       if (!model || typeof model.id !== 'string' || !model.id) continue
+      const reasoning = canResolve ? await reasoningOf(llm, providerId, model.id) : { efforts: [] }
       models.push({
         id: `${providerId}/${model.id}`,
         provider: providerId,
         model: model.id,
         label: typeof model.name === 'string' && model.name ? model.name : model.id,
         ...(typeof model.description === 'string' && model.description ? { description: model.description } : {}),
+        efforts: reasoning.efforts,
+        ...(reasoning.defaultEffort === undefined ? {} : { defaultEffort: reasoning.defaultEffort }),
       })
     }
   }
@@ -805,7 +1023,7 @@ function formatProject(project, memory) {
     `Project ${project.id} — ${project.name}`,
     `workspace: ${project.workspace || '(inherited)'}`,
     `autonomy: ${project.autonomy}, concurrency: ${project.concurrency}${project.archived ? ', ARCHIVED' : ''}`,
-    `worker model: ${project.model || '(host default)'}${project.agentPreset ? `, preset: ${project.agentPreset}` : ''}`,
+    `worker model: ${project.model || '(host default)'}${project.reasoningEffort ? `, effort: ${project.reasoningEffort}` : ''}${project.agentPreset ? `, preset: ${project.agentPreset}` : ''}`,
     '',
     '## Instructions',
     project.goal.trim() || '(none)',
@@ -816,13 +1034,14 @@ function formatProject(project, memory) {
   for (const task of project.tasks) {
     const worker = task.childName ? ` worker=${task.childName}` : ''
     const model = task.model ? ` model=${task.model}` : ''
+    const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
     const preset = task.agentPreset ? ` preset=${task.agentPreset}` : ''
     lines.push(
-      `- ${task.id} [${task.status}]${task.resolved ? ' resolved' : ''}${task.approved ? ' approved' : ''}${worker}${model}${preset} ${task.title}`,
+      `- ${task.id} [${task.status}]${task.resolved ? ' resolved' : ''}${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset} ${task.title}`,
     )
     if (task.output) lines.push(`    output: ${task.output.replace(/\n+/g, ' ').slice(0, 300)}`)
   }
-  lines.push('', '## Shared memory', memory.trim() ? memory.trim().slice(0, MAX_OUTPUT) : '(empty)')
+  lines.push('', '## Shared memory', memory.trim() ? memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT) : '(empty)')
   return lines.join('\n')
 }
 
@@ -848,7 +1067,7 @@ function registerTools(ctx) {
             .map(([status, value]) => `${value} ${status}`)
           const resolved = project.tasks.filter((task) => task.resolved).length
           if (resolved > 0) parts.push(`${resolved} resolved`)
-          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.model ? ` model=${project.model}` : ''}${project.archived ? ' archived' : ''}  tasks: ${parts.join(', ') || 'none'}`
+          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.model ? ` model=${project.model}` : ''}${project.reasoningEffort ? ` effort=${project.reasoningEffort}` : ''}${project.archived ? ' archived' : ''}  tasks: ${parts.join(', ') || 'none'}`
         })
         .join('\n')
     },
@@ -857,7 +1076,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_create',
     description:
-      'Create a project: one goal, its standing instructions, the workspace its workers run in, an autonomy mode, a worker concurrency limit and an optional default worker model. Returns the new project_id.',
+      'Create a project: one goal, its standing instructions, the workspace its workers run in, an autonomy mode, a worker concurrency limit and an optional default worker model and reasoning effort. Returns the new project_id.',
     parameters: {
       type: 'object',
       properties: {
@@ -882,6 +1101,11 @@ function registerTools(ctx) {
           description:
             'Default worker model as a "provider/model" route (the id GET /projects-api/models advertises), or a bare model id to keep the parent provider. Omit or leave empty for the host default.',
         },
+        reasoningEffort: {
+          type: 'string',
+          description:
+            'Default worker reasoning effort, as one of the ids GET /projects-api/models advertises under models[].efforts (for example "low", "high", "max"; ids are provider-owned). Omit or leave empty to let the provider apply its own default.',
+        },
         agentPreset: {
           type: 'string',
           description: 'Default worker agent preset id. Omit or leave empty to inherit the parent composition.',
@@ -900,7 +1124,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_get',
     description:
-      'Read one project: instructions, workspace, autonomy, every task with its status and output, and the shared memory. Use it before planning or reporting.',
+      'Read one project: instructions, workspace, autonomy, every task with its status and output, and an index of the shared memory. Use it before planning or reporting; read a memory section with projects_memory when you need its text.',
     parameters: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project id from projects_list.' } },
@@ -925,7 +1149,7 @@ function registerTools(ctx) {
         title: { type: 'string', description: 'One-line task title.' },
         brief: {
           type: 'string',
-          description: 'What the worker must do, where, and how to verify it. The worker also receives the project instructions and shared memory.',
+          description: 'What the worker must do, where, and how to verify it. The worker also receives the project instructions and an index of the shared memory.',
         },
         approved: {
           type: 'boolean',
@@ -935,6 +1159,11 @@ function registerTools(ctx) {
           type: 'string',
           description:
             'Optional per-task model override, as a "provider/model" route or a bare model id. Empty means inherit the project default.',
+        },
+        reasoningEffort: {
+          type: 'string',
+          description:
+            'Optional per-task reasoning effort override, as an id GET /projects-api/models advertises under models[].efforts. Empty means inherit the project default.',
         },
         agentPreset: {
           type: 'string',
@@ -954,7 +1183,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_update_task',
     description:
-      'Update one task: its system status, its recorded output, its approval flag, or its model override. The human resolves a task on the Projects page — you cannot set "resolved". Use "blocked" when a human decision is needed and "queued" to retry.',
+      'Update one task: its system status, its recorded output, its approval flag, or its model / reasoning-effort override. The human resolves a task on the Projects page — you cannot set "resolved". Use "blocked" when a human decision is needed and "queued" to retry.',
     parameters: {
       type: 'object',
       properties: {
@@ -971,6 +1200,11 @@ function registerTools(ctx) {
           type: 'string',
           description:
             'Per-task model override for the next dispatch, as a "provider/model" route or a bare model id. Empty clears it back to the project default.',
+        },
+        reasoningEffort: {
+          type: 'string',
+          description:
+            'Per-task reasoning effort override for the next dispatch, as an id GET /projects-api/models advertises under models[].efforts. Empty clears it back to the project default.',
         },
         agentPreset: {
           type: 'string',
@@ -989,23 +1223,33 @@ function registerTools(ctx) {
         ...(args?.output === undefined ? {} : { output: args.output }),
         ...(args?.approved === undefined ? {} : { approved: args.approved }),
         ...(args?.model === undefined ? {} : { model: args.model }),
+        ...(args?.reasoningEffort === undefined ? {} : { reasoningEffort: args.reasoningEffort }),
         ...(args?.agentPreset === undefined ? {} : { agentPreset: args.agentPreset }),
       }
       const { task } = await updateTask(String(args?.project_id || ''), String(args?.task_id || ''), patch)
       const route = task.model ? ` model=${task.model}` : ''
-      return `Task ${task.id} is now ${task.status}${task.resolved ? ' (resolved)' : ''}${task.approved ? ' (approved)' : ''}${route}.`
+      const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
+      return `Task ${task.id} is now ${task.status}${task.resolved ? ' (resolved)' : ''}${task.approved ? ' (approved)' : ''}${route}${effort}.`
     },
   })
 
   register({
     name: 'projects_memory',
     description:
-      'Read or write the shared memory every worker of a project receives. Record durable findings, codebase knowledge and decisions here instead of repeating them in each task brief.',
+      'Read or write the shared memory of a project. The memory is a long append-only log, so read it by section: action "index" lists the section titles with their sizes, action "read" with a "section" returns just that section, and action "read" alone returns the whole file. Record durable findings, codebase knowledge and decisions here instead of repeating them in each task brief.',
     parameters: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project id.' },
-        action: { type: 'string', enum: ['read', 'append', 'write'], description: 'read (default), append a section, or replace all.' },
+        action: {
+          type: 'string',
+          enum: ['index', 'read', 'append', 'write'],
+          description: 'index (titles only), read (default; whole file, or one section with `section`), append a section, or replace all.',
+        },
+        section: {
+          type: 'string',
+          description: 'For action "read": a section title, or a distinctive part of one. Case-insensitive; exact, prefix and substring matches all work.',
+        },
         text: { type: 'string', description: 'Text for append or write.' },
       },
       required: ['project_id'],
@@ -1015,27 +1259,38 @@ function registerTools(ctx) {
     execute: async (args) => {
       const project = await readProject(String(args?.project_id || ''))
       const action = args?.action || 'read'
+      const memory = await readMemory(project.id)
+      if (action === 'index') return memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT)
       if (action === 'read') {
-        const memory = await readMemory(project.id)
+        const wanted = typeof args?.section === 'string' ? args.section.trim() : ''
+        if (wanted) {
+          const section = findMemorySection(memory, wanted)
+          if (!section) {
+            const titles = memorySections(memory).map((candidate) => candidate.title)
+            throw new Error(
+              `No memory section matches "${wanted}". ${titles.length ? `Sections: ${titles.join(' | ')}` : 'The memory has no "## " sections.'}`,
+            )
+          }
+          return section.body ? `## ${section.title}\n\n${section.body}` : `## ${section.title}\n\n(empty section)`
+        }
         return memory.trim() ? memory.trim() : 'Shared memory is empty.'
       }
       const value = typeof args?.text === 'string' ? args.text.trim() : ''
       if (!value) throw new Error('text is required for append or write')
       if (action === 'write') {
-        await writeMemory(project.id, value)
-        return `Replaced the shared memory of ${project.id} (${value.length} characters).`
+        const written = await writeMemory(project.id, value)
+        return `Replaced the shared memory of ${project.id} (${written.length} characters).${memoryWarning(written)}`
       }
-      const current = await readMemory(project.id)
-      const next = current.trim() ? `${current.trimEnd()}\n\n${value}\n` : `${value}\n`
-      await writeMemory(project.id, next)
-      return `Appended ${value.length} characters to the shared memory of ${project.id}.`
+      const next = memory.trim() ? `${memory.trimEnd()}\n\n${value}\n` : `${value}\n`
+      const written = await writeMemory(project.id, next)
+      return `Appended ${value.length} characters to the shared memory of ${project.id}.${memoryWarning(written)}`
     },
   })
 
   register({
     name: 'projects_dispatch',
     description:
-      'Dispatch one queued task to a worker subagent. The worker gets the project instructions, the shared memory and the task brief, runs in the project workspace, and reports its final message back onto the task. Returns immediately: the coordinator stays free.',
+      'Dispatch one queued task to a worker subagent. The worker gets the project instructions, an index of the shared memory and the task brief, runs in the project workspace, and reports its final message back onto the task. Returns immediately: the coordinator stays free.',
     parameters: {
       type: 'object',
       properties: {

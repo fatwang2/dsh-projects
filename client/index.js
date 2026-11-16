@@ -116,18 +116,28 @@ window.__ModuleLoader__.load({
       justNow: 'just now',
       execution: 'Execution',
       executionHint:
-        'Default model and agent preset for every worker in this project. A task may override them.',
+        'Default model and reasoning effort for every worker in this project. A task may override them.',
       model: 'Model',
-      agentPreset: 'Agent preset',
+      reasoningEffort: 'Reasoning effort',
+      effortShort: 'Effort',
       modelDefault: 'Default (inherits host)',
+      effortDefault: 'Default (follows host)',
       modelRoutePlaceholder: 'provider/model',
       modelFreeTextHint:
         'The model list could not be enumerated — type a route such as provider/model.',
-      presetFreeTextHint: 'The preset list could not be enumerated — type a preset id.',
+      effortFreeTextHint:
+        'The effort list could not be enumerated — type an effort id such as low or high.',
+      effortOff: 'Off',
+      effortLow: 'Low',
+      effortHigh: 'High',
+      effortMax: 'Max',
       effectiveModel: 'Effective model',
       fromTask: 'from task',
       fromProject: 'from project',
       fromHost: 'host default',
+      sessionUnavailable: 'The session service is unavailable on this page.',
+      pickerUnavailable: 'The directory picker is unavailable on this page.',
+      promptRejected: 'The coordinator prompt was rejected.',
     }
 
     const ZH = {
@@ -217,17 +227,26 @@ window.__ModuleLoader__.load({
       groupResolved: '已解决',
       justNow: '刚刚',
       execution: '执行',
-      executionHint: '本项目所有执行者的默认模型与 Agent 预设；单个任务可以覆盖。',
+      executionHint: '本项目所有执行者的默认模型与思考程度；单个任务可以覆盖。',
       model: '模型',
-      agentPreset: 'Agent 预设',
+      reasoningEffort: '思考程度',
+      effortShort: '思考',
       modelDefault: '默认（继承宿主）',
+      effortDefault: '默认（跟随宿主）',
       modelRoutePlaceholder: 'provider/model',
       modelFreeTextHint: '无法枚举模型列表，请手填路由，例如 provider/model。',
-      presetFreeTextHint: '无法枚举预设列表，请手填预设 id。',
+      effortFreeTextHint: '无法枚举思考程度列表，请手填档位 id，例如 low 或 high。',
+      effortOff: '关闭',
+      effortLow: '低',
+      effortHigh: '高',
+      effortMax: '最高',
       effectiveModel: '生效模型',
       fromTask: '来自任务',
       fromProject: '来自项目',
       fromHost: '宿主默认',
+      sessionUnavailable: '这个页面无法使用会话服务。',
+      pickerUnavailable: '这个页面无法使用目录选择器。',
+      promptRejected: '协调者指令被拒绝了。',
     }
 
     // ---------------------------------------------------------------------
@@ -579,6 +598,74 @@ window.__ModuleLoader__.load({
       const fromProject = modelRouteOf(project && project.model)
       if (fromProject) return { value: fromProject, source: 'project' }
       return { value: '', source: 'host' }
+    }
+
+    /**
+     * The effort ids the Host itself ships for a reasoning model. The Host has
+     * no global enum (`ReasoningEffortId` is an opaque branded string defined
+     * per adapter), so this is the DeepSeek adapter's set — `off / low / high /
+     * max` — used only when the catalog cannot advertise the model's own list.
+     */
+    const GENERIC_EFFORTS = ['off', 'low', 'high', 'max']
+
+    /** A stored effort id; an empty string means "not set". */
+    function effortValue(value) {
+      return String(value || '').trim()
+    }
+
+    /**
+     * The effort choices for one model route. The catalog's per-model `efforts`
+     * win; an unknown route or an empty list falls back to the generic set so
+     * the picker is never empty.
+     */
+    function effortsFor(catalog, route) {
+      const found = (catalog.models || []).find((entry) => entry && entry.id === modelRouteOf(route))
+      const advertised = found && Array.isArray(found.efforts) ? found.efforts : []
+      const entries = advertised
+        .filter((entry) => entry && entry.id)
+        .map((entry) => ({ id: String(entry.id), name: entry.name ? String(entry.name) : String(entry.id) }))
+      if (entries.length) return entries
+      return GENERIC_EFFORTS.map((id) => ({ id, name: '' }))
+    }
+
+    /** A picker label for a stored effort; an unknown id stays visible. */
+    function effortLabel(catalog, route, value, t) {
+      const id = effortValue(value)
+      if (!id) return ''
+      const found = effortsFor(catalog, route).find((entry) => entry.id === id)
+      if (found && found.name) return found.name
+      const key = `effort${id.charAt(0).toUpperCase()}${id.slice(1)}`
+      const localised = t(key)
+      return localised === key ? id : localised
+    }
+
+    /**
+     * Which layer supplies the effort a dispatch would use: the task override,
+     * the project default, or (when both are empty) the host's own default.
+     */
+    function effectiveEffort(project, task) {
+      const fromTask = effortValue(task && task.reasoningEffort)
+      if (fromTask) return { value: fromTask, source: 'task' }
+      const fromProject = effortValue(project && project.reasoningEffort)
+      if (fromProject) return { value: fromProject, source: 'project' }
+      return { value: '', source: 'host' }
+    }
+
+    /**
+     * Options for the effort picker. A stored id the catalog does not advertise
+     * (set by the coordinator, or a stale catalog) is appended so the control
+     * never silently drops the current setting.
+     */
+    function effortOptions(catalog, route, current, t) {
+      const entries = effortsFor(catalog, route)
+      const options = entries.map((entry) =>
+        h('option', { key: entry.id, value: entry.id }, entry.name || effortLabel(catalog, route, entry.id, t)),
+      )
+      const value = effortValue(current)
+      if (value && !entries.some((entry) => entry.id === value)) {
+        options.push(h('option', { key: value, value }, effortLabel(catalog, route, value, t)))
+      }
+      return options
     }
 
     /**
@@ -1260,9 +1347,10 @@ window.__ModuleLoader__.load({
       // late output shows up without reopening the task.
       const execTask = execTarget ? taskList.find((task) => task.id === execTarget.taskId) || null : null
       const execTitle = execTask?.title || execTarget?.title || ''
-      // The detail header's one secondary line: the model a dispatch would use
-      // right now (task override, else project default, else the host's own)
-      // and who runs it. The full route and its source stay in the tooltip.
+      // The detail header's one secondary line: the model and reasoning effort
+      // a dispatch would use right now (task override, else project default,
+      // else the host's own) and who runs it. The full routes and their sources
+      // stay in the tooltip.
       const execEffective = execTask ? effectiveModel(project, execTask) : null
       const execSourceKey =
         execEffective?.source === 'task'
@@ -1270,18 +1358,34 @@ window.__ModuleLoader__.load({
           : execEffective?.source === 'project'
             ? 'fromProject'
             : 'fromHost'
+      const execEffort = execTask ? effectiveEffort(project, execTask) : null
+      const execEffortSourceKey =
+        execEffort?.source === 'task'
+          ? 'fromTask'
+          : execEffort?.source === 'project'
+            ? 'fromProject'
+            : 'fromHost'
+      const execEffortLabel = execEffort?.value
+        ? effortLabel(catalog, execEffective?.value, execEffort.value, t)
+        : ''
       const execMeta = execTask
         ? [
             execEffective.value ? modelLabel(catalog, execEffective.value) : t('fromHost'),
+            execEffortLabel ? `${t('effortShort')}: ${execEffortLabel}` : '',
             execTask.childName || '',
           ]
             .filter(Boolean)
             .join(' · ')
         : ''
       const execMetaTitle = execTask
-        ? `${t('effectiveModel')}: ${
-            execEffective.value ? `${execEffective.value} · ${t(execSourceKey)}` : t('fromHost')
-          }`
+        ? [
+            `${t('effectiveModel')}: ${
+              execEffective.value ? `${execEffective.value} · ${t(execSourceKey)}` : t('fromHost')
+            }`,
+            `${t('reasoningEffort')}: ${
+              execEffort.value ? `${execEffort.value} · ${t(execEffortSourceKey)}` : t('fromHost')
+            }`,
+          ].join('\n')
         : ''
 
       const createProject = () =>
@@ -1518,7 +1622,7 @@ window.__ModuleLoader__.load({
         run(async () => {
           if (!project) return ''
           if (!threadApi || typeof threadApi.ensure !== 'function') {
-            throw new Error('The session service is unavailable on this page.')
+            throw new Error(t('sessionUnavailable'))
           }
           let locale = 'zh'
           try {
@@ -1548,7 +1652,7 @@ window.__ModuleLoader__.load({
             return ''
           }
           if (!threadApi || typeof threadApi.retainWorker !== 'function') {
-            throw new Error('The session service is unavailable on this page.')
+            throw new Error(t('sessionUnavailable'))
           }
           const archivedSet = Array.isArray(archivedSessionIds) ? archivedSessionIds : []
           if (project?.coordinatorSessionId && archivedSet.includes(project.coordinatorSessionId)) {
@@ -1715,6 +1819,10 @@ window.__ModuleLoader__.load({
               { className: 'pj-hint' },
               `${t('effectiveModel')}: ${
                 project.model ? modelLabel(catalog, project.model) : t('modelDefault')
+              } · ${t('effortShort')}: ${
+                effortValue(project.reasoningEffort)
+                  ? effortLabel(catalog, project.model, project.reasoningEffort, t)
+                  : t('effortDefault')
               }`,
             ),
             h(
@@ -1763,8 +1871,8 @@ window.__ModuleLoader__.load({
               h(
                 'label',
                 { className: 'pj-field pj-grow' },
-                h('span', { className: 'pj-label' }, t('agentPreset')),
-                catalog.presetsEnumerable
+                h('span', { className: 'pj-label' }, t('reasoningEffort')),
+                catalog.enumerable
                   ? h(
                       'span',
                       { className: 'pj-select-wrap' },
@@ -1772,33 +1880,33 @@ window.__ModuleLoader__.load({
                         'select',
                         {
                           className: 'pj-select',
-                          'aria-label': t('agentPreset'),
-                          value: project.agentPreset || '',
+                          'aria-label': t('reasoningEffort'),
+                          value: effortValue(project.reasoningEffort),
                           disabled: busy,
-                          onChange: (event) => void patchProject({ agentPreset: event.target.value }),
+                          onChange: (event) =>
+                            void patchProject({ reasoningEffort: event.target.value }),
                         },
-                        h('option', { value: '' }, t('modelDefault')),
-                        ...catalogOptions(catalog, 'presets', project.agentPreset),
+                        h('option', { value: '' }, t('effortDefault')),
+                        ...effortOptions(catalog, project.model, project.reasoningEffort, t),
                       ),
                       h('span', { className: 'pj-select-chevron', 'aria-hidden': true }, h(ChevronDownIcon, null)),
                     )
                   : h('input', {
                       className: 'pj-input',
                       type: 'text',
-                      'aria-label': t('agentPreset'),
-                      placeholder: t('agentPreset'),
-                      defaultValue: project.agentPreset || '',
-                      key: `${project.id}:${project.agentPreset || ''}`,
+                      'aria-label': t('reasoningEffort'),
+                      placeholder: t('effortDefault'),
+                      defaultValue: effortValue(project.reasoningEffort),
+                      key: `${project.id}:${effortValue(project.reasoningEffort)}`,
                       disabled: busy,
                       onBlur: (event) => {
                         const value = event.target.value.trim()
-                        if (value !== (project.agentPreset || '')) {
-                          void patchProject({ agentPreset: value })
+                        if (value !== effortValue(project.reasoningEffort)) {
+                          void patchProject({ reasoningEffort: value })
                         }
                       },
                     }),
-                !catalog.presetsEnumerable &&
-                  h('span', { className: 'pj-hint' }, t('presetFreeTextHint')),
+                !catalog.enumerable && h('span', { className: 'pj-hint' }, t('effortFreeTextHint')),
               ),
             ),
           ),
@@ -2485,7 +2593,7 @@ window.__ModuleLoader__.load({
         const pickFolder = async () => {
           const workspace = ctx.get('uiWorkspace')
           if (!workspace || typeof workspace.pickDirectory !== 'function') {
-            throw new Error('The directory picker is unavailable on this page.')
+            throw new Error(translate('pickerUnavailable'))
           }
           return await workspace.pickDirectory()
         }
@@ -2510,7 +2618,7 @@ window.__ModuleLoader__.load({
           async ensure(project, prompt) {
             const sessions = ctx.get('sessions')
             if (!sessions || typeof sessions.create !== 'function') {
-              throw new Error('The session service is unavailable on this page.')
+              throw new Error(translate('sessionUnavailable'))
             }
             const existing = typeof project.coordinatorSessionId === 'string' ? project.coordinatorSessionId : ''
             let sessionId = existing
@@ -2537,7 +2645,7 @@ window.__ModuleLoader__.load({
               if (!result || result.ok !== true) {
                 reference.release()
                 throw new Error(
-                  (result && result.error && result.error.message) || 'The coordinator prompt was rejected.',
+                  (result && result.error && result.error.message) || translate('promptRejected'),
                 )
               }
             }
@@ -2546,14 +2654,14 @@ window.__ModuleLoader__.load({
           retain(sessionId) {
             const sessions = ctx.get('sessions')
             if (!sessions || typeof sessions.retain !== 'function') {
-              throw new Error('The session service is unavailable on this page.')
+              throw new Error(translate('sessionUnavailable'))
             }
             return sessions.retain(sessionId, { source: 'projects' })
           },
           retainWorker(childSessionId, parentSessionId) {
             const sessions = ctx.get('sessions')
             if (!sessions || typeof sessions.retain !== 'function') {
-              throw new Error('The session service is unavailable on this page.')
+              throw new Error(translate('sessionUnavailable'))
             }
             if (parentSessionId) {
               try {

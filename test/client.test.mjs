@@ -547,16 +547,16 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
   const settings = source.slice(settingsStart, settingsEnd)
   assert.match(settings, /t\('execution'\)/)
   assert.match(settings, /catalog\.enumerable[\s\S]{0,60}\? h\([\s\S]{0,160}'select'/)
-  assert.match(settings, /catalog\.presetsEnumerable[\s\S]{0,60}\? h\([\s\S]{0,160}'select'/)
   assert.match(settings, /patchProject\(\{ model: event\.target\.value \}\)/)
-  assert.match(settings, /patchProject\(\{ agentPreset: event\.target\.value \}\)/)
+  assert.match(settings, /patchProject\(\{ reasoningEffort: event\.target\.value \}\)/)
   assert.match(settings, /t\('modelDefault'\)/)
+  assert.match(settings, /t\('effortDefault'\)/)
 
   // Fallback: a free-text field plus a one-line hint.
   assert.match(settings, /defaultValue: project\.model \|\| ''/)
   assert.match(settings, /t\('modelFreeTextHint'\)/)
-  assert.match(settings, /defaultValue: project\.agentPreset \|\| ''/)
-  assert.match(settings, /t\('presetFreeTextHint'\)/)
+  assert.match(settings, /defaultValue: effortValue\(project\.reasoningEffort\)/)
+  assert.match(settings, /t\('effortFreeTextHint'\)/)
 
   // The settings section states the default a dispatch would use right now.
   assert.match(settings, /t\('effectiveModel'\)/)
@@ -595,11 +595,17 @@ test('the model pickers read the Host catalog and degrade to free text', () => {
     'execution',
     'executionHint',
     'model',
-    'agentPreset',
+    'reasoningEffort',
+    'effortShort',
     'modelDefault',
+    'effortDefault',
     'modelRoutePlaceholder',
     'modelFreeTextHint',
-    'presetFreeTextHint',
+    'effortFreeTextHint',
+    'effortOff',
+    'effortLow',
+    'effortHigh',
+    'effortMax',
     'effectiveModel',
     'fromTask',
     'fromProject',
@@ -783,5 +789,96 @@ test('the detail page never repeats the brief and has one scroll source', () => 
   assert.ok(detailRules.length >= 3, 'the detail rules were found')
   for (const rule of detailRules) {
     assert.doesNotMatch(rule, /overflow:auto|max-height/, `unexpected scroll source: ${rule.trim()}`)
+  }
+})
+
+test('the effort picker follows the catalog and the agent preset left the page', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // The Host has no global effort enum — `ReasoningEffortId` is an opaque id
+  // declared per adapter — so the generic fallback is the DeepSeek adapter's
+  // own set, which is what a bare Host would advertise.
+  assert.match(source, /const GENERIC_EFFORTS = \['off', 'low', 'high', 'max'\]/)
+
+  // A catalog entry's own `efforts` win; an unknown route or an empty list
+  // falls back, so the picker is never empty.
+  const helper = source.slice(
+    source.indexOf('function effortValue'),
+    source.indexOf('function catalogOptions'),
+  )
+  assert.match(helper, /Array\.isArray\(found\.efforts\)/)
+  assert.match(helper, /if \(entries\.length\) return entries/)
+  assert.match(helper, /return GENERIC_EFFORTS\.map/)
+
+  // Precedence is task > project > host, mirroring the model.
+  assert.match(helper, /if \(fromTask\) return \{ value: fromTask, source: 'task' \}/)
+  assert.match(helper, /if \(fromProject\) return \{ value: fromProject, source: 'project' \}/)
+  assert.match(helper, /return \{ value: '', source: 'host' \}/)
+  // A stored id the catalog does not advertise stays selectable.
+  assert.match(helper, /if \(value && !entries\.some\(\(entry\) => entry\.id === value\)\)/)
+
+  // Settings: the picker sits next to the model, defaults to the empty
+  // "follows host" option, and saves through the project PATCH route.
+  const settingsStart = source.indexOf('const renderSettings')
+  const settings = source.slice(settingsStart, source.indexOf('const renderListRail', settingsStart))
+  assert.match(settings, /t\('reasoningEffort'\)/)
+  assert.match(settings, /h\('option', \{ value: '' \}, t\('effortDefault'\)\)/)
+  assert.match(settings, /effortOptions\(catalog, project\.model, project\.reasoningEffort, t\)/)
+  assert.match(settings, /patchProject\(\{ reasoningEffort: event\.target\.value \}\)/)
+  assert.match(settings, /t\('effortFreeTextHint'\)/)
+
+  // Detail header: the effort joins the model and the worker on the one
+  // secondary line, with its source in the tooltip.
+  const headerStart = source.indexOf('const execEffective')
+  const header = source.slice(headerStart, source.indexOf('renderTaskMenu()', headerStart))
+  assert.match(header, /effectiveEffort\(project, execTask\)/)
+  assert.match(header, /effortLabel\(catalog, execEffective\?\.value, execEffort\.value, t\)/)
+  assert.match(header, /`\$\{t\('effortShort'\)\}: \$\{execEffortLabel\}`/)
+  assert.match(header, /t\('reasoningEffort'\)/)
+
+  // The Agent preset control is gone from the page: no label, no picker, no
+  // write. The catalog still fetches `presets` because the Host still stores
+  // and dispatches `agentPreset`; only the surface is retired.
+  assert.doesNotMatch(source, /t\('agentPreset'\)/)
+  assert.doesNotMatch(source, /patchProject\(\{ agentPreset/)
+  assert.doesNotMatch(source, /project\.agentPreset/)
+  assert.match(source, /presets: Array\.isArray\(data\.presets\) \? data\.presets : \[\]/)
+  assert.match(source, /presetsEnumerable: data\.presetsEnumerable === true/)
+
+  const { dictionaries } = applyWithFakes()
+  const { en, zh } = dictionaries[0].dicts
+  for (const retired of ['agentPreset', 'presetFreeTextHint']) {
+    assert.equal(retired in en, false, `EN still has ${retired}`)
+    assert.equal(retired in zh, false, `ZH still has ${retired}`)
+  }
+  for (const key of ['reasoningEffort', 'effortShort', 'effortDefault', 'effortFreeTextHint']) {
+    assert.equal(typeof en[key], 'string', `EN is missing ${key}`)
+    assert.equal(typeof zh[key], 'string', `ZH is missing ${key}`)
+  }
+})
+
+test('no user-facing string is hardcoded in English', () => {
+  const source = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
+
+  // Everything the page shows goes through `t()` / `translate()`; the only
+  // English left is the dictionary itself, identifiers and CSS.
+  const dictStart = source.indexOf('const EN = {')
+  const dictEnd = source.indexOf('// ---', source.indexOf('const ZH = {'))
+  assert.ok(dictStart > 0 && dictEnd > dictStart, 'the dictionaries were located')
+  const rest = source.slice(0, dictStart) + source.slice(dictEnd)
+  assert.doesNotMatch(rest, /throw new Error\('[A-Z][a-z]/)
+  assert.match(rest, /throw new Error\(t\('sessionUnavailable'\)\)/)
+  assert.match(rest, /throw new Error\(translate\('pickerUnavailable'\)\)/)
+  assert.match(rest, /translate\('promptRejected'\)/)
+
+  // The dictionaries stay in lockstep: same keys, both sides non-empty.
+  const { dictionaries: registered } = applyWithFakes()
+  const { en, zh } = registered[0].dicts
+  assert.deepEqual(Object.keys(en).sort(), Object.keys(zh).sort())
+  for (const key of Object.keys(en)) {
+    assert.equal(typeof en[key], 'string', `EN ${key} is not a string`)
+    assert.equal(typeof zh[key], 'string', `ZH ${key} is not a string`)
+    assert.ok(en[key].length > 0, `EN ${key} is empty`)
+    assert.ok(zh[key].length > 0, `ZH ${key} is empty`)
   }
 })

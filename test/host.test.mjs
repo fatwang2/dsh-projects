@@ -210,7 +210,10 @@ test('manual autonomy blocks dispatch until the task is approved', async () => {
   assert.match(spec.label, /Launch site · Build the pricing page/)
   const prompt = spec.prompt[0].text
   assert.match(prompt, /Ship the marketing site\./)
-  assert.match(prompt, /Only this\./)
+  // The prompt carries an index of the shared memory, never the memory itself.
+  assert.doesNotMatch(prompt, /Only this\./)
+  assert.match(prompt, /## Shared project memory\n10 characters, no "## " headings/)
+  assert.match(prompt, /projects_memory \{project_id:"p-[0-9a-f]{8}", action:"read", section:"<title>"\}/)
   assert.match(prompt, /Build the pricing page/)
   assert.match(prompt, /projects_memory/)
 })
@@ -732,4 +735,357 @@ test('the dispatch guard admits 8 workers and refuses the ninth', async () => {
 
   const refused = await call('projects_dispatch', { project_id: projectId, task_id: taskIds[8] })
   assert.match(refused, /Concurrency limit reached \(8\/8 workers running\)/)
+})
+
+// ---------------------------------------------------------------------------
+// Worker reasoning effort. Efforts are provider-owned opaque ids (the LLM layer
+// brands them `ReasoningEffortId` but has no global enum), so the host stores a
+// free string, resolves the task → project chain at dispatch, and publishes the
+// per-model legal values through GET /projects-api/models.
+
+test('a project default reasoning effort round-trips through create, disk and the page', async () => {
+  const created = await call('projects_create', {
+    name: 'Effort board',
+    goal: 'Pin the thinking level.',
+    reasoningEffort: 'high',
+  })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+
+  const onDisk = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
+  assert.equal(onDisk.reasoningEffort, 'high')
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.reasoningEffort, 'high')
+
+  // The page retunes it through the ordinary project PATCH: a project setting,
+  // not a task status, so it stays writable.
+  const patched = await request('PATCH', `/projects-api/projects/${projectId}`, { reasoningEffort: 'max' })
+  assert.equal(patched.status, 200)
+  assert.equal(patched.body.project.reasoningEffort, 'max')
+
+  // Clearing it means "provider default", not "an empty level".
+  const cleared = await request('PATCH', `/projects-api/projects/${projectId}`, { reasoningEffort: '' })
+  assert.equal(cleared.body.project.reasoningEffort, '')
+
+  const restored = await request('PATCH', `/projects-api/projects/${projectId}`, { reasoningEffort: 'high' })
+  assert.equal(restored.body.project.reasoningEffort, 'high')
+
+  // The coordinator tools advertise the field too.
+  assert.ok(tool('projects_create').parameters.properties.reasoningEffort)
+  assert.ok(tool('projects_add_task').parameters.properties.reasoningEffort)
+  assert.ok(tool('projects_update_task').parameters.properties.reasoningEffort)
+  // ...and the agent preset stays supported on the host even though the page no
+  // longer offers it.
+  assert.ok(tool('projects_create').parameters.properties.agentPreset)
+})
+
+test('a task reasoning effort overrides the project effort at dispatch', async () => {
+  const created = await call('projects_create', {
+    name: 'Effort lanes',
+    goal: 'Task override wins.',
+    autonomy: 'auto',
+    reasoningEffort: 'high',
+  })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+
+  const added = await call('projects_add_task', {
+    project_id: projectId,
+    title: 'Think hard',
+    reasoningEffort: 'max',
+  })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+
+  const before = activations.length
+  const dispatched = await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+  assert.match(dispatched, /Dispatched task/)
+  assert.match(dispatched, /effort=max/)
+
+  // No model is pinned on this project, so `agentOptions` carries the effort
+  // alone — the child keeps the parent's route and only overrides the level.
+  assert.deepEqual(activations.at(-1).agentOptions, { reasoningEffort: 'max' })
+
+  // A task without its own effort inherits the project default.
+  const inheriting = await call('projects_add_task', { project_id: projectId, title: 'Inherit the level' })
+  const inheritingId = inheriting.match(/t-[0-9a-f]{8}/)[0]
+  const before2 = activations.length
+  await call('projects_dispatch', { project_id: projectId, task_id: inheritingId })
+  assert.equal(activations.length, before2 + 1)
+  assert.deepEqual(activations.at(-1).agentOptions, { reasoningEffort: 'high' })
+})
+
+test('an effort and a model travel together in one agentOptions object', async () => {
+  const created = await call('projects_create', {
+    name: 'Effort route',
+    goal: 'Both halves.',
+    autonomy: 'auto',
+    model: 'alpha/alpha-large',
+  })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', {
+    project_id: projectId,
+    title: 'Route plus level',
+    model: 'beta/beta-mini',
+    reasoningEffort: 'low',
+  })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+
+  const before = activations.length
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+  assert.deepEqual(activations.at(-1).agentOptions, {
+    provider: 'beta',
+    model: 'beta-mini',
+    reasoningEffort: 'low',
+  })
+})
+
+test('dispatch omits reasoningEffort entirely when nothing is selected', async () => {
+  const created = await call('projects_create', {
+    name: 'Effort default',
+    goal: 'No level pinned.',
+    autonomy: 'auto',
+    model: 'alpha/alpha-large',
+  })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Provider default level' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+
+  const before = activations.length
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+  assert.equal(activations.length, before + 1)
+  const spec = activations.at(-1)
+  // The route is still there; only the effort key is absent, so the provider
+  // (not an empty string) decides the level.
+  assert.deepEqual(spec.agentOptions, { provider: 'alpha', model: 'alpha-large' })
+  assert.equal('reasoningEffort' in spec.agentOptions, false)
+})
+
+test('a non-string or blank reasoning effort normalizes to empty', async () => {
+  const created = await call('projects_create', { name: 'Effort normalize', goal: '', reasoningEffort: 123 })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const onDisk = JSON.parse(await readFile(join(home, 'projects', projectId, 'project.json'), 'utf8'))
+  assert.equal(onDisk.reasoningEffort, '')
+
+  const patched = await request('PATCH', `/projects-api/projects/${projectId}`, { reasoningEffort: 42 })
+  assert.equal(patched.body.project.reasoningEffort, '')
+
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Bad effort', reasoningEffort: 7 })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  let detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks[0].reasoningEffort, '')
+
+  // The coordinator tool path normalizes the same way, and a blank value clears
+  // an existing override instead of storing whitespace.
+  await call('projects_update_task', { project_id: projectId, task_id: taskId, reasoningEffort: '  ' })
+  detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks[0].reasoningEffort, '')
+
+  await call('projects_update_task', { project_id: projectId, task_id: taskId, reasoningEffort: 'medium' })
+  detail = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal(detail.body.project.tasks[0].reasoningEffort, 'medium')
+})
+
+test('the model catalog publishes the reasoning efforts each route accepts', async () => {
+  // Fresh provider ids: the catalog caches successful enumerations by provider
+  // set for 60s, so reusing the earlier test's ids would serve its stale rows.
+  fakeLlm = {
+    listProviders: () => [
+      { id: 'epsilon', name: 'Epsilon' },
+      { id: 'zeta', name: 'Zeta' },
+    ],
+    async listModels(provider) {
+      if (provider === 'zeta') throw new Error('catalog unreachable')
+      return [
+        { provider: 'epsilon', id: 'epsilon-large', name: 'Epsilon Large' },
+        { provider: 'epsilon', id: 'epsilon-plain', name: 'Epsilon Plain' },
+        { provider: 'epsilon', id: 'epsilon-broken', name: 'Epsilon Broken' },
+      ]
+    },
+    async resolveModelInfo(provider, model) {
+      if (model === 'epsilon-broken') throw new Error('metadata unavailable')
+      if (model === 'epsilon-plain') return { provider, id: model, name: 'Epsilon Plain' }
+      return {
+        provider,
+        id: model,
+        name: 'Epsilon Large',
+        reasoning: {
+          efforts: [
+            { id: 'off', name: 'Off', description: 'No thinking' },
+            { id: 'high', name: 'High' },
+          ],
+          defaultEffort: 'high',
+        },
+      }
+    },
+  }
+  fakePresets = undefined
+
+  const answer = await request('GET', '/projects-api/models')
+  assert.equal(answer.status, 200)
+  assert.equal(answer.body.enumerable, true)
+  assert.deepEqual(
+    answer.body.models.map((entry) => entry.id),
+    ['epsilon/epsilon-large', 'epsilon/epsilon-plain', 'epsilon/epsilon-broken'],
+  )
+
+  // Efforts are provider-owned ids, passed through with the Host's own
+  // `{ id, name, description? }` shape (what the page's pickers read).
+  assert.deepEqual(answer.body.models[0].efforts, [
+    { id: 'off', name: 'Off', description: 'No thinking' },
+    { id: 'high', name: 'High' },
+  ])
+  assert.equal(answer.body.models[0].defaultEffort, 'high')
+
+  // A route that reports no reasoning metadata still appears, with no choice.
+  assert.deepEqual(answer.body.models[1].efforts, [])
+  assert.equal('defaultEffort' in answer.body.models[1], false)
+
+  // A route whose metadata cannot be resolved degrades the same way: the model
+  // stays selectable, only its effort list is empty.
+  assert.deepEqual(answer.body.models[2].efforts, [])
+  assert.equal('defaultEffort' in answer.body.models[2], false)
+
+  fakeLlm = undefined
+  fakePresets = undefined
+})
+
+// ---------------------------------------------------------------------------
+// The shared memory is a long append-only log. Workers get an index of it and
+// pull the one section they need, so the prompt stays bounded.
+
+/** A project whose memory has two sections, each with a body-only marker. */
+async function memoryProject(name) {
+  const created = await call('projects_create', { name, goal: 'Ship it.', autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    text: [
+      '## Alpha decisions',
+      'BODY-ALPHA-MARKER the copy lives in /content.',
+      '',
+      '## Beta gotchas',
+      'BODY-BETA-MARKER pnpm only, no npm.',
+      '',
+    ].join('\n'),
+  })
+  return projectId
+}
+
+test('the dispatch prompt carries a memory index instead of the memory', async () => {
+  const projectId = await memoryProject('Indexed memory')
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Tweak a button' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+
+  const prompt = activations[activations.length - 1].prompt[0].text
+  // No section body leaks into the prompt.
+  assert.doesNotMatch(prompt, /BODY-ALPHA-MARKER/)
+  assert.doesNotMatch(prompt, /BODY-BETA-MARKER/)
+  assert.doesNotMatch(prompt, /copy lives in \/content/)
+  // The index lists both titles with their sizes, and says how to read one.
+  assert.match(prompt, /## Shared project memory\n2 section\(s\), \d+ characters\./)
+  assert.match(prompt, /- Alpha decisions \(\d+ chars\)/)
+  assert.match(prompt, /- Beta gotchas \(\d+ chars\)/)
+  assert.match(prompt, /not its contents/)
+  assert.match(prompt, /action:"read", section:"<title>"/)
+  // The closing instruction to append findings survives.
+  assert.match(prompt, /action "append"/)
+})
+
+test('an oversized memory index is truncated and says how many sections are missing', async () => {
+  const created = await call('projects_create', { name: 'Huge memory', goal: 'Ship it.', autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const sections = []
+  for (let index = 0; index < 60; index += 1) {
+    sections.push(`## Long history section ${index}`, `BODY-HIDDEN-${index} ${'x'.repeat(200)}`, '')
+  }
+  await call('projects_memory', { project_id: projectId, action: 'write', text: sections.join('\n') })
+
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Small change' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
+
+  const prompt = activations[activations.length - 1].prompt[0].text
+  const index = prompt.split('## Shared project memory\n')[1].split('\n\nThe list above')[0]
+  assert.ok(index.length <= 2000, `index is capped, got ${index.length} characters`)
+  assert.match(index, /60 section\(s\)/)
+  assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 2000 characters\)\./)
+  assert.match(index, /- Long history section 0 /)
+  assert.doesNotMatch(prompt, /BODY-HIDDEN-/)
+})
+
+test('projects_memory index lists titles and sizes without any body', async () => {
+  const projectId = await memoryProject('Index action')
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /2 section\(s\), \d+ characters\./)
+  assert.match(index, /- Alpha decisions \(\d+ chars\)/)
+  assert.match(index, /- Beta gotchas \(\d+ chars\)/)
+  assert.doesNotMatch(index, /BODY-ALPHA-MARKER/)
+  assert.doesNotMatch(index, /BODY-BETA-MARKER/)
+})
+
+test('projects_memory read with a section returns only that section', async () => {
+  const projectId = await memoryProject('Section read')
+
+  const exact = await call('projects_memory', { project_id: projectId, action: 'read', section: 'Beta gotchas' })
+  assert.match(exact, /^## Beta gotchas\n\nBODY-BETA-MARKER pnpm only, no npm\.$/)
+  assert.doesNotMatch(exact, /BODY-ALPHA-MARKER/)
+
+  // Matching is forgiving: case-insensitive, prefix and substring both work.
+  const prefix = await call('projects_memory', { project_id: projectId, action: 'read', section: 'alpha' })
+  assert.match(prefix, /BODY-ALPHA-MARKER/)
+  assert.doesNotMatch(prefix, /BODY-BETA-MARKER/)
+  const substring = await call('projects_memory', { project_id: projectId, action: 'read', section: 'gotcha' })
+  assert.match(substring, /BODY-BETA-MARKER/)
+
+  // An unknown section fails loudly and lists what does exist.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'read', section: 'nope' }),
+    /No memory section matches "nope"\. Sections: Alpha decisions \| Beta gotchas/,
+  )
+})
+
+test('projects_memory read without a section still returns the whole file', async () => {
+  const projectId = await memoryProject('Whole read')
+  const whole = await call('projects_memory', { project_id: projectId })
+  assert.match(whole, /BODY-ALPHA-MARKER/)
+  assert.match(whole, /BODY-BETA-MARKER/)
+  assert.match(whole, /## Alpha decisions/)
+  // `action: 'read'` is the same thing, spelled out.
+  assert.equal(await call('projects_memory', { project_id: projectId, action: 'read' }), whole)
+})
+
+test('projects_get returns the memory index, not the memory body', async () => {
+  const projectId = await memoryProject('Indexed get')
+  const detail = await call('projects_get', { project_id: projectId })
+  assert.match(detail, /## Shared memory\n2 section\(s\)/)
+  assert.match(detail, /- Alpha decisions \(\d+ chars\)/)
+  assert.doesNotMatch(detail, /BODY-ALPHA-MARKER/)
+})
+
+test('appending past the memory budget warns instead of truncating silently', async () => {
+  const created = await call('projects_create', { name: 'Fat memory', goal: 'Ship it.', autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  await call('projects_memory', { project_id: projectId, action: 'write', text: '## Start\n\nsmall.\n' })
+
+  const big = `## Bulk\n\n${'y'.repeat(65_000)}\n`
+  const appended = await call('projects_memory', { project_id: projectId, action: 'append', text: big })
+  assert.match(appended, /Appended \d+ characters/)
+  assert.match(appended, /WARNING: the shared memory is now \d+ characters, \d+ over the 64000-character budget/)
+  assert.doesNotMatch(appended, /hit the 200000-character write ceiling/)
+
+  // Nothing was dropped: the append is on disk in full.
+  const whole = await call('projects_memory', { project_id: projectId })
+  assert.ok(whole.length > 65_000, `memory kept its bytes, got ${whole.length}`)
+  assert.match(whole, /## Bulk/)
+})
+
+test('a write past the hard ceiling is reported, not swallowed', async () => {
+  const created = await call('projects_create', { name: 'Ceiling memory', goal: 'Ship it.', autonomy: 'auto' })
+  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
+  const written = await call('projects_memory', { project_id: projectId, action: 'write', text: 'z'.repeat(200_001) })
+  assert.match(written, /hit the 200000-character write ceiling and the tail was cut/)
+  assert.equal((await call('projects_memory', { project_id: projectId })).length, 200_000)
 })

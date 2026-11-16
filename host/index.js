@@ -104,14 +104,22 @@ const MAX_EFFORT = 60
  */
 const MAX_CONCURRENCY = 8
 /**
- * System statuses only. `status` is written by the host itself (add → queued,
- * dispatch → running, settle → review|failed) and by the coordinator tool
- * (blocked, retry). The human verdict — "this task counts as finished" — lives
- * in `task.resolved`, and the page may write nothing else.
+ * The one task-status enum. `status` is written by the host itself (add →
+ * queued, dispatch → running, settle → review|failed), by the coordinator tool
+ * (blocked, retry, and the human verdict when it relays one), and — for exactly
+ * two values — by the page: `resolved` accepts the task, `review` takes that
+ * acceptance back.
+ *
+ * There is deliberately no second `resolved` boolean: two dimensions for one
+ * question ("is this task finished?") drifted apart, and the board counted
+ * accepted work as outstanding. The enum is single-valued, so a task is in
+ * exactly one bucket and every reader agrees on which.
  */
-const STATUSES = ['queued', 'running', 'review', 'failed', 'blocked']
+const STATUSES = ['queued', 'running', 'review', 'failed', 'blocked', 'resolved']
 /** The single task field the browser is allowed to write. */
-const HUMAN_TASK_FIELDS = ['resolved']
+const HUMAN_TASK_FIELDS = ['status']
+/** The only two statuses the page may write: accept, or take the acceptance back. */
+const HUMAN_STATUSES = ['resolved', 'review']
 const AUTONOMY = ['manual', 'auto']
 /**
  * What `DELETE /projects-api/projects/:id/tasks/:taskId?session=` may do to the
@@ -279,15 +287,18 @@ async function writeFileAtomic(file, contents) {
 // Store
 
 function normalizeTask(raw) {
-  // Legacy rows used `status: 'done'` for "the human accepted this task". Status
-  // is now system-only, so a stored `done` migrates to review + resolved on read.
-  const legacyDone = raw.status === 'done'
+  // Two legacy shapes collapse into the single status enum on read:
+  //   - `status: 'done'`, the pre-status-only marker for "the human accepted it";
+  //   - `resolved: true` beside a system status, the boolean this model retires.
+  // Both become `status: 'resolved'`, and `resolved` is simply not copied over —
+  // normalizeTask builds a fresh row, so the field disappears from memory at once
+  // and from disk on the next write.
+  const accepted = raw.status === 'done' || raw.resolved === true
   const task = {
     id: typeof raw.id === 'string' && raw.id ? raw.id : newId('t'),
     title: text(raw.title, 200) || 'Untitled task',
     brief: text(raw.brief, MAX_BRIEF),
-    status: legacyDone ? 'review' : STATUSES.includes(raw.status) ? raw.status : 'queued',
-    resolved: legacyDone || raw.resolved === true,
+    status: accepted ? 'resolved' : STATUSES.includes(raw.status) ? raw.status : 'queued',
     approved: raw.approved === true,
     output: text(raw.output, MAX_OUTPUT),
     // Empty means "inherit the project default", which in turn may be empty and
@@ -915,10 +926,25 @@ async function afterMemoryWrite(project, written) {
   }
 }
 
+/**
+ * The board tally the page and the tools both read.
+ *
+ * One dimension, one bucket per task: `resolved` is a status now, so a task the
+ * human accepted is counted as resolved and in no other bucket. That is exactly
+ * how the page groups tasks, which is why the sidebar and the Threads panel can
+ * no longer disagree ("36 waiting for review, 1 blocked" for a board the panel
+ * showed as "Resolved · 37" was the bug this replaced).
+ */
 function counts(tasks) {
-  const result = { queued: 0, running: 0, review: 0, failed: 0, blocked: 0 }
+  const result = { queued: 0, running: 0, review: 0, failed: 0, blocked: 0, resolved: 0 }
   for (const task of tasks) result[task.status] = (result[task.status] || 0) + 1
   return result
+}
+
+/** "3 running, 2 review, 37 resolved", or "none". One formatter, so the tool output cannot drift. */
+function formatCounts(tally) {
+  const parts = STATUSES.filter((key) => tally[key] > 0).map((key) => `${tally[key]} ${key}`)
+  return parts.join(', ') || 'none'
 }
 
 function summarize(project) {
@@ -1014,9 +1040,9 @@ async function addTask(id, input) {
 
 /**
  * Internal writer shared by the coordinator tool and the host itself. It can
- * write every field, including `resolved` — but the browser never reaches it
- * directly: the page goes through `resolveTask` below, which narrows the patch
- * to `resolved` before calling in here.
+ * write every field — but the browser never reaches it directly: the page goes
+ * through `resolveTask` below, which narrows the patch to the two statuses a
+ * human may set before calling in here.
  */
 async function updateTask(projectId, taskId, patch) {
   const project = await readProject(projectId)
@@ -1027,7 +1053,6 @@ async function updateTask(projectId, taskId, patch) {
   if (patch?.status !== undefined && STATUSES.includes(patch.status)) task.status = patch.status
   if (patch?.approved !== undefined) task.approved = patch.approved === true
   if (patch?.output !== undefined) task.output = text(patch.output, MAX_OUTPUT)
-  if (patch?.resolved !== undefined) task.resolved = patch.resolved === true
   if (patch?.model !== undefined) task.model = modelValue(patch.model)
   if (patch?.agentPreset !== undefined) task.agentPreset = presetValue(patch.agentPreset)
   if (patch?.reasoningEffort !== undefined) task.reasoningEffort = effortValue(patch.reasoningEffort)
@@ -1038,10 +1063,11 @@ async function updateTask(projectId, taskId, patch) {
 }
 
 /**
- * The human write face: the page may only flip `resolved`. Anything else in the
- * body is rejected with 400 instead of being ignored, so a stale browser bundle
- * that still tries to PATCH `status` fails loudly rather than silently believing
- * it changed the board.
+ * The human write face: the page may set `status` to `resolved` (accept the
+ * work) or `review` (take that acceptance back), and to nothing else. Anything
+ * else in the body is rejected with 400 instead of being ignored, so a stale
+ * browser bundle that still sends `resolved: true` or `status: 'done'` fails
+ * loudly rather than silently believing it changed the board.
  */
 async function resolveTask(projectId, taskId, patch) {
   const body = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {}
@@ -1049,12 +1075,17 @@ async function resolveTask(projectId, taskId, patch) {
   if (foreign.length > 0) {
     throw httpError(
       400,
-      `only "resolved" is writable from the page (rejected: ${foreign.join(', ')})`,
+      `only "status" is writable from the page (rejected: ${foreign.join(', ')}); the "resolved" boolean is gone — send status "resolved" or "review"`,
     )
   }
-  if (body.resolved === undefined) throw httpError(400, 'resolved_required')
-  if (typeof body.resolved !== 'boolean') throw httpError(400, 'resolved_must_be_boolean')
-  return updateTask(projectId, taskId, { resolved: body.resolved })
+  if (body.status === undefined) throw httpError(400, 'status_required')
+  if (!HUMAN_STATUSES.includes(body.status)) {
+    throw httpError(
+      400,
+      `the page may only set status to "resolved" or "review" (rejected: ${JSON.stringify(body.status)})`,
+    )
+  }
+  return updateTask(projectId, taskId, { status: body.status })
 }
 
 /**
@@ -1259,6 +1290,22 @@ function workerPrompt(project, task, memory) {
   return lines.join('\n')
 }
 
+/**
+ * Whether a worker is still running behind a task.
+ *
+ * Status alone cannot answer this once `resolved` is a status: the human may
+ * accept a task while its worker is still going, which flips the status to
+ * `resolved` and would otherwise hide a live worker from the dispatch guard and
+ * the concurrency ceiling. `finishedAt` is the run's real end marker (dispatch
+ * clears it, settle writes it), so liveness is "has a session and has not
+ * settled yet". The status check keeps a legacy row that predates `finishedAt`
+ * from being treated as live forever.
+ */
+function workerIsLive(task) {
+  if (!task.childSessionId || task.finishedAt) return false
+  return task.status === 'running' || task.status === 'resolved'
+}
+
 async function dispatchTask(ctx, exec, projectId, taskId) {
   const subagents = ctx.get('subagents')
   if (!subagents) throw new Error('The subagent service is unavailable in this profile, so no worker can start.')
@@ -1267,13 +1314,19 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   if (project.archived) return `Project ${project.id} is archived. Unarchive it before dispatching.`
   const task = project.tasks.find((candidate) => candidate.id === taskId)
   if (!task) throw new Error(`Unknown task ${taskId} in project ${project.id}.`)
-  if (task.status === 'running') {
+  if (workerIsLive(task)) {
     return `Task ${task.id} is already running as ${task.childName || task.childSessionId || 'a worker'}.`
+  }
+  // Dispatching a resolved task would silently erase the human's verdict (the
+  // dispatch writes status running). Send it back to review first, which is the
+  // same two-step the page uses to un-accept a task.
+  if (task.status === 'resolved') {
+    return `Task ${task.id} is resolved. Send it back to review (projects_update_task status "review") before dispatching it again.`
   }
   if (project.autonomy === 'manual' && !task.approved) {
     return `Task ${task.id} needs human approval first: project autonomy is "manual". Ask the user to approve it on the Projects page, then call projects_dispatch again.`
   }
-  const running = project.tasks.filter((candidate) => candidate.status === 'running').length
+  const running = project.tasks.filter(workerIsLive).length
   if (running >= project.concurrency) {
     return `Concurrency limit reached (${running}/${project.concurrency} workers running). Wait for one to settle before dispatching ${task.id}.`
   }
@@ -1341,8 +1394,13 @@ async function settleWorker(info) {
   for (const project of projects) {
     const task = project.tasks.find((candidate) => candidate.childSessionId === info.id)
     if (!task) continue
-    if (task.status !== 'running') return
-    task.status = info.stopReason === 'completed' ? 'review' : 'failed'
+    // `finishedAt` is the run's end marker, not the status: the human may have
+    // accepted the task while its worker was still running, and that verdict must
+    // not swallow the worker's final message. Only a run that already settled is
+    // ignored (a duplicate event), and only a still-running task has its status
+    // overwritten — a resolved task keeps the human's answer.
+    if (task.finishedAt) return
+    if (task.status === 'running') task.status = info.stopReason === 'completed' ? 'review' : 'failed'
     task.stopReason = typeof info.stopReason === 'string' ? info.stopReason : undefined
     task.output = blocksToText(info.lastAssistantMessage).slice(0, MAX_OUTPUT)
     task.finishedAt = Date.now()
@@ -1654,8 +1712,9 @@ async function routeRequest(ctx, method, path, req, searchParams) {
   }
 
   // /projects/:id/tasks/:taskId/approve — the manual-mode gate. One field, one
-  // value, its own entry point: PATCH stays `resolved`-only and this stays
-  // `approved: true`-only, so neither door can be used to write the other field.
+  // value, its own entry point: PATCH stays the accept door (status resolved or
+  // review) and this stays `approved: true`-only, so neither door can be used to
+  // write the other field.
   if (parts.length === 5 && parts[2] === 'tasks' && parts[4] === 'approve') {
     if (method !== 'POST') throw httpError(405, 'method_not_allowed')
     const { task } = await approveTask(projectId, parts[3])
@@ -1715,6 +1774,7 @@ function formatProject(project, memory) {
     project.goal.trim() || '(none)',
     '',
     `## Tasks (${project.tasks.length})`,
+    `counts: ${formatCounts(counts(project.tasks))}`,
   ]
   if (project.tasks.length === 0) lines.push('(none)')
   for (const task of project.tasks) {
@@ -1723,7 +1783,7 @@ function formatProject(project, memory) {
     const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
     const preset = task.agentPreset ? ` preset=${task.agentPreset}` : ''
     lines.push(
-      `- ${task.id} [${task.status}]${task.resolved ? ' resolved' : ''}${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset} ${task.title}`,
+      `- ${task.id} [${task.status}]${task.approved ? ' approved' : ''}${worker}${model}${effort}${preset} ${task.title}`,
     )
     if (task.output) lines.push(`    output: ${task.output.replace(/\n+/g, ' ').slice(0, 300)}`)
   }
@@ -1747,13 +1807,10 @@ function registerTools(ctx) {
       if (projects.length === 0) return 'No projects yet. Create one with projects_create.'
       return projects
         .map((project) => {
+          // One tally, one formatter: `resolved` is just another status, so the
+          // list cannot count accepted work as review/blocked again.
           const tally = counts(project.tasks)
-          const parts = Object.entries(tally)
-            .filter(([, value]) => value > 0)
-            .map(([status, value]) => `${value} ${status}`)
-          const resolved = project.tasks.filter((task) => task.resolved).length
-          if (resolved > 0) parts.push(`${resolved} resolved`)
-          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.model ? ` model=${project.model}` : ''}${project.reasoningEffort ? ` effort=${project.reasoningEffort}` : ''}${project.archived ? ' archived' : ''}  tasks: ${parts.join(', ') || 'none'}`
+          return `- ${project.id}  "${project.name}"  autonomy=${project.autonomy} concurrency=${project.concurrency}${project.model ? ` model=${project.model}` : ''}${project.reasoningEffort ? ` effort=${project.reasoningEffort}` : ''}${project.archived ? ' archived' : ''}  tasks: ${formatCounts(tally)}`
         })
         .join('\n')
     },
@@ -1927,7 +1984,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_update_task',
     description:
-      'Update one task: its system status, its recorded output, its approval flag, or its model / reasoning-effort override. The human resolves a task on the Projects page — you cannot set "resolved". Use "blocked" when a human decision is needed and "queued" to retry.',
+      'Update one task: its status, its recorded output, its approval flag, or its model / reasoning-effort override. Status "resolved" is the human verdict — set it only when relaying the human\'s decision; "review" takes that verdict back. Use "blocked" when a human decision is needed and "queued" to retry.',
     parameters: {
       type: 'object',
       properties: {
@@ -1935,8 +1992,9 @@ function registerTools(ctx) {
         task_id: { type: 'string', description: 'Task id from projects_get.' },
         status: {
           type: 'string',
-          enum: ['queued', 'running', 'review', 'failed', 'blocked'],
-          description: 'New system status. "resolved" is the human verdict and is not writable here.',
+          enum: STATUSES,
+          description:
+            'New status: queued, running, review, failed, blocked, or resolved (the human verdict).',
         },
         output: { type: 'string', description: 'Summary to record on the task (kept to 4000 characters).' },
         approved: { type: 'boolean', description: 'Approval flag for autonomy=manual projects.' },
@@ -1960,8 +2018,8 @@ function registerTools(ctx) {
     },
     output: TEXT_OUTPUT,
     execute: async (args) => {
-      // Pick the coordinator-writable fields explicitly: `resolved` is the
-      // human's call, so it must not ride along even if a caller sends it.
+      // Pick the writable fields explicitly, so an argument the schema does not
+      // declare (a stale caller sending `resolved`, say) cannot ride along.
       const patch = {
         ...(args?.status === undefined ? {} : { status: args.status }),
         ...(args?.output === undefined ? {} : { output: args.output }),
@@ -1973,7 +2031,7 @@ function registerTools(ctx) {
       const { task } = await updateTask(String(args?.project_id || ''), String(args?.task_id || ''), patch)
       const route = task.model ? ` model=${task.model}` : ''
       const effort = task.reasoningEffort ? ` effort=${task.reasoningEffort}` : ''
-      return `Task ${task.id} is now ${task.status}${task.resolved ? ' (resolved)' : ''}${task.approved ? ' (approved)' : ''}${route}${effort}.`
+      return `Task ${task.id} is now ${task.status}${task.approved ? ' (approved)' : ''}${route}${effort}.`
     },
   })
 

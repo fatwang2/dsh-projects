@@ -194,8 +194,8 @@ test('creates, reads and updates a project through the tools', async () => {
   assert.match(detail, /Write the hero copy/)
   assert.match(detail, /Shared memory\n\(empty\)/)
 
-  // The coordinator still writes the system status; "resolved" is the human's
-  // verdict and is not reachable from this tool.
+  // The coordinator writes the status too: `resolved` is the human's verdict, so
+  // the tool only relays it when the human has actually said so.
   const updated = await call('projects_update_task', {
     project_id: projectId,
     task_id: taskId,
@@ -288,21 +288,28 @@ test('the HTTP route serves the board', async () => {
 })
 
 // ---------------------------------------------------------------------------
-// Status is system-only; the page may write nothing but `resolved`.
+// The page may only accept a task or take that acceptance back: PATCH is narrowed
+// to `status`, and to exactly two of its values.
 
-test('the page cannot write task status, output or approval', async () => {
+test('the page cannot write a status of its own choosing', async () => {
   const detail = await request('GET', `/projects-api/projects/${launchProjectId}`)
   assert.equal(detail.status, 200)
   const task = detail.body.project.tasks[0]
   assert.equal(task.status, 'blocked')
-  assert.equal(task.resolved, false)
   const path = `/projects-api/projects/${launchProjectId}/tasks/${task.id}`
 
-  // A stale bundle that still tries to mark the task "done" must fail loudly.
-  const status = await request('PATCH', path, { status: 'done' })
-  assert.equal(status.status, 400)
-  assert.match(status.body.error, /only "resolved" is writable/)
-  assert.match(status.body.error, /status/)
+  // Every system status is out of reach, including the retired "done".
+  for (const status of ['queued', 'running', 'failed', 'blocked', 'done', 'nonsense']) {
+    const refused = await request('PATCH', path, { status })
+    assert.equal(refused.status, 400, `status ${status} must be refused`)
+    assert.match(refused.body.error, /only set status to "resolved" or "review"/)
+  }
+
+  // The retired boolean is refused too, and the error says what to send instead.
+  const legacy = await request('PATCH', path, { resolved: true })
+  assert.equal(legacy.status, 400)
+  assert.match(legacy.body.error, /only "status" is writable/)
+  assert.match(legacy.body.error, /send status "resolved" or "review"/)
 
   const output = await request('PATCH', path, { output: 'forged output' })
   assert.equal(output.status, 400)
@@ -311,15 +318,12 @@ test('the page cannot write task status, output or approval', async () => {
   assert.equal(approved.status, 400)
 
   // A smuggled extra field poisons the whole patch instead of half-applying.
-  const smuggled = await request('PATCH', path, { resolved: true, status: 'done' })
+  const smuggled = await request('PATCH', path, { status: 'resolved', output: 'forged' })
   assert.equal(smuggled.status, 400)
 
   const empty = await request('PATCH', path, {})
   assert.equal(empty.status, 400)
-  assert.match(empty.body.error, /resolved/)
-
-  const notBoolean = await request('PATCH', path, { resolved: 'yes' })
-  assert.equal(notBoolean.status, 400)
+  assert.match(empty.body.error, /status_required/)
 
   // Nothing leaked through.
   const after = await request('GET', `/projects-api/projects/${launchProjectId}`)
@@ -327,30 +331,32 @@ test('the page cannot write task status, output or approval', async () => {
   assert.equal(untouched.status, 'blocked')
   assert.equal(untouched.output, 'Three variants delivered.')
   assert.equal(untouched.approved, false)
-  assert.equal(untouched.resolved, false)
 })
 
-test('the page resolves a task and the verdict is persisted', async () => {
+test('the page accepts a task and the verdict is persisted as its status', async () => {
   const detail = await request('GET', `/projects-api/projects/${launchProjectId}`)
   const task = detail.body.project.tasks[0]
   const path = `/projects-api/projects/${launchProjectId}/tasks/${task.id}`
 
-  const resolved = await request('PATCH', path, { resolved: true })
-  assert.equal(resolved.status, 200)
-  assert.equal(resolved.body.task.resolved, true)
-  // Resolving is not a status change: the system status stays where it was.
-  assert.equal(resolved.body.task.status, 'blocked')
+  const accepted = await request('PATCH', path, { status: 'resolved' })
+  assert.equal(accepted.status, 200)
+  assert.equal(accepted.body.task.status, 'resolved')
+  // One dimension: the row carries no second `resolved` field any more.
+  assert.equal(accepted.body.task.resolved, undefined)
 
   // Written to disk, not just echoed back.
   const onDisk = JSON.parse(await readFile(join(home, 'projects', launchProjectId, 'project.json'), 'utf8'))
-  assert.equal(onDisk.tasks[0].resolved, true)
+  assert.equal(onDisk.tasks[0].status, 'resolved')
+  assert.equal(onDisk.tasks[0].resolved, undefined)
 
-  const cleared = await request('PATCH', path, { resolved: false })
-  assert.equal(cleared.status, 200)
-  assert.equal(cleared.body.task.resolved, false)
+  // Un-accepting returns the task to review: the enum has no memory of what the
+  // status was before the human accepted it.
+  const back = await request('PATCH', path, { status: 'review' })
+  assert.equal(back.status, 200)
+  assert.equal(back.body.task.status, 'review')
 
-  const again = await request('PATCH', path, { resolved: true })
-  assert.equal(again.body.task.resolved, true)
+  const again = await request('PATCH', path, { status: 'resolved' })
+  assert.equal(again.body.task.status, 'resolved')
 })
 
 test('the create-task HTTP route is gone', async () => {
@@ -361,22 +367,45 @@ test('the create-task HTTP route is gone', async () => {
   assert.equal(detail.body.project.tasks.length, 2)
 })
 
-test('the coordinator tool cannot resolve a task', async () => {
+test('the coordinator tool can relay the human verdict, and has no resolved boolean', async () => {
   const definition = tool('projects_update_task')
   assert.equal(definition.parameters.properties.resolved, undefined)
-  assert.deepEqual(definition.parameters.properties.status.enum, ['queued', 'running', 'review', 'failed', 'blocked'])
+  assert.deepEqual(definition.parameters.properties.status.enum, [
+    'queued',
+    'running',
+    'review',
+    'failed',
+    'blocked',
+    'resolved',
+  ])
 
   const detail = await request('GET', `/projects-api/projects/${launchProjectId}`)
   const task = detail.body.project.tasks[0]
-  assert.equal(task.resolved, true)
+  assert.equal(task.status, 'resolved')
 
-  // Even if the argument slips past the schema, execute must drop it.
+  // A stale caller that still sends the retired boolean changes nothing: execute
+  // only forwards the fields the schema declares.
   await call('projects_update_task', { project_id: launchProjectId, task_id: task.id, resolved: false })
   const after = await request('GET', `/projects-api/projects/${launchProjectId}`)
-  assert.equal(after.body.project.tasks[0].resolved, true)
+  assert.equal(after.body.project.tasks[0].status, 'resolved')
+
+  // Status is the only dimension, so the tool relays both directions of the
+  // human verdict: back to review, then resolved again.
+  const back = await call('projects_update_task', {
+    project_id: launchProjectId,
+    task_id: task.id,
+    status: 'review',
+  })
+  assert.match(back, /is now review/)
+  const accepted = await call('projects_update_task', {
+    project_id: launchProjectId,
+    task_id: task.id,
+    status: 'resolved',
+  })
+  assert.match(accepted, /is now resolved/)
 })
 
-test('reading a legacy project migrates status "done" to review + resolved', async () => {
+test('reading a legacy project folds "done" and the resolved boolean into status resolved', async () => {
   const projectId = 'p-aaaaaaaa'
   const dir = join(home, 'projects', projectId)
   await mkdir(dir, { recursive: true })
@@ -404,30 +433,192 @@ test('reading a legacy project migrates status "done" to review + resolved', asy
       },
       { id: 't-00000002', title: 'Still queued', brief: '', status: 'queued', createdAt: 1, updatedAt: 1 },
       { id: 't-00000003', title: 'Unknown status', brief: '', status: 'nonsense', createdAt: 1, updatedAt: 1 },
+      {
+        id: 't-00000004',
+        title: 'Accepted by the old boolean',
+        brief: '',
+        status: 'review',
+        resolved: true,
+        createdAt: 1,
+        updatedAt: 1,
+      },
     ],
   }
   await writeFile(join(dir, 'project.json'), `${JSON.stringify(legacy, null, 2)}\n`)
 
   const detail = await request('GET', `/projects-api/projects/${projectId}`)
   assert.equal(detail.status, 200)
-  const [migrated, queued, bogus] = detail.body.project.tasks
-  assert.equal(migrated.status, 'review')
-  assert.equal(migrated.resolved, true)
+  const [migrated, queued, bogus, booleanAccepted] = detail.body.project.tasks
+  // Both legacy shapes land on the one status; the boolean is not carried over.
+  assert.equal(migrated.status, 'resolved')
+  assert.equal(migrated.approved, true)
+  assert.equal(migrated.output, 'Shipped.')
+  assert.equal(migrated.resolved, undefined)
   assert.equal(queued.status, 'queued')
-  assert.equal(queued.resolved, false)
   assert.equal(bogus.status, 'queued')
-  assert.equal(bogus.resolved, false)
+  assert.equal(booleanAccepted.status, 'resolved')
+  assert.equal(booleanAccepted.resolved, undefined)
 
-  // "done" is gone from the tally as well.
+  // "done" is gone from the tally as well: accepted rows count as resolved and
+  // never as review work waiting on the human.
   const list = await request('GET', '/projects-api/projects')
   const summary = list.body.projects.find((project) => project.id === projectId)
   assert.ok(summary, 'legacy project is listed')
   assert.equal(summary.counts.done, undefined)
-  assert.equal(summary.counts.review, 1)
+  assert.equal(summary.counts.review, 0)
+  assert.equal(summary.counts.resolved, 2)
+  assert.equal(summary.counts.queued, 2)
+
+  // The retired field survives only until the next write: rewriting the project
+  // leaves no `resolved` key on disk.
+  await call('projects_update_task', { project_id: projectId, task_id: 't-00000002', status: 'blocked' })
+  const stored = JSON.parse(await readFile(join(dir, 'project.json'), 'utf8'))
+  assert.deepEqual(stored.tasks.map((task) => task.status), ['resolved', 'blocked', 'queued', 'resolved'])
+  assert.ok(stored.tasks.every((task) => !('resolved' in task)), 'the resolved boolean is gone from disk')
 })
 
 // ---------------------------------------------------------------------------
-// The manual-mode gate has its own narrow POST route; PATCH stays resolved-only.
+// The tally and the page's Threads groups share one definition of "outstanding":
+// a task is in exactly one status bucket, and resolved work is not outstanding.
+
+test('the tally puts every task in exactly one status bucket', async () => {
+  const projectId = await newProject('Tally', { autonomy: 'auto' })
+  const add = async (title) => {
+    const added = await call('projects_add_task', { project_id: projectId, title })
+    return added.match(/t-[0-9a-f]{8}/)[0]
+  }
+  await add('Still queued')
+  const runningId = await add('Still running')
+  const reviewId = await add('Waiting for review')
+  const blockedId = await add('Needs a decision')
+  await call('projects_update_task', { project_id: projectId, task_id: runningId, status: 'running' })
+  await call('projects_update_task', { project_id: projectId, task_id: reviewId, status: 'review' })
+  await call('projects_update_task', { project_id: projectId, task_id: blockedId, status: 'blocked' })
+
+  // The human accepts the settled task and the blocked one. Status is the only
+  // dimension, so accepting moves the task out of review/blocked entirely.
+  for (const taskId of [reviewId, blockedId]) {
+    const patch = await request('PATCH', `/projects-api/projects/${projectId}/tasks/${taskId}`, {
+      status: 'resolved',
+    })
+    assert.equal(patch.status, 200)
+    assert.equal(patch.body.task.status, 'resolved')
+  }
+
+  const list = await request('GET', '/projects-api/projects')
+  const summary = list.body.projects.find((project) => project.id === projectId)
+  assert.deepEqual(summary.counts, { queued: 1, running: 1, review: 0, failed: 0, blocked: 0, resolved: 2 })
+  // Nothing is counted twice: the buckets still add up to the board size.
+  assert.equal(Object.values(summary.counts).reduce((sum, value) => sum + value, 0), 4)
+
+  // The coordinator's list prints the same numbers, and resolved is not added a
+  // second time on top of the tally.
+  const printed = await call('projects_list', {})
+  const line = printed.split('\n').find((row) => row.includes(projectId))
+  assert.match(line, /tasks: 1 queued, 1 running, 2 resolved$/)
+  assert.doesNotMatch(line, /review|blocked/)
+
+  // The detail view carries the tally too, so the coordinator reads the same split.
+  const detail = await call('projects_get', { project_id: projectId })
+  assert.match(detail, /## Tasks \(4\)\ncounts: 1 queued, 1 running, 2 resolved\n/)
+  assert.doesNotMatch(detail, /counts: [^\n]*(review|blocked)/)
+})
+
+test('accepting a task is lossy: the status it came from is not recoverable', async () => {
+  // One dimension means accepting a failed task overwrites `failed`. The worker
+  // evidence (output) survives, but un-accepting returns the task to review, not
+  // to failed — there is nowhere to remember the old status.
+  const projectId = await newProject('Lossy accept', { autonomy: 'auto' })
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Crashed worker' })
+  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
+  await call('projects_update_task', {
+    project_id: projectId,
+    task_id: taskId,
+    status: 'failed',
+    output: 'Worker died on step 3.',
+  })
+  const path = `/projects-api/projects/${projectId}/tasks/${taskId}`
+
+  const accepted = await request('PATCH', path, { status: 'resolved' })
+  assert.equal(accepted.status, 200)
+  assert.equal(accepted.body.task.status, 'resolved')
+  assert.equal(accepted.body.task.output, 'Worker died on step 3.')
+
+  const back = await request('PATCH', path, { status: 'review' })
+  assert.equal(back.status, 200)
+  assert.equal(back.body.task.status, 'review')
+  assert.equal(back.body.task.output, 'Worker died on step 3.')
+})
+
+test('a task accepted while its worker runs keeps the verdict and still records the message', async () => {
+  // The human may accept a task before its worker settles. Status becomes
+  // `resolved`, so liveness can no longer be read off the status: the dispatch
+  // guard and the concurrency ceiling must still see the live worker, and the
+  // settle event must still land the final message.
+  const projectId = 'p-bbbbbbbb'
+  const dir = join(home, 'projects', projectId)
+  await mkdir(dir, { recursive: true })
+  const inFlight = {
+    version: 1,
+    id: projectId,
+    name: 'Accepted in flight',
+    goal: '',
+    workspace: '',
+    autonomy: 'auto',
+    concurrency: 1,
+    archived: false,
+    createdAt: 1,
+    updatedAt: 1,
+    tasks: [
+      {
+        id: 't-00000001',
+        title: 'Accepted before it settled',
+        brief: '',
+        status: 'resolved',
+        childSessionId: 'child-session-in-flight',
+        childName: 'agent-9',
+        startedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ],
+  }
+  await writeFile(join(dir, 'project.json'), `${JSON.stringify(inFlight, null, 2)}\n`)
+
+  // The live worker is still occupying its lane, and it cannot be dispatched again.
+  const added = await call('projects_add_task', { project_id: projectId, title: 'Second lane' })
+  const secondId = added.match(/t-[0-9a-f]{8}/)[0]
+  const refused = await call('projects_dispatch', { project_id: projectId, task_id: secondId })
+  assert.match(refused, /Concurrency limit reached \(1\/1 workers running\)/)
+  const again = await call('projects_dispatch', { project_id: projectId, task_id: 't-00000001' })
+  assert.match(again, /already running as agent-9/)
+
+  const settle = listeners.get('subagent/end')
+  settle({
+    id: 'child-session-in-flight',
+    parentSessionId: 'lead-session',
+    provider: 'spawn',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Finished after the human accepted.' }],
+  })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  const detail = await request('GET', `/projects-api/projects/${projectId}`)
+  const task = detail.body.project.tasks.find((candidate) => candidate.id === 't-00000001')
+  // The human's verdict wins over the settle status...
+  assert.equal(task.status, 'resolved')
+  // ...but the worker's evidence is not lost.
+  assert.equal(task.output, 'Finished after the human accepted.')
+  assert.equal(task.stopReason, 'completed')
+  assert.ok(task.finishedAt > 0)
+
+  // The lane is free again now that the run has settled.
+  const admitted = await call('projects_dispatch', { project_id: projectId, task_id: secondId })
+  assert.match(admitted, /Dispatched task/)
+})
+
+// ---------------------------------------------------------------------------
+// The manual-mode gate has its own narrow POST route; PATCH stays the accept door.
 
 let gateProjectId
 let gateTaskId
@@ -504,7 +695,7 @@ test('the two write faces stay separate', async () => {
     approved: true,
   })
   assert.equal(patched.status, 400)
-  assert.match(patched.body.error, /only "resolved" is writable/)
+  assert.match(patched.body.error, /only "status" is writable/)
 
   // ...and the gate did not become a way to create tasks.
   const created = await request('POST', `/projects-api/projects/${gateProjectId}/tasks`, { title: 'Sneaky task' })

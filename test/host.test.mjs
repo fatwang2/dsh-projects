@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
@@ -206,16 +206,30 @@ test('creates, reads and updates a project through the tools', async () => {
   launchProjectId = projectId
 })
 
-test('shared memory append and replace', async () => {
+test('shared memory append and write create topic files', async () => {
   const list = await call('projects_list', {})
   const projectId = list.match(/p-[0-9a-f]{8}/)[0]
-  await call('projects_memory', { project_id: projectId, action: 'append', text: 'Repo uses pnpm.' })
-  await call('projects_memory', { project_id: projectId, action: 'append', text: 'Copy lives in /content.' })
-  const memory = await call('projects_memory', { project_id: projectId })
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 'repo-conventions',
+    description: 'Package manager and layout',
+    text: 'Repo uses pnpm.',
+  })
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 'repo-conventions',
+    text: 'Copy lives in /content.',
+  })
+  const memory = await call('projects_memory', { project_id: projectId, action: 'read', name: 'repo-conventions' })
   assert.match(memory, /Repo uses pnpm\./)
   assert.match(memory, /Copy lives in \/content\./)
-  await call('projects_memory', { project_id: projectId, action: 'write', text: 'Only this.' })
-  assert.equal(await call('projects_memory', { project_id: projectId }), 'Only this.')
+  await call('projects_memory', { project_id: projectId, action: 'write', name: 'repo-conventions', text: 'Only this.' })
+  assert.equal(
+    await call('projects_memory', { project_id: projectId, action: 'read', name: 'repo-conventions' }),
+    'Only this.',
+  )
 })
 
 test('manual autonomy blocks dispatch until the task is approved', async () => {
@@ -242,8 +256,9 @@ test('manual autonomy blocks dispatch until the task is approved', async () => {
   assert.match(prompt, /Ship the marketing site\./)
   // The prompt carries an index of the shared memory, never the memory itself.
   assert.doesNotMatch(prompt, /Only this\./)
-  assert.match(prompt, /## Shared project memory\n10 characters, no "## " headings/)
-  assert.match(prompt, /projects_memory \{project_id:"p-[0-9a-f]{8}", action:"read", section:"<title>"\}/)
+  assert.match(prompt, /## Shared project memory\n1 file\(s\), \d+ characters\./)
+  assert.match(prompt, /· repo-conventions — Package manager and layout（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  assert.match(prompt, /projects_memory \{project_id:"p-[0-9a-f]{8}", action:"read", name:"<name>"\}/)
   assert.match(prompt, /Build the pricing page/)
   assert.match(prompt, /projects_memory/)
 })
@@ -281,7 +296,28 @@ test('the HTTP route serves the board', async () => {
   const detail = await request('GET', `/projects-api/projects/${projectId}`)
   assert.equal(detail.status, 200)
   assert.equal(detail.body.project.tasks.length, 2)
-  assert.match(detail.body.memory, /Only this\./)
+  // The memory is a file list, never the whole text.
+  assert.equal(detail.body.memory.files.length, 1)
+  assert.equal(detail.body.memory.files[0].name, 'repo-conventions')
+  assert.equal(detail.body.memory.files[0].description, 'Package manager and layout')
+  assert.ok(detail.body.memory.files[0].size > 0)
+  assert.match(detail.body.memory.files[0].modified, /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(detail.body.memory.total, detail.body.memory.files[0].size)
+  assert.equal(detail.body.memory.budget, 64_000)
+  assert.doesNotMatch(JSON.stringify(detail.body.memory), /Only this\./)
+
+  // The whole-memory route serves the generated index; the per-file route
+  // serves one body for the page's preview.
+  const memory = await request('GET', `/projects-api/projects/${projectId}/memory`)
+  assert.equal(memory.status, 200)
+  assert.match(memory.body.index, /1 file\(s\)/)
+  assert.equal(memory.body.memory.files.length, 1)
+  const file = await request('GET', `/projects-api/projects/${projectId}/memory/repo-conventions`)
+  assert.equal(file.status, 200)
+  assert.equal(file.body.text, 'Only this.')
+  assert.equal(file.body.archived, false)
+  const unknownFile = await request('GET', `/projects-api/projects/${projectId}/memory/nope`)
+  assert.equal(unknownFile.status, 404)
 
   const missing = await request('GET', '/projects-api/projects/p-deadbeef')
   assert.equal(missing.status, 404)
@@ -1172,142 +1208,343 @@ test('the model catalog publishes the reasoning efforts each route accepts', asy
 })
 
 // ---------------------------------------------------------------------------
-// The shared memory is a long append-only log. Workers get an index of it and
-// pull the one section they need, so the prompt stays bounded.
+// The shared memory is one markdown file per topic. Workers get an index of it
+// and pull the one file they need, so the prompt stays bounded.
 
-/** A project whose memory has two sections, each with a description line and a body-only marker. */
+function projectDirOf(projectId) {
+  return join(home, 'projects', projectId)
+}
+
+async function readFileOr(file, fallback = '') {
+  try {
+    return await readFile(file, 'utf8')
+  } catch {
+    return fallback
+  }
+}
+
+/** The memory directory of a project created by these tests. */
+function memoryDirOf(projectId) {
+  return join(projectDirOf(projectId), 'memory')
+}
+
+/** The directory compaction moves whole files into. */
+function archiveDirOf(projectId) {
+  return join(memoryDirOf(projectId), 'archive')
+}
+
+/** One topic file's raw text ('' when it does not exist). */
+async function memoryFileOf(projectId, name) {
+  return readFileOr(join(memoryDirOf(projectId), `${name}.md`))
+}
+
+/** The generated index file on disk. */
+async function memoryIndexOnDisk(projectId) {
+  return readFileOr(join(memoryDirOf(projectId), 'MEMORY.md'))
+}
+
+/** The live topic file names (never MEMORY.md, never the archive directory). */
+async function liveMemoryNames(projectId) {
+  try {
+    const entries = await readdir(memoryDirOf(projectId))
+    return entries.filter((name) => name.endsWith('.md') && name !== 'MEMORY.md').sort()
+  } catch {
+    return []
+  }
+}
+
+/** The archived file names, sorted. */
+async function archiveNames(projectId) {
+  try {
+    return (await readdir(archiveDirOf(projectId))).sort()
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Write topic files straight to disk, bypassing the tool. Used for fixtures that
+ * are too large to build one tool call at a time (the index ladder), and to pin
+ * the "a hand-written file is still a topic file" fallback.
+ */
+async function seedMemoryFiles(projectId, files) {
+  const dir = memoryDirOf(projectId)
+  await mkdir(dir, { recursive: true })
+  for (const file of files) {
+    const frontmatter = file.frontmatter === false
+      ? ''
+      : [
+        '---',
+        `name: ${file.name}`,
+        `description: ${file.description ?? ''}`,
+        `type: ${file.type || 'reference'}`,
+        `modified: ${file.modified || new Date().toISOString()}`,
+        '---',
+        '',
+      ].join('\n')
+    await writeFile(join(dir, `${file.name}.md`), `${frontmatter}${file.body ?? ''}\n`)
+  }
+}
+
+/** A project whose memory has two files, each with a description and a body marker. */
 async function memoryProject(name) {
   const created = await call('projects_create', { name, goal: 'Ship it.', autonomy: 'auto' })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
   await call('projects_memory', {
     project_id: projectId,
     action: 'write',
-    text: [
-      '## Alpha decisions',
-      'Copy lives in /content.',
-      'BODY-ALPHA-MARKER the copy lives in /content.',
-      '',
-      '## Beta gotchas',
-      'pnpm only, no npm.',
-      'BODY-BETA-MARKER pnpm only, no npm.',
-      '',
-    ].join('\n'),
+    name: 'alpha-decisions',
+    description: 'Copy lives in /content.',
+    text: 'Copy lives in /content.\nBODY-ALPHA-MARKER the copy lives in /content.',
+  })
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'beta-gotchas',
+    description: 'pnpm only, no npm.',
+    text: 'pnpm only, no npm.\nBODY-BETA-MARKER pnpm only, no npm.',
   })
   return projectId
 }
 
-test('the dispatch prompt carries a memory index instead of the memory', async () => {
-  const projectId = await memoryProject('Indexed memory')
-  const added = await call('projects_add_task', { project_id: projectId, title: 'Tweak a button' })
-  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
-  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
-
-  const prompt = activations[activations.length - 1].prompt[0].text
-  // Only the one-line description leaks, never the rest of a section body.
-  assert.doesNotMatch(prompt, /BODY-ALPHA-MARKER/)
-  assert.doesNotMatch(prompt, /BODY-BETA-MARKER/)
-  // The index lists both titles with a description and a size, and says how to
-  // read one or search for one.
-  assert.match(prompt, /## Shared project memory\n2 section\(s\), \d+ characters\./)
-  assert.match(prompt, /· Alpha decisions — Copy lives in \/content\.（\d+ chars）/)
-  assert.match(prompt, /· Beta gotchas — pnpm only, no npm\.（\d+ chars）/)
-  assert.match(prompt, /not its contents/)
-  assert.match(prompt, /action:"read", section:"<title>"/)
-  assert.match(prompt, /action:"search", query:"<keyword>"/)
-  // The closing instruction to append findings survives.
-  assert.match(prompt, /action "append"/)
-})
-
-test('an oversized memory index is truncated and says how many sections are missing', async () => {
-  // autoCompact off: 400 long sections would otherwise be compacted below the
-  // budget before the index is ever rendered.
-  const created = await call('projects_create', {
-    name: 'Huge memory',
-    goal: 'Ship it.',
-    autonomy: 'auto',
-    autoCompact: false,
+test('projects_memory append creates a file with frontmatter and appends to it', async () => {
+  const projectId = await newProject('Append action')
+  const created = await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 'Deployment Notes',
+    description: 'How deploys work',
+    text: 'Deploys run from main.',
   })
-  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
-  // 400 sections: the full format, the no-description format and the title-only
-  // format all overflow 4000 characters, so the index must truncate.
-  const sections = []
-  for (let index = 0; index < 400; index += 1) {
-    sections.push(`## Long history section ${index}`, `BODY-HIDDEN-${index} ${'x'.repeat(200)}`, '')
-  }
-  await call('projects_memory', { project_id: projectId, action: 'write', text: sections.join('\n') })
+  assert.match(created, /Appended 22 characters to memory file "deployment-notes"/)
+  // The name is a slug, and the file carries the four frontmatter fields.
+  const raw = await memoryFileOf(projectId, 'deployment-notes')
+  assert.match(
+    raw,
+    /^---\nname: deployment-notes\ndescription: How deploys work\ntype: reference\nmodified: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\n---\n\nDeploys run from main\.\n$/,
+  )
+  // `modified` is the write time, not the epoch.
+  const modified = raw.match(/^modified: (.+)$/m)[1]
+  assert.ok(Math.abs(Date.now() - Date.parse(modified)) < 60_000, `modified is the write time, got ${modified}`)
 
-  const added = await call('projects_add_task', { project_id: projectId, title: 'Small change' })
-  const taskId = added.match(/t-[0-9a-f]{8}/)[0]
-  await call('projects_dispatch', { project_id: projectId, task_id: taskId })
-
-  const prompt = activations[activations.length - 1].prompt[0].text
-  const index = prompt.split('## Shared project memory\n')[1].split('\n\nThe list above')[0]
-  assert.ok(index.length <= 4000, `index is capped, got ${index.length} characters`)
-  assert.match(index, /400 section\(s\)/)
-  assert.match(index, /truncated to fit the 4000-character index cap/)
-  assert.match(index, /· Long history section 0\n/)
-  assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 4000 characters\)\./)
-  // Truncation drops whole sections, never a description: no body leaks.
-  assert.doesNotMatch(prompt, /BODY-HIDDEN-/)
+  const appended = await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 'deployment-notes',
+    text: 'Rollback is a revert.',
+  })
+  assert.match(appended, /Appended 21 characters to memory file "deployment-notes" \(45 characters\)/)
+  assert.equal(
+    await call('projects_memory', { project_id: projectId, action: 'read', name: 'deployment-notes' }),
+    'Deploys run from main.\n\nRollback is a revert.',
+  )
+  // A second append keeps the description the file was created with.
+  assert.match(await memoryFileOf(projectId, 'deployment-notes'), /^description: How deploys work$/m)
 })
 
-test('projects_memory index lists titles, descriptions and sizes without any body', async () => {
-  const projectId = await memoryProject('Index action')
-  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
-  assert.match(index, /2 section\(s\), \d+ characters\./)
-  assert.match(index, /· Alpha decisions — Copy lives in \/content\.（\d+ chars）/)
-  assert.match(index, /· Beta gotchas — pnpm only, no npm\.（\d+ chars）/)
-  assert.doesNotMatch(index, /BODY-ALPHA-MARKER/)
-  assert.doesNotMatch(index, /BODY-BETA-MARKER/)
-})
-
-test('projects_memory read with a section returns only that section', async () => {
-  const projectId = await memoryProject('Section read')
-
-  const exact = await call('projects_memory', { project_id: projectId, action: 'read', section: 'Beta gotchas' })
-  assert.match(exact, /^## Beta gotchas\n\npnpm only, no npm\.\nBODY-BETA-MARKER pnpm only, no npm\.$/)
-  assert.doesNotMatch(exact, /BODY-ALPHA-MARKER/)
-
-  // Matching is forgiving: case-insensitive, prefix and substring both work.
-  const prefix = await call('projects_memory', { project_id: projectId, action: 'read', section: 'alpha' })
-  assert.match(prefix, /BODY-ALPHA-MARKER/)
-  assert.doesNotMatch(prefix, /BODY-BETA-MARKER/)
-  const substring = await call('projects_memory', { project_id: projectId, action: 'read', section: 'gotcha' })
-  assert.match(substring, /BODY-BETA-MARKER/)
-
-  // An unknown section fails loudly and lists what does exist.
-  await assert.rejects(
-    () => call('projects_memory', { project_id: projectId, action: 'read', section: 'nope' }),
-    /No memory section matches "nope"\. Sections: Alpha decisions \| Beta gotchas/,
+test('projects_memory write replaces one file and keeps the others', async () => {
+  const projectId = await memoryProject('Write action')
+  const written = await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'beta-gotchas',
+    text: 'Only this.',
+  })
+  assert.match(written, /Replaced memory file "beta-gotchas" \(10 characters\)/)
+  assert.equal(
+    await call('projects_memory', { project_id: projectId, action: 'read', name: 'beta-gotchas' }),
+    'Only this.',
+  )
+  // No description given: the existing one survives a rewrite.
+  assert.match(await memoryFileOf(projectId, 'beta-gotchas'), /^description: pnpm only, no npm\.$/m)
+  assert.match(
+    await call('projects_memory', { project_id: projectId, action: 'read', name: 'alpha-decisions' }),
+    /BODY-ALPHA-MARKER/,
   )
 })
 
-test('projects_memory read without a section still returns the whole file', async () => {
-  const projectId = await memoryProject('Whole read')
-  const whole = await call('projects_memory', { project_id: projectId })
-  assert.match(whole, /BODY-ALPHA-MARKER/)
-  assert.match(whole, /BODY-BETA-MARKER/)
-  assert.match(whole, /## Alpha decisions/)
-  // `action: 'read'` is the same thing, spelled out.
-  assert.equal(await call('projects_memory', { project_id: projectId, action: 'read' }), whole)
+test('projects_memory index lists names, descriptions, sizes and dates without any body', async () => {
+  const projectId = await memoryProject('Index action')
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /2 file\(s\), \d+ characters\./)
+  assert.match(index, /· alpha-decisions — Copy lives in \/content\.（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  assert.match(index, /· beta-gotchas — pnpm only, no npm\.（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  assert.doesNotMatch(index, /BODY-ALPHA-MARKER/)
+  assert.doesNotMatch(index, /BODY-BETA-MARKER/)
+  // The generated index file on disk is the same list.
+  const onDisk = await memoryIndexOnDisk(projectId)
+  assert.match(onDisk, /^# Shared memory index\n\n2 file\(s\)/)
+  assert.match(onDisk, /· alpha-decisions — Copy lives in \/content\./)
 })
 
-/** A project whose memory is built from `[title, body]` pairs. */
-async function projectWithMemory(name, sections) {
+test('projects_memory read with a name returns only that file', async () => {
+  const projectId = await memoryProject('Name read')
+  const exact = await call('projects_memory', { project_id: projectId, action: 'read', name: 'beta-gotchas' })
+  assert.match(exact, /^pnpm only, no npm\.\nBODY-BETA-MARKER pnpm only, no npm\.$/)
+  assert.doesNotMatch(exact, /BODY-ALPHA-MARKER/)
+
+  // Matching is forgiving: case-insensitive, prefix and substring both work,
+  // and a title copied from the old memory still finds the file.
+  const prefix = await call('projects_memory', { project_id: projectId, action: 'read', name: 'alpha' })
+  assert.match(prefix, /BODY-ALPHA-MARKER/)
+  const substring = await call('projects_memory', { project_id: projectId, action: 'read', name: 'gotcha' })
+  assert.match(substring, /BODY-BETA-MARKER/)
+  const asTitle = await call('projects_memory', { project_id: projectId, action: 'read', name: 'Beta gotchas' })
+  assert.match(asTitle, /BODY-BETA-MARKER/)
+  // `section` is the deprecated alias for `name`.
+  const alias = await call('projects_memory', { project_id: projectId, action: 'read', section: 'alpha' })
+  assert.match(alias, /BODY-ALPHA-MARKER/)
+
+  // An unknown name fails loudly and lists what does exist.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'read', name: 'nope' }),
+    /No memory file matches "nope"\. Files: alpha-decisions \| beta-gotchas/,
+  )
+})
+
+test('projects_memory read without a name returns the index', async () => {
+  const projectId = await memoryProject('Bare read')
+  const index = await call('projects_memory', { project_id: projectId })
+  assert.match(index, /2 file\(s\), \d+ characters\./)
+  assert.match(index, /· alpha-decisions — /)
+  assert.doesNotMatch(index, /BODY-ALPHA-MARKER/)
+  // `action: 'read'` is the same thing, spelled out.
+  assert.equal(await call('projects_memory', { project_id: projectId, action: 'read' }), index)
+})
+
+test('projects_memory delete removes one file and refreshes the index', async () => {
+  const projectId = await memoryProject('Delete action')
+  const deleted = await call('projects_memory', { project_id: projectId, action: 'delete', name: 'beta-gotchas' })
+  assert.match(deleted, /Deleted memory file "beta-gotchas" \(\d+ characters\)\. The memory now has 1 file\(s\)/)
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'read', name: 'beta-gotchas' }),
+    /No memory file matches "beta-gotchas"/,
+  )
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /1 file\(s\)/)
+  assert.doesNotMatch(index, /beta-gotchas/)
+  assert.doesNotMatch(await memoryIndexOnDisk(projectId), /beta-gotchas/)
+  // Deleting a missing file is loud, and MEMORY.md is not a topic file.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'delete', name: 'nope' }),
+    /No memory file matches "nope"/,
+  )
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'delete', name: 'MEMORY.md' }),
+    /MEMORY\.md is the generated index/,
+  )
+})
+
+test('a memory file name cannot escape the memory directory', async () => {
+  const projectId = await newProject('Name safety')
+  const projectBefore = await readFileOr(join(projectDirOf(projectId), 'project.json'))
+  await call('projects_memory', { project_id: projectId, action: 'write', name: '../../project.json', text: 'x' })
+  // The slug strips slashes and dots, so the write lands inside memory/.
+  assert.match(await memoryFileOf(projectId, 'project-json'), /^---\nname: project-json/)
+  assert.equal(await readFileOr(join(projectDirOf(projectId), 'project.json')), projectBefore)
+  // A name with no usable characters is rejected instead of writing a file.
+  await assert.rejects(
+    () => call('projects_memory', { project_id: projectId, action: 'write', name: '!!!', text: 'x' }),
+    /is not a valid memory file name/,
+  )
+})
+
+test('the page can write and delete one memory file through the HTTP route', async () => {
+  const projectId = await newProject('Page memory files')
+  const created = await request('POST', `/projects-api/projects/${projectId}/memory`, {
+    name: 'Deploy Notes',
+    description: 'How deploys work',
+    type: 'decision',
+    text: 'Deploys run from main.',
+  })
+  assert.equal(created.status, 200)
+  assert.equal(created.body.saved, true)
+  assert.equal(created.body.name, 'deploy-notes')
+  assert.equal(created.body.size, 22)
+
+  // The `type` field round-trips through frontmatter.
+  assert.match(await memoryFileOf(projectId, 'deploy-notes'), /^type: decision$/m)
+  const read = await request('GET', `/projects-api/projects/${projectId}/memory/deploy-notes`)
+  assert.equal(read.status, 200)
+  assert.equal(read.body.type, 'decision')
+  assert.equal(read.body.description, 'How deploys work')
+  assert.equal(read.body.text, 'Deploys run from main.')
+
+  // A write without a name is rejected instead of guessing a file.
+  const nameless = await request('POST', `/projects-api/projects/${projectId}/memory`, { text: 'x' })
+  assert.equal(nameless.status, 400)
+  assert.match(nameless.body.error, /name is required/)
+
+  // Delete removes exactly that file.
+  const deleted = await request('DELETE', `/projects-api/projects/${projectId}/memory/deploy-notes`)
+  assert.equal(deleted.status, 200)
+  assert.equal(deleted.body.deleted, true)
+  assert.deepEqual(await liveMemoryNames(projectId), [])
+  const gone = await request('GET', `/projects-api/projects/${projectId}/memory/deploy-notes`)
+  assert.equal(gone.status, 404)
+})
+
+test('a description is explicit frontmatter, and falls back to the first body line', async () => {
+  const projectId = await newProject('Described memory')
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'styled-section',
+    description: '- **Bold** `code` and _plain_ text',
+    text: '- **Bold** `code` and _plain_ text\nBODY-STYLED-HIDDEN',
+  })
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'derived-section',
+    text: '#### Deep heading\nBODY-DEEP-HIDDEN',
+  })
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'truncated-section',
+    description: 'L'.repeat(120),
+    text: 'body',
+  })
+  // A hand-written file with no frontmatter at all is still a topic file.
+  await seedMemoryFiles(projectId, [
+    { name: 'hand-written', body: 'Plain first line.\nBODY-HAND-HIDDEN', frontmatter: false },
+    { name: 'empty-file', body: '', frontmatter: false },
+    { name: 'dated-file', description: 'Dated body.', modified: '2026-11-03T01:39:35.694Z', body: 'Dated body.' },
+  ])
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  // The explicit description is markdown-stripped like a derived one.
+  assert.match(index, /· styled-section — Bold code and _plain_ text（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  // No description: the first non-empty body line, heading hashes stripped.
+  assert.match(index, /· derived-section — Deep heading（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  // Longer than 80 characters: cut at 80 and marked with an ellipsis.
+  assert.match(index, new RegExp(`· truncated-section — ${'L'.repeat(80)}…（\\d+ chars，`))
+  // A file with no frontmatter: name from the file name, description from line 1.
+  assert.match(index, /· hand-written — Plain first line\.（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  // No body and no description: the name is the description.
+  assert.match(index, /· empty-file — empty-file（0 chars，\d{4}-\d{2}-\d{2}）/)
+  // `modified` from frontmatter is what the index shows.
+  assert.match(index, /· dated-file — Dated body\.（11 chars，2026-11-03）/)
+  assert.doesNotMatch(index, /BODY-STYLED-HIDDEN|BODY-DEEP-HIDDEN|BODY-HAND-HIDDEN/)
+})
+
+/** A project whose memory files are `[name, description, body]` triples. */
+async function projectWithMemory(name, files) {
   const created = await call('projects_create', { name, goal: 'Ship it.', autonomy: 'auto' })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
-  const text = sections.map(([title, body]) => `## ${title}\n${body}\n`).join('\n')
-  await call('projects_memory', { project_id: projectId, action: 'write', text })
+  for (const [file, description, body] of files) {
+    await call('projects_memory', { project_id: projectId, action: 'write', name: file, description, text: body })
+  }
   return projectId
 }
 
-/** `count` sections whose first body line is exactly 80 characters long. */
-function describedMemory(count, tag = 'Section') {
-  const sections = []
-  for (let index = 0; index < count; index += 1) {
-    sections.push([`${tag} ${index}`, `${'d'.repeat(80)}\nBODY-${tag}-${index}`])
-  }
-  return sections
+/** `count` files whose description is exactly 80 characters. */
+function describedFiles(count, tag = 'section') {
+  return Array.from({ length: count }, (_, index) => ({
+    name: `${tag}-${index}`,
+    description: 'd'.repeat(80),
+    body: `${'d'.repeat(80)}\nBODY-${tag}-${index}`,
+  }))
 }
 
 /** The memory index a dispatched worker's prompt carries. */
@@ -1319,57 +1556,36 @@ async function promptMemoryIndex(projectId) {
   return prompt.split('## Shared project memory\n')[1].split('\n\nThe list above')[0]
 }
 
-test('index descriptions are the first body line, markdown stripped and truncated', async () => {
-  const long = 'L'.repeat(120)
-  const projectId = await projectWithMemory('Described memory', [
-    ['Styled section', '- **Bold** `code` and _plain_ text\nBODY-STYLED-HIDDEN'],
-    ['Deep section', '#### Deep heading\nBODY-DEEP-HIDDEN'],
-    ['Truncated section', `${long}\nBODY-LONG-HIDDEN`],
-    ['Empty section', ''],
-    ['Dated section (2026-11-16, agent-1)', 'Dated body.'],
-  ])
-  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
-  // First non-empty line, with heading hashes, list bullets, bold and code
-  // markers stripped.
-  assert.match(index, /· Styled section — Bold code and _plain_ text（\d+ chars）/)
-  assert.match(index, /· Deep section — Deep heading（\d+ chars）/)
-  // Longer than 80 characters: cut at 80 and marked with an ellipsis.
-  assert.match(index, new RegExp(`· Truncated section — ${'L'.repeat(80)}…（\\d+ chars）`))
-  // No body, no description: the line falls back to title + size.
-  assert.match(index, /· Empty section（0 chars）/)
-  // The date in the title is carried into the index; no date means no date.
-  assert.match(index, /· Dated section \(2026-11-16, agent-1\) — Dated body\.（\d+ chars，2026-11-16）/)
-  assert.doesNotMatch(index, /· Styled section[^\n]*，20\d\d-\d\d-\d\d/)
-  // Descriptions never drag the rest of the body in.
-  assert.doesNotMatch(index, /BODY-STYLED-HIDDEN|BODY-DEEP-HIDDEN|BODY-LONG-HIDDEN/)
-})
-
-test('projects_memory search matches titles and bodies without returning bodies', async () => {
+test('projects_memory search matches names, descriptions and bodies without returning bodies', async () => {
   const projectId = await projectWithMemory('Searchable memory', [
-    ['Alpha decisions', 'The copy lives in /content.\nBODY-ALPHA-SECRET'],
-    ['Beta gotchas', 'pnpm only, no npm.\nBODY-BETA-SECRET'],
-    ['Gamma notes', 'Alpha is mentioned here too.\nBODY-GAMMA-SECRET'],
-    ['Old plan [superseded]', 'Alpha plan that was replaced.\nBODY-OLD-SECRET'],
+    ['alpha-decisions', 'The copy lives in /content.', 'The copy lives in /content.\nBODY-ALPHA-SECRET'],
+    ['beta-gotchas', 'pnpm only, no npm.', 'pnpm only, no npm.\nBODY-BETA-SECRET'],
+    ['gamma-notes', 'Alpha is mentioned here too.', 'Alpha is mentioned here too.\nBODY-GAMMA-SECRET'],
+    ['old-plan-superseded', 'Alpha plan that was replaced.', 'Alpha plan that was replaced.\nBODY-OLD-SECRET'],
   ])
 
-  // A title match returns the section's title, description and size.
-  const byTitle = await call('projects_memory', { project_id: projectId, action: 'search', query: 'beta' })
-  assert.match(byTitle, /1 section\(s\) match "beta"/)
-  assert.match(byTitle, /· Beta gotchas — pnpm only, no npm\.（\d+ chars）/)
-  assert.doesNotMatch(byTitle, /BODY-BETA-SECRET/)
+  // A name match returns the file's name, description, size and date.
+  const byName = await call('projects_memory', { project_id: projectId, action: 'search', query: 'beta' })
+  assert.match(byName, /1 file\(s\) match "beta"/)
+  assert.match(byName, /· beta-gotchas — pnpm only, no npm\.（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  assert.doesNotMatch(byName, /BODY-BETA-SECRET/)
 
-  // A body match is case-insensitive and can return several sections; the
-  // superseded section contains the keyword too but is excluded.
+  // A description match works too.
+  const byDescription = await call('projects_memory', { project_id: projectId, action: 'search', query: 'pnpm only' })
+  assert.match(byDescription, /· beta-gotchas/)
+
+  // A body match is case-insensitive and can return several files; the
+  // superseded file contains the keyword too but is excluded.
   const byBody = await call('projects_memory', { project_id: projectId, action: 'search', query: 'ALPHA' })
-  assert.match(byBody, /2 section\(s\) match "ALPHA"/)
-  assert.match(byBody, /· Alpha decisions — The copy lives in \/content\./)
-  assert.match(byBody, /· Gamma notes — Alpha is mentioned here too\./)
+  assert.match(byBody, /2 file\(s\) match "ALPHA"/)
+  assert.match(byBody, /· alpha-decisions — The copy lives in \/content\./)
+  assert.match(byBody, /· gamma-notes — Alpha is mentioned here too\./)
   assert.doesNotMatch(byBody, /BODY-ALPHA-SECRET|BODY-GAMMA-SECRET/)
-  assert.doesNotMatch(byBody, /Old plan/)
+  assert.doesNotMatch(byBody, /old-plan/)
 
   // No match says so and points at the index.
   const miss = await call('projects_memory', { project_id: projectId, action: 'search', query: 'zebra' })
-  assert.match(miss, /No memory section matches "zebra"/)
+  assert.match(miss, /No memory file matches "zebra"/)
   assert.match(miss, /action:"index"/)
 
   // A missing query is a loud error, not an empty result.
@@ -1379,109 +1595,117 @@ test('projects_memory search matches titles and bodies without returning bodies'
   )
 })
 
-test('search caps its result list and counts the sections left out', async () => {
-  const sections = []
+test('search caps its result list and counts the files left out', async () => {
+  const files = []
   for (let index = 0; index < 12; index += 1) {
-    sections.push([`Match ${index}`, `keyword appears in section ${index}.`])
+    files.push([`match-${index}`, `keyword appears in file ${index}.`, `keyword appears in file ${index}.`])
   }
-  const projectId = await projectWithMemory('Many matches', sections)
+  const projectId = await projectWithMemory('Many matches', files)
   const result = await call('projects_memory', { project_id: projectId, action: 'search', query: 'keyword' })
-  assert.match(result, /12 section\(s\) match "keyword", showing the first 10/)
-  assert.match(result, /- …and 2 more section\(s\) match; narrow the query or use action:"index"\./)
+  assert.match(result, /12 file\(s\) match "keyword", showing the first 10/)
+  assert.match(result, /- …and 2 more file\(s\) match; narrow the query or use action:"index"\./)
   assert.equal((result.match(/^· /gm) || []).length, 10)
 })
 
-test('stale sections leave the index and search but stay readable by name', async () => {
+test('stale files leave the index and search but stay readable by name', async () => {
   const projectId = await projectWithMemory('Stale memory', [
-    ['Live decision', 'Use pnpm.\nBODY-LIVE'],
-    ['Old decision [superseded]', 'Use npm.\nBODY-OLD'],
-    ['Ancient notes [ARCHIVED]', 'Nothing to see.\nBODY-ANCIENT'],
+    ['live-decision', 'Use pnpm.', 'Use pnpm.\nBODY-LIVE'],
+    ['old-decision-superseded', 'Use npm.', 'Use npm.\nBODY-OLD'],
+    ['ancient-notes-archived', 'Nothing to see.', 'Nothing to see.\nBODY-ANCIENT'],
   ])
 
   const index = await call('projects_memory', { project_id: projectId, action: 'index' })
-  assert.match(index, /1 section\(s\), \d+ characters\./)
-  assert.match(index, /· Live decision — Use pnpm\./)
-  assert.doesNotMatch(index, /· Old decision/)
-  assert.doesNotMatch(index, /· Ancient notes/)
-  // They are still named once, titles only, so a reader knows history exists.
+  assert.match(index, /1 file\(s\), \d+ characters\./)
+  assert.match(index, /· live-decision — Use pnpm\./)
+  assert.doesNotMatch(index, /· old-decision/)
+  assert.doesNotMatch(index, /· ancient-notes/)
+  // They are still named once, names only, so a reader knows history exists.
   assert.match(
     index,
-    /2 section\(s\) marked stale \(superseded\/archived; still readable by name\): Old decision \[superseded\] \| Ancient notes \[ARCHIVED\]/,
+    /2 file\(s\) marked stale \(superseded\/archived; still readable by name\): old-decision-superseded \| ancient-notes-archived/,
   )
 
   const search = await call('projects_memory', { project_id: projectId, action: 'search', query: 'npm' })
-  assert.match(search, /1 section\(s\) match "npm"/)
-  assert.match(search, /· Live decision/)
-  assert.doesNotMatch(search, /Old decision|Ancient notes/)
+  assert.match(search, /1 file\(s\) match "npm"/)
+  assert.match(search, /· live-decision/)
+  assert.doesNotMatch(search, /old-decision|ancient-notes/)
 
   // Read by name still works, marker included...
-  const old = await call('projects_memory', { project_id: projectId, action: 'read', section: 'Old decision' })
-  assert.match(old, /^## Old decision \[superseded\]\n\nUse npm\./)
+  const old = await call('projects_memory', { project_id: projectId, action: 'read', name: 'old-decision' })
+  assert.match(old, /^Use npm\./)
   assert.match(old, /BODY-OLD/)
-  // ...and a whole-file read still contains every section.
-  const whole = await call('projects_memory', { project_id: projectId })
-  assert.match(whole, /BODY-OLD/)
-  assert.match(whole, /BODY-ANCIENT/)
+  // ...and the bare read is the index, so it carries no body at all.
+  const bare = await call('projects_memory', { project_id: projectId })
+  assert.doesNotMatch(bare, /BODY-OLD|BODY-ANCIENT/)
 
   // The worker prompt's index drops them entirely: workers act on current
   // knowledge, while the coordinator's index still names them above.
   const promptIndex = await promptMemoryIndex(projectId)
-  assert.doesNotMatch(promptIndex, /Old decision|Ancient notes|marked stale/)
+  assert.doesNotMatch(promptIndex, /old-decision|ancient-notes|marked stale/)
 })
 
 test('the index degrades in a fixed ladder when it exceeds its cap', async () => {
-  // 10 sections: the full format (title + description + size) fits 4000.
-  const small = await projectWithMemory('Ladder small', describedMemory(10))
+  // 10 files: the full format (name + description + size + date) fits 4000.
+  const small = await newProject('Ladder small')
+  await seedMemoryFiles(small, describedFiles(10))
   const smallIndex = await promptMemoryIndex(small)
-  assert.match(smallIndex, /· Section 0 — d{80}（\d+ chars）/)
+  assert.match(smallIndex, /· section-0 — d{80}（\d+ chars，\d{4}-\d{2}-\d{2}）/)
   assert.doesNotMatch(smallIndex, /Descriptions omitted|Titles only|truncated/)
 
-  // 40 sections: descriptions no longer fit, sizes still do.
-  const medium = await projectWithMemory('Ladder medium', describedMemory(40))
+  // 40 files: descriptions no longer fit, sizes still do.
+  const medium = await newProject('Ladder medium')
+  await seedMemoryFiles(medium, describedFiles(40))
   const mediumIndex = await promptMemoryIndex(medium)
   assert.match(mediumIndex, /Descriptions omitted to fit the 4000-character index cap\./)
-  assert.match(mediumIndex, /· Section 0（\d+ chars）/)
-  assert.doesNotMatch(mediumIndex, /· Section 0 —/)
+  assert.match(mediumIndex, /· section-0（\d+ chars，\d{4}-\d{2}-\d{2}）/)
+  assert.doesNotMatch(mediumIndex, /· section-0 —/)
   assert.ok(mediumIndex.length <= 4000, `prompt index is capped, got ${mediumIndex.length}`)
 
-  // 200 sections: only titles fit 4000; the tool's 8000-character index keeps
-  // the sizes, which is the same ladder at a different threshold.
-  const large = await projectWithMemory('Ladder large', describedMemory(200))
+  // 200 files: only names fit 4000; the tool's 8000-character index keeps the
+  // sizes, which is the same ladder at a different threshold.
+  const large = await newProject('Ladder large')
+  await seedMemoryFiles(large, describedFiles(200))
   const largeIndex = await promptMemoryIndex(large)
   assert.match(largeIndex, /Titles only \(descriptions and sizes omitted\) to fit the 4000-character index cap\./)
-  assert.match(largeIndex, /· Section 0\n/)
-  assert.doesNotMatch(largeIndex, /· Section 0（/)
+  assert.match(largeIndex, /· section-0\n/)
+  assert.doesNotMatch(largeIndex, /· section-0（/)
   assert.ok(largeIndex.length <= 4000, `prompt index is capped, got ${largeIndex.length}`)
   const largeToolIndex = await call('projects_memory', { project_id: large, action: 'index' })
   assert.match(largeToolIndex, /Descriptions omitted to fit the 8000-character index cap\./)
-  assert.match(largeToolIndex, /· Section 0（\d+ chars）/)
+  assert.match(largeToolIndex, /· section-0（\d+ chars，\d{4}-\d{2}-\d{2}）/)
   assert.ok(largeToolIndex.length <= 8000, `tool index is capped, got ${largeToolIndex.length}`)
 
-  // 400 sections: even titles do not fit, so the list is truncated and counted.
-  const huge = await projectWithMemory('Ladder huge', describedMemory(400))
+  // 400 files: even names do not fit, so the list is truncated and counted.
+  const huge = await newProject('Ladder huge')
+  await seedMemoryFiles(huge, describedFiles(400))
   const hugeIndex = await promptMemoryIndex(huge)
   assert.match(hugeIndex, /truncated to fit the 4000-character index cap/)
-  assert.match(hugeIndex, /- …and \d+ more section\(s\) not listed \(index capped at 4000 characters\)\./)
+  assert.match(hugeIndex, /- …and \d+ more file\(s\) not listed \(index capped at 4000 characters\)\./)
   assert.ok(hugeIndex.length <= 4000, `prompt index is capped, got ${hugeIndex.length}`)
   assert.doesNotMatch(hugeIndex, /d{80}/)
 })
 
 test('the dispatch index keeps descriptions for a memory shaped like this project\'s', async () => {
-  // Regression: this project's real memory (16 sections, long Chinese titles,
-  // 80-character descriptions) overflowed the old 2000-character prompt cap and
-  // degraded to L2 — titles and sizes but no descriptions, which is the one
-  // thing the index exists to provide. The cap is 4000, so this shape stays L1.
-  const sections = []
+  // Regression: this project's real memory (long Chinese names, 80-character
+  // descriptions) overflowed the old 2000-character prompt cap and degraded to
+  // L2 — names and sizes but no descriptions, which is the one thing the index
+  // exists to provide. The cap is 4000, so this shape stays L1.
+  const files = []
   for (let index = 1; index <= 16; index += 1) {
-    const title = `host：第 ${index} 个很长的中文标题（2026-11-16, agent-${index}）`
-    sections.push([title, `${'描'.repeat(80)}\nBODY-HIDDEN-${index}`])
+    files.push({
+      name: `host-第-${index}-个很长的中文标题-2026-11-16-agent-${index}`,
+      description: '描'.repeat(80),
+      modified: '2026-11-16T00:00:00.000Z',
+      body: `${'描'.repeat(80)}\nBODY-HIDDEN-${index}`,
+    })
   }
-  const projectId = await projectWithMemory('Real-shaped memory', sections)
+  const projectId = await newProject('Real-shaped memory')
+  await seedMemoryFiles(projectId, files)
   const index = await promptMemoryIndex(projectId)
   // The fixture really does reproduce the old overflow, and the new cap holds.
   assert.ok(index.length > 2000, `fixture must exceed the old cap, got ${index.length}`)
   assert.ok(index.length <= 4000, `prompt index is capped, got ${index.length}`)
-  assert.match(index, /16 section\(s\)/)
+  assert.match(index, /16 file\(s\)/)
   assert.doesNotMatch(index, /Descriptions omitted|Titles only|truncated/)
   // Every entry carries its description, size and date.
   assert.equal((index.match(/^· .+ — .+（\d+ chars，2026-11-16）$/gm) || []).length, 16)
@@ -1489,57 +1713,129 @@ test('the dispatch index keeps descriptions for a memory shaped like this projec
 })
 
 test('the tool index is capped at 8000 characters too', async () => {
-  // 700 sections with 80-character descriptions: the full, no-description and
-  // title-only formats all overflow 8000, so the tool's index truncates too.
-  const created = await call('projects_create', {
-    name: 'Tool cap',
-    goal: 'Ship it.',
-    autonomy: 'auto',
-    memoryBudget: 200_000,
-  })
-  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
-  const text = describedMemory(700)
-    .map(([title, body]) => `## ${title}\n${body}\n`)
-    .join('\n')
-  await call('projects_memory', { project_id: projectId, action: 'write', text })
+  // 900 files with 80-character descriptions: the full, no-description and
+  // name-only formats all overflow 8000, so the tool's index truncates too.
+  const projectId = await newProject('Tool cap', { memoryBudget: 200_000 })
+  await seedMemoryFiles(projectId, describedFiles(900))
   const index = await call('projects_memory', { project_id: projectId, action: 'index' })
   assert.ok(index.length <= 8000, `tool index is capped, got ${index.length}`)
   assert.match(index, /truncated to fit the 8000-character index cap/)
-  assert.match(index, /- …and \d+ more section\(s\) not listed \(index capped at 8000 characters\)\./)
+  assert.match(index, /- …and \d+ more file\(s\) not listed \(index capped at 8000 characters\)\./)
   assert.doesNotMatch(index, /d{80}/)
 })
 
 test('projects_get returns the memory index, not the memory body', async () => {
   const projectId = await memoryProject('Indexed get')
   const detail = await call('projects_get', { project_id: projectId })
-  assert.match(detail, /## Shared memory\n2 section\(s\)/)
-  assert.match(detail, /· Alpha decisions — Copy lives in \/content\.（\d+ chars）/)
+  assert.match(detail, /## Shared memory\n2 file\(s\)/)
+  assert.match(detail, /· alpha-decisions — Copy lives in \/content\.（\d+ chars，\d{4}-\d{2}-\d{2}）/)
   assert.doesNotMatch(detail, /BODY-ALPHA-MARKER/)
 })
 
 test('appending past the memory budget warns instead of truncating silently', async () => {
-  const created = await call('projects_create', { name: 'Fat memory', goal: 'Ship it.', autonomy: 'auto' })
-  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
-  await call('projects_memory', { project_id: projectId, action: 'write', text: '## Start\n\nsmall.\n' })
+  const projectId = await newProject('Fat memory')
+  await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'start',
+    description: 'Start.',
+    text: 'small.',
+  })
 
-  const big = `## Bulk\n\n${'y'.repeat(65_000)}\n`
-  const appended = await call('projects_memory', { project_id: projectId, action: 'append', text: big })
-  assert.match(appended, /Appended \d+ characters/)
+  const big = 'y'.repeat(65_000)
+  const appended = await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 'bulk',
+    description: 'Bulk.',
+    text: big,
+  })
+  assert.match(appended, /Appended 65000 characters to memory file "bulk"/)
   assert.match(appended, /WARNING: the shared memory is now \d+ characters, \d+ over the 64000-character budget/)
   assert.doesNotMatch(appended, /hit the 200000-character write ceiling/)
+  // Over budget with two files: auto-compaction moves the older one out whole.
+  assert.match(
+    appended,
+    /Auto-compacted the shared memory: \d+ → \d+ characters \(1 file\(s\) moved to memory\/archive\/\)/,
+  )
+  assert.deepEqual(await archiveNames(projectId), ['start.md'])
 
   // Nothing was dropped: the append is on disk in full.
-  const whole = await call('projects_memory', { project_id: projectId })
-  assert.ok(whole.length > 65_000, `memory kept its bytes, got ${whole.length}`)
-  assert.match(whole, /## Bulk/)
+  const whole = await call('projects_memory', { project_id: projectId, action: 'read', name: 'bulk' })
+  assert.equal(whole.length, 65_000, `memory kept its bytes, got ${whole.length}`)
 })
 
 test('a write past the hard ceiling is reported, not swallowed', async () => {
-  const created = await call('projects_create', { name: 'Ceiling memory', goal: 'Ship it.', autonomy: 'auto' })
-  const projectId = created.match(/p-[0-9a-f]{8}/)[0]
-  const written = await call('projects_memory', { project_id: projectId, action: 'write', text: 'z'.repeat(200_001) })
+  const projectId = await newProject('Ceiling memory')
+  const written = await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 'huge',
+    text: 'z'.repeat(200_001),
+  })
   assert.match(written, /hit the 200000-character write ceiling and the tail was cut/)
-  assert.equal((await call('projects_memory', { project_id: projectId })).length, 200_000)
+  assert.equal((await call('projects_memory', { project_id: projectId, action: 'read', name: 'huge' })).length, 200_000)
+})
+
+test('a legacy memory.md is migrated to one file per section', async () => {
+  const projectId = await newProject('Legacy memory')
+  const legacy = [
+    'Loose preamble line one.',
+    'Loose preamble line two.',
+    '',
+    '## Alpha decisions (2026-11-03)',
+    'Copy lives in /content.',
+    'BODY-ALPHA',
+    '',
+    '## Beta gotchas (2026-11-04, agent-2)',
+    'pnpm only, no npm.',
+    'BODY-BETA',
+    '',
+    '## Gamma notes',
+    'No date in this title.',
+    'BODY-GAMMA',
+    '',
+  ].join('\n')
+  const legacyArchive = '## Compaction 2026-11-01T00:00:00.000Z — 100 → 50 characters, budget 4000\nMoved 1 section(s): Old\n\n## Old thing\n\nold body\n'
+  await writeFile(join(projectDirOf(projectId), 'memory.md'), legacy)
+  await writeFile(join(projectDirOf(projectId), 'memory-archive.md'), legacyArchive)
+
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  // One file per `## ` section plus the preamble, named by slug, described by
+  // the first body line, dated by the date in the title.
+  assert.match(index, /4 file\(s\), \d+ characters\./)
+  assert.match(index, /· alpha-decisions-2026-11-03 — Copy lives in \/content\.（\d+ chars，2026-11-03）/)
+  assert.match(index, /· beta-gotchas-2026-11-04-agent-2 — pnpm only, no npm\.（\d+ chars，2026-11-04）/)
+  assert.match(index, /· gamma-notes — No date in this title\./)
+  assert.match(index, /· preamble — Loose preamble line one\./)
+  // The legacy archive moved into memory/archive/ verbatim.
+  assert.match(index, /1 archived file\(s\) in memory\/archive\//)
+  assert.equal(await readFileOr(join(archiveDirOf(projectId), 'legacy-memory-archive.md')), legacyArchive)
+
+  // Content survived: the title is the body's first line, the body is verbatim.
+  const alpha = await call('projects_memory', { project_id: projectId, action: 'read', name: 'alpha-decisions-2026-11-03' })
+  assert.match(alpha, /^# Alpha decisions \(2026-11-03\)\n\nCopy lives in \/content\.\nBODY-ALPHA$/)
+  const gamma = await call('projects_memory', { project_id: projectId, action: 'read', name: 'gamma-notes' })
+  assert.match(gamma, /^# Gamma notes\n\nNo date in this title\.\nBODY-GAMMA$/)
+
+  // The legacy file is backed up, not deleted, and the originals are gone.
+  assert.equal(await readFileOr(join(projectDirOf(projectId), 'memory.bak.md')), legacy)
+  assert.equal(await readFileOr(join(projectDirOf(projectId), 'memory.md')), '')
+  assert.equal(await readFileOr(join(projectDirOf(projectId), 'memory-archive.md')), '')
+
+  // Idempotent: a second read neither duplicates files nor re-migrates.
+  const again = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.equal(again, index)
+  assert.deepEqual((await readdir(memoryDirOf(projectId))).sort(), [
+    'MEMORY.md',
+    'alpha-decisions-2026-11-03.md',
+    'archive',
+    'beta-gotchas-2026-11-04-agent-2.md',
+    'gamma-notes.md',
+    'preamble.md',
+  ])
+  // The generated index file lists the same files.
+  assert.match(await memoryIndexOnDisk(projectId), /4 file\(s\)/)
 })
 
 // ---------------------------------------------------------------------------
@@ -1575,6 +1871,49 @@ function languageBlock(prompt) {
   assert.ok(start >= 0, 'the prompt states the language rule')
   return prompt.slice(start, prompt.indexOf('\n\n', start))
 }
+
+test('a migration can be rolled back from memory.bak.md', async () => {
+  const projectId = await newProject('Rollback')
+  const legacy = '## Alpha (2026-11-03)\n\nCopy lives in /content.\n'
+  await writeFile(join(projectDirOf(projectId), 'memory.md'), legacy)
+  await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.equal(await readFileOr(join(projectDirOf(projectId), 'memory.bak.md')), legacy)
+
+  // A human rollback: restore the legacy file, drop the per-file memory.
+  await writeFile(join(projectDirOf(projectId), 'memory.md'), legacy)
+  await rm(memoryDirOf(projectId), { recursive: true, force: true })
+
+  // The next read migrates again, from the restored file, to the same content.
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /1 file\(s\)/)
+  assert.equal(
+    await call('projects_memory', { project_id: projectId, action: 'read', name: 'alpha-2026-11-03' }),
+    '# Alpha (2026-11-03)\n\nCopy lives in /content.',
+  )
+  assert.equal(await readFileOr(join(projectDirOf(projectId), 'memory.bak.md')), legacy)
+})
+
+test('migration never writes the reserved index name or an empty name', async () => {
+  const projectId = await newProject('Reserved names')
+  await writeFile(join(projectDirOf(projectId), 'memory.md'), [
+    '## Memory',
+    'A section whose slug is the reserved index name.',
+    'BODY-RESERVED',
+    '',
+    '## ！！！',
+    'A section whose slug is empty.',
+    'BODY-PUNCT',
+    '',
+  ].join('\n'))
+  const index = await call('projects_memory', { project_id: projectId, action: 'index' })
+  assert.match(index, /2 file\(s\)/)
+  assert.match(index, /· memory-topic — A section whose slug is the reserved index name\./)
+  assert.match(index, /· memory-topic-2 — A section whose slug is empty\./)
+  assert.deepEqual(await liveMemoryNames(projectId), ['memory-topic-2.md', 'memory-topic.md'])
+  // Both bodies survived the rename.
+  assert.match(await call('projects_memory', { project_id: projectId, action: 'read', name: 'memory-topic' }), /BODY-RESERVED/)
+  assert.match(await call('projects_memory', { project_id: projectId, action: 'read', name: 'memory-topic-2' }), /BODY-PUNCT/)
+})
 
 test('the worker prompt names the language to answer in', async () => {
   const zh = await promptFor({ name: '中文项目', goal: '发布营销站点。', brief: '写三个标题变体。' })
@@ -1641,52 +1980,44 @@ test('language detection follows the human, not the Latin identifiers in a brief
 // ---------------------------------------------------------------------------
 // Automatic memory compaction
 //
-// The memory is an append-only log, so it only grows. Once it crosses the
-// project's budget the host archives its oldest whole sections into
-// `memory-archive.md` and keeps the rest — deterministic, no LLM, nothing
-// summarised away. These tests drive that through both write paths (the tool and
-// the page's HTTP route) and pin the safety rails: a backup, a rollback when the
-// rewrite is not shorter, and single-flight per project.
-
-function projectDirOf(projectId) {
-  return join(home, 'projects', projectId)
-}
-
-async function readFileOr(file, fallback = '') {
-  try {
-    return await readFile(file, 'utf8')
-  } catch {
-    return fallback
-  }
-}
-
-async function memoryOf(projectId) {
-  return readFileOr(join(projectDirOf(projectId), 'memory.md'))
-}
-
-async function archiveOf(projectId) {
-  return readFileOr(join(projectDirOf(projectId), 'memory-archive.md'))
-}
-
-async function backupOf(projectId) {
-  return readFileOr(join(projectDirOf(projectId), 'memory.bak.md'))
-}
+// The memory only grows. Once it crosses the project's budget the host moves its
+// oldest whole files into `memory/archive/` and keeps the rest — deterministic,
+// no LLM, nothing summarised away, and never a split file. These tests drive
+// that through both write paths (the tool and the page's HTTP route) and pin the
+// safety rails: a rollback when the archive cannot be written, and single-flight
+// per project.
 
 async function storedProject(projectId) {
   return JSON.parse(await readFileOr(join(projectDirOf(projectId), 'project.json'), '{}'))
 }
 
-/** A memory of `count` sections of roughly `size` characters each. */
-function memoryWithSections(count, size, tag = 'S') {
-  const sections = []
+/** A memory of `count` files of roughly `size` characters each. */
+function memoryFileFixtures(count, size, tag = 's') {
+  const files = []
   for (let index = 1; index <= count; index += 1) {
-    sections.push(`## ${tag}${index} durable fact\n\n${'x'.repeat(size)}`)
+    files.push({
+      name: `${tag}${index}-durable-fact`,
+      description: `Durable fact ${index}`,
+      body: 'x'.repeat(size),
+    })
   }
-  return sections.join('\n\n')
+  return files
+}
+
+async function writeMemoryFixtures(projectId, files) {
+  for (const file of files) {
+    await call('projects_memory', {
+      project_id: projectId,
+      action: 'write',
+      name: file.name,
+      description: file.description,
+      text: file.body,
+    })
+  }
 }
 
 async function newProject(name, extra = {}) {
-  const created = await call('projects_create', { name, ...extra })
+  const created = await call('projects_create', { name, autonomy: 'auto', ...extra })
   return created.match(/p-[0-9a-f]{8}/)[0]
 }
 
@@ -1695,59 +2026,72 @@ test('a memory under its budget is not compacted', async () => {
   const written = await call('projects_memory', {
     project_id: projectId,
     action: 'write',
-    text: memoryWithSections(2, 900),
+    name: 's1-durable-fact',
+    description: 'Durable fact 1',
+    text: 'x'.repeat(900),
+  })
+  const second = await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 's2-durable-fact',
+    description: 'Durable fact 2',
+    text: 'x'.repeat(900),
   })
   assert.doesNotMatch(written, /Auto-compacted/)
-  assert.equal(await archiveOf(projectId), '')
-  assert.equal(await backupOf(projectId), '')
+  assert.doesNotMatch(second, /Auto-compacted/)
+  assert.deepEqual(await archiveNames(projectId), [])
   assert.equal((await storedProject(projectId)).lastCompaction, undefined)
   // And the ordinary budget warning is gone too: nothing is over budget.
-  assert.doesNotMatch(written, /WARNING/)
+  assert.doesNotMatch(second, /WARNING/)
 })
 
-test('a memory over its budget archives its oldest sections automatically', async () => {
-  const projectId = await newProject('Fat memory', { memoryBudget: 4_000, autonomy: 'auto' })
-  const original = memoryWithSections(6, 1_000)
-  assert.ok(original.length > 4_000, 'the fixture is over budget')
+test('a memory over its budget archives its oldest files automatically', async () => {
+  // autoCompact off while the fixture is built, so the six files all exist before
+  // the one write that crosses the budget; that write must archive the four
+  // oldest, whole.
+  const projectId = await newProject('Fat memory', { memoryBudget: 4_000, autoCompact: false })
+  await writeMemoryFixtures(projectId, memoryFileFixtures(5, 1_000))
+  assert.equal((await liveMemoryNames(projectId)).length, 5)
+  await call('projects_update', { project_id: projectId, autoCompact: true })
 
-  const written = await call('projects_memory', { project_id: projectId, action: 'write', text: original })
-  assert.match(written, /Auto-compacted the shared memory: \d+ → \d+ characters \(4 section\(s\) moved to memory-archive\.md\)/)
+  const written = await call('projects_memory', {
+    project_id: projectId,
+    action: 'write',
+    name: 's6-durable-fact',
+    description: 'Durable fact 6',
+    text: 'x'.repeat(1_000),
+  })
+  assert.match(written, /Auto-compacted the shared memory: \d+ → \d+ characters \(4 file\(s\) moved to memory\/archive\/\)/)
 
-  const memory = await memoryOf(projectId)
-  const archive = await archiveOf(projectId)
-  const backup = await backupOf(projectId)
-
-  // The newest two sections survive; the oldest four moved out verbatim.
-  assert.match(memory, /## S6 durable fact/)
-  assert.match(memory, /## S5 durable fact/)
-  assert.doesNotMatch(memory, /## S4 durable fact/)
-  assert.ok(memory.length <= 4_000, 'the remaining memory fits the budget')
-
-  assert.match(archive, /^## Compaction \d{4}-\d{2}-\d{2}T/)
-  assert.match(archive, /Moved 4 section\(s\): S1 durable fact \| S2 durable fact \| S3 durable fact \| S4 durable fact/)
-  assert.match(archive, /## S1 durable fact/)
-  assert.match(archive, /## S4 durable fact/)
-  assert.doesNotMatch(archive, /## S5 durable fact/)
-  // Nothing was lost: every archived section's body is present in full.
+  // The newest two files survive; the oldest four moved out whole.
+  assert.deepEqual(await liveMemoryNames(projectId), ['s5-durable-fact.md', 's6-durable-fact.md'])
+  assert.deepEqual(await archiveNames(projectId), [
+    's1-durable-fact.md',
+    's2-durable-fact.md',
+    's3-durable-fact.md',
+    's4-durable-fact.md',
+  ])
   for (let index = 1; index <= 4; index += 1) {
-    assert.ok(archive.includes(`## S${index} durable fact\n\n${'x'.repeat(1_000)}`), `S${index} moved verbatim`)
+    const archived = await readFileOr(join(archiveDirOf(projectId), `s${index}-durable-fact.md`))
+    // Whole file, frontmatter included: nothing was split or rewritten.
+    assert.match(
+      archived,
+      new RegExp(`^---\\nname: s${index}-durable-fact\\ndescription: Durable fact ${index}\\ntype: reference\\nmodified: \\d{4}-\\d{2}-\\d{2}T`),
+    )
+    assert.ok(archived.includes('x'.repeat(1_000)), `s${index} moved verbatim`)
   }
 
-  // The pre-compaction text is kept as a manual recovery point.
-  assert.equal(backup, original)
-
   const record = (await storedProject(projectId)).lastCompaction
-  assert.equal(record.before, original.length)
-  assert.equal(record.after, memory.length)
   assert.equal(record.archived, 4)
+  assert.ok(record.before > record.after)
   assert.ok(record.at > 0)
 
   // The compaction is visible where a human/coordinator looks, and the index
-  // reflects the compacted file rather than the archived sections.
+  // reflects the live files rather than the archived ones.
   const detail = await call('projects_get', { project_id: projectId })
   assert.match(detail, /memory: budget 4000, auto-compaction on · last compaction \d+ → \d+ characters at /)
-  assert.match(detail, /· S6 durable fact — x{80}…（1000 chars）/)
-  assert.doesNotMatch(detail, /S1 durable fact/)
+  assert.match(detail, /· s6-durable-fact — Durable fact 6（1000 chars，\d{4}-\d{2}-\d{2}）/)
+  assert.doesNotMatch(detail, /s1-durable-fact/)
 
   // The dispatch prompt carries the same index, so a worker cannot be handed
   // text that only exists in the archive.
@@ -1755,16 +2099,16 @@ test('a memory over its budget archives its oldest sections automatically', asyn
   const taskId = added.match(/t-[0-9a-f]{8}/)[0]
   await call('projects_dispatch', { project_id: projectId, task_id: taskId })
   const prompt = activations[activations.length - 1].prompt[0].text
-  assert.match(prompt, /· S6 durable fact — x{80}…（1000 chars）/)
-  assert.doesNotMatch(prompt, /S1 durable fact/)
+  assert.match(prompt, /· s6-durable-fact — Durable fact 6（1000 chars/)
+  assert.doesNotMatch(prompt, /s1-durable-fact/)
 })
 
 test('compaction is single-flight per project', async () => {
-  // Compaction off from the start, so the setup write cannot compact and the two
+  // Compaction off from the start, so the setup writes cannot compact and the two
   // direct calls below are the only compactions in play.
   const projectId = await newProject('Single flight', { memoryBudget: 4_000, autoCompact: false })
-  await call('projects_memory', { project_id: projectId, action: 'write', text: memoryWithSections(6, 1_000) })
-  assert.ok((await memoryOf(projectId)).length > 4_000)
+  await writeMemoryFixtures(projectId, memoryFileFixtures(6, 1_000))
+  assert.equal((await liveMemoryNames(projectId)).length, 6)
 
   // The first call takes the flag synchronously, before its first await, so the
   // second call in the same tick must be refused rather than racing it.
@@ -1776,9 +2120,8 @@ test('compaction is single-flight per project', async () => {
   assert.equal(firstResult.skipped, null)
   assert.equal(firstResult.archived, 4)
 
-  // One run, one archive header: the refused call archived nothing.
-  const archive = await archiveOf(projectId)
-  assert.equal(archive.match(/^## Compaction /gm).length, 1)
+  // One run, one move: the refused call archived nothing extra.
+  assert.equal((await archiveNames(projectId)).length, 4)
 
   // The flag is released, so a later write can compact again.
   const again = await plugin.compactMemory(projectId)
@@ -1786,73 +2129,103 @@ test('compaction is single-flight per project', async () => {
 })
 
 test('a failed compaction leaves the memory intact and clears the flag', async () => {
-  const projectId = await newProject('Broken archive', { memoryBudget: 4_000 })
-  await call('projects_update', { project_id: projectId, autoCompact: false })
-  const original = memoryWithSections(6, 1_000)
-  await call('projects_memory', { project_id: projectId, action: 'write', text: original })
+  const projectId = await newProject('Broken archive', { memoryBudget: 4_000, autoCompact: false })
+  await writeMemoryFixtures(projectId, memoryFileFixtures(6, 1_000))
 
-  // A directory where the archive file belongs makes the archive write fail
-  // after the backup was taken — exactly the "half-way through" case.
-  await mkdir(join(projectDirOf(projectId), 'memory-archive.md'), { recursive: true })
+  // A regular file where the archive directory belongs makes the archive step
+  // fail after the plan was made — exactly the "half-way through" case.
+  await writeFile(join(memoryDirOf(projectId), 'archive'), 'not a directory')
   const failed = await plugin.compactMemory(projectId)
   assert.equal(failed.skipped, 'error')
-  assert.match(failed.reason, /EISDIR|ENOTDIR|EPERM|EACCES|illegal operation/i)
+  assert.match(failed.reason, /EEXIST|ENOTDIR|EPERM|EACCES|illegal operation/i)
   // The memory was never replaced, and no compaction is recorded.
-  assert.equal(await memoryOf(projectId), original)
+  assert.equal((await liveMemoryNames(projectId)).length, 6)
   assert.equal((await storedProject(projectId)).lastCompaction, undefined)
 
   // The in-flight flag is gone: once the obstacle is removed the next attempt
   // compacts normally instead of being told a run is still going.
-  await rm(join(projectDirOf(projectId), 'memory-archive.md'), { recursive: true, force: true })
+  await rm(join(memoryDirOf(projectId), 'archive'), { force: true })
   const retried = await plugin.compactMemory(projectId)
   assert.equal(retried.skipped, null)
-  assert.ok((await memoryOf(projectId)).length < original.length)
-  assert.match(await archiveOf(projectId), /## S1 durable fact/)
+  assert.equal((await liveMemoryNames(projectId)).length, 2)
+  assert.equal((await archiveNames(projectId)).length, 4)
 })
 
-test('a single oversized section is never split, so nothing is archived', async () => {
-  const projectId = await newProject('One section', { memoryBudget: 4_000 })
+test('a single oversized file is never split, so nothing is archived', async () => {
+  const projectId = await newProject('One file', { memoryBudget: 4_000 })
   const written = await call('projects_memory', {
     project_id: projectId,
     action: 'write',
-    text: memoryWithSections(1, 5_000),
+    name: 's1-durable-fact',
+    description: 'Durable fact 1',
+    text: 'x'.repeat(5_000),
   })
-  assert.match(written, /nothing safe to archive: a single section is never split/)
-  assert.equal(await archiveOf(projectId), '')
-  assert.equal((await memoryOf(projectId)).length, 5_000 + '## S1 durable fact\n\n'.length)
+  assert.match(written, /nothing safe to archive: a single file is never split/)
+  assert.deepEqual(await archiveNames(projectId), [])
+  assert.equal(
+    (await call('projects_memory', { project_id: projectId, action: 'read', name: 's1-durable-fact' })).length,
+    5_000,
+  )
 })
 
 test('autoCompact false keeps the memory append-only', async () => {
   const projectId = await newProject('Manual memory', { memoryBudget: 4_000, autoCompact: false })
-  const original = memoryWithSections(6, 1_000)
-  const written = await call('projects_memory', { project_id: projectId, action: 'write', text: original })
+  await writeMemoryFixtures(projectId, memoryFileFixtures(6, 1_000))
+  const written = await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 's6-durable-fact',
+    text: 'more',
+  })
   assert.match(written, /Auto-compaction is off for this project/)
-  assert.equal(await memoryOf(projectId), original)
-  assert.equal(await archiveOf(projectId), '')
+  assert.equal((await liveMemoryNames(projectId)).length, 6)
+  assert.deepEqual(await archiveNames(projectId), [])
   assert.equal((await storedProject(projectId)).lastCompaction, undefined)
 
   // The coordinator can turn it back on, and the next write compacts.
   const updated = await call('projects_update', { project_id: projectId, autoCompact: true, memoryBudget: 5_000 })
   assert.match(updated, /memory=5000 autoCompact=true/)
-  const appended = await call('projects_memory', { project_id: projectId, action: 'append', text: '## S7 later finding\n\nshort' })
+  const appended = await call('projects_memory', {
+    project_id: projectId,
+    action: 'append',
+    name: 's6-durable-fact',
+    text: 'more',
+  })
   assert.match(appended, /Auto-compacted the shared memory/)
-  assert.match(await archiveOf(projectId), /## S1 durable fact/)
+  assert.ok((await archiveNames(projectId)).length > 0)
 })
 
 test('the page memory editor compacts too, and the settings round-trip', async () => {
-  const projectId = await newProject('Page memory', { memoryBudget: 4_000 })
-  const original = memoryWithSections(6, 1_000)
-  const saved = await request('POST', `/projects-api/projects/${projectId}/memory`, { text: original })
+  const projectId = await newProject('Page memory', { memoryBudget: 4_000, autoCompact: false })
+  await writeMemoryFixtures(projectId, memoryFileFixtures(6, 1_000))
+  await call('projects_update', { project_id: projectId, autoCompact: true })
+
+  const saved = await request('POST', `/projects-api/projects/${projectId}/memory`, {
+    name: 's6-durable-fact',
+    text: 'x'.repeat(1_000),
+  })
   assert.equal(saved.status, 200)
   assert.equal(saved.body.saved, true)
+  assert.equal(saved.body.name, 's6-durable-fact')
+  assert.equal(saved.body.size, 1_000)
   assert.match(saved.body.compaction, /Auto-compacted the shared memory/)
-  assert.match(await archiveOf(projectId), /## S1 durable fact/)
+  assert.equal((await archiveNames(projectId)).length, 4)
 
-  // The GET still returns the current (compacted) text the editor edits.
-  const read = await request('GET', `/projects-api/projects/${projectId}/memory`)
+  // The single-file route returns the body the editor edits.
+  const read = await request('GET', `/projects-api/projects/${projectId}/memory/s6-durable-fact`)
   assert.equal(read.status, 200)
-  assert.equal(read.body.memory, await memoryOf(projectId))
-  assert.doesNotMatch(read.body.memory, /## S1 durable fact/)
+  assert.equal(read.body.name, 's6-durable-fact')
+  assert.equal(read.body.text, 'x'.repeat(1_000))
+  assert.match(read.body.modified, /^\d{4}-\d{2}-\d{2}T/)
+  assert.equal(read.body.archived, false)
+  // An archived file is still readable, and says it is archived.
+  const archived = await request('GET', `/projects-api/projects/${projectId}/memory/s1-durable-fact`)
+  assert.equal(archived.status, 200)
+  assert.equal(archived.body.archived, true)
+  assert.equal(archived.body.text, 'x'.repeat(1_000))
+  // An unknown file is a 404.
+  const missing = await request('GET', `/projects-api/projects/${projectId}/memory/nope`)
+  assert.equal(missing.status, 404)
 
   // Project settings are visible on the project payload the page already reads.
   const patched = await request('PATCH', `/projects-api/projects/${projectId}`, { autoCompact: false, memoryBudget: 9_000 })
@@ -1872,41 +2245,42 @@ test('the page memory editor compacts too, and the settings round-trip', async (
   assert.equal(clamped.body.project.memoryBudget, 4_000)
 })
 
-test('an archived section is still readable, and the index says so', async () => {
-  const projectId = await newProject('Archive reading', { memoryBudget: 4_000 })
-  await call('projects_memory', { project_id: projectId, action: 'write', text: memoryWithSections(6, 1_000) })
+test('an archived file is still readable, and the index says so', async () => {
+  const projectId = await newProject('Archive reading', { memoryBudget: 4_000, autoCompact: false })
+  await writeMemoryFixtures(projectId, memoryFileFixtures(6, 1_000))
+  const compacted = await plugin.compactMemory(projectId)
+  assert.equal(compacted.archived, 4)
 
-  // S1 moved out of memory.md, but reading it by title still works and says
+  // s1 moved out of the live memory, but reading it by name still works and says
   // where it came from.
-  const archived = await call('projects_memory', { project_id: projectId, action: 'read', section: 'S1 durable fact' })
-  assert.match(archived, /^## S1 durable fact/)
-  assert.match(archived, /x{1000}/)
-  assert.match(archived, /\(Archived: compaction moved this section out of memory\.md/)
+  const archived = await call('projects_memory', { project_id: projectId, action: 'read', name: 's1-durable-fact' })
+  assert.match(archived, /^x{1000}/)
+  assert.match(archived, /\(Archived: compaction moved this file into memory\/archive\//)
 
-  // A live section is returned without the archive note.
-  const live = await call('projects_memory', { project_id: projectId, action: 'read', section: 'S6 durable fact' })
-  assert.match(live, /^## S6 durable fact/)
+  // A live file is returned without the archive note.
+  const live = await call('projects_memory', { project_id: projectId, action: 'read', name: 's6-durable-fact' })
+  assert.match(live, /^x{1000}/)
   assert.doesNotMatch(live, /Archived:/)
 
   // The tool's index lists what was archived, so it stays discoverable...
   const index = await call('projects_memory', { project_id: projectId, action: 'index' })
-  assert.match(index, /2 section\(s\), \d+ characters/)
-  assert.match(index, /4 archived section\(s\) in memory-archive\.md/)
-  assert.match(index, /- S1 durable fact \(\d+ chars\)/)
-  assert.ok(index.indexOf('archived section(s)') > index.indexOf('2 section(s)'), 'the live index comes first')
+  assert.match(index, /2 file\(s\), \d+ characters/)
+  assert.match(index, /4 archived file\(s\) in memory\/archive\//)
+  assert.match(index, /- s1-durable-fact \(\d+ chars\)/)
+  assert.ok(index.indexOf('archived file(s)') > index.indexOf('2 file(s)'), 'the live index comes first')
   // ...while the worker prompt's index does not (workers act on current memory).
   const added = await call('projects_add_task', { project_id: projectId, title: 'probe' })
   const taskId = added.match(/t-[0-9a-f]{8}/)[0]
   await call('projects_dispatch', { project_id: projectId, task_id: taskId })
   const prompt = activations[activations.length - 1].prompt[0].text
-  assert.match(prompt, /· S6 durable fact — /)
-  assert.doesNotMatch(prompt, /S1 durable fact/)
-  assert.doesNotMatch(prompt, /memory-archive\.md/)
+  assert.match(prompt, /· s6-durable-fact — /)
+  assert.doesNotMatch(prompt, /s1-durable-fact/)
+  assert.doesNotMatch(prompt, /memory\/archive/)
 
   // A miss names both stores.
   await assert.rejects(
-    () => call('projects_memory', { project_id: projectId, action: 'read', section: 'no such section' }),
-    /Archived sections are searchable too/,
+    () => call('projects_memory', { project_id: projectId, action: 'read', name: 'no such file' }),
+    /Archived files are searchable too/,
   )
 })
 

@@ -2,7 +2,7 @@
  * Projects — Host half.
  *
  * A project is a durable container for one goal: instructions, a workspace, a
- * shared memory file, and a board of tasks. The Host half owns the data (under
+ * shared memory, and a board of tasks. The Host half owns the data (under
  * `$DSH_HOME/projects/<id>/`), answers the browser page through same-origin
  * `/projects-api/*` routes, and exposes the same operations to the agent as
  * `projects_*` tools so one coordinator session can plan, dispatch and collect
@@ -15,12 +15,14 @@
  * delivered output. The coordinator never executes a task itself.
  *
  * Data layout:
- *   $DSH_HOME/projects/<projectId>/project.json   project + tasks
- *   $DSH_HOME/projects/<projectId>/memory.md     shared project memory
+ *   $DSH_HOME/projects/<projectId>/project.json          project + tasks
+ *   $DSH_HOME/projects/<projectId>/memory/MEMORY.md      generated memory index
+ *   $DSH_HOME/projects/<projectId>/memory/<name>.md      one memory topic
+ *   $DSH_HOME/projects/<projectId>/memory/archive/       whole files moved out
  */
 
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -32,17 +34,18 @@ const MAX_GOAL = 16_000
 const MAX_BRIEF = 8_000
 const MAX_OUTPUT = 4_000
 /**
- * Healthy size of the shared memory. Appends past this still succeed — silently
- * dropping a worker's findings would be worse than a fat file — but the tool
- * result says so, so the coordinator can compress instead of growing it forever.
+ * Healthy size of the shared memory. Writes past this still succeed — silently
+ * dropping a worker's findings would be worse than a fat memory — but the tool
+ * result says so, and auto-compaction archives the oldest whole files, so the
+ * project cannot grow it forever by accident.
  */
 const MEMORY_BUDGET = 64_000
 /**
- * Absolute ceiling for one write. This is a runaway guard, not the budget: it
- * has to stay above whatever is already on disk, because slicing a file at a
- * value below its current size would delete stored memory. The page round-trips
- * the whole memory through `POST /projects/:id/memory`, so a ceiling under the
- * current size would also make the memory editor unsaveable.
+ * Absolute ceiling for one memory file's body. This is a runaway guard, not the
+ * budget: it has to stay above whatever is already on disk, because slicing a
+ * file at a value below its current size would delete stored memory. The page
+ * saves one file at a time through `POST /projects/:id/memory`, so a ceiling
+ * under a file's current size would also make that file unsaveable.
  */
 const MAX_MEMORY = 200_000
 /** Bounds for the per-project `memoryBudget` override. */
@@ -50,8 +53,8 @@ const MEMORY_BUDGET_MIN = 4_000
 const MEMORY_BUDGET_MAX = MAX_MEMORY
 /**
  * Compaction aims *below* the budget rather than at it, so a project does not
- * re-compact on the very next append. 60% of the budget leaves room for roughly
- * a dozen normal-sized sections.
+ * re-compact on the very next write. 60% of the budget leaves room for roughly
+ * a dozen normal-sized topic files.
  */
 const MEMORY_TARGET_RATIO = 0.6
 /**
@@ -61,31 +64,30 @@ const MEMORY_TARGET_RATIO = 0.6
  *
  * 4,000, not 2,000, because the prompt index must keep its one-line
  * descriptions: they are the only part that lets a worker tell two long,
- * similarly named sections apart, and dropping them defeats the index. Measured
- * on this project's real memory (16 sections, 50,797 characters, long Chinese
- * titles): the full format is 2,618 characters, so a 2,000 cap forced the
- * ladder down to "no description". The project's `memoryBudget` is 64,000
- * characters; at the current average section size (~3,200 characters) a
- * budget-full memory holds ~20 sections, whose full index is ~3,200 characters.
- * 4,000 covers that worst case with ~25% headroom while still bounding the
- * prompt. This is a cap, not a target: the ladder below still degrades
- * deterministically when a memory outgrows it.
+ * similarly named files apart, and dropping them defeats the index. Measured on
+ * this project's real memory after the per-file migration (21 files, long
+ * Chinese names and descriptions): the full format is ~3,400 characters, so a
+ * 2,000 cap forced the ladder down to "no description". The project's
+ * `memoryBudget` is 64,000 characters, and a budget-full memory of ~20 files
+ * still renders a full index under 4,000. This is a cap, not a target: the
+ * ladder below still degrades deterministically when a memory outgrows it.
  */
 const MEMORY_INDEX_LIMIT = 4_000
 /** The same index for the tool: the discovery path may be a little longer. */
 const MEMORY_INDEX_TOOL_LIMIT = 8_000
 /**
- * The index's one-line description is a section's first non-empty body line,
- * markdown stripped and cut at this many characters. Long enough to tell two
- * sections apart, short enough that a full index stays cheap.
+ * The index's one-line description is a file's frontmatter description (or, when
+ * it has none, the first non-empty body line), markdown stripped and cut at this
+ * many characters. Long enough to tell two files apart, short enough that a full
+ * index stays cheap.
  */
 const MEMORY_DESCRIPTION_MAX = 80
-/** Search lists at most this many sections; the rest are counted, not listed. */
+/** Search lists at most this many files; the rest are counted, not listed. */
 const MEMORY_SEARCH_LIMIT = 10
 /**
- * A section title containing one of these markers is history rather than
- * current fact. It stays readable by name, but the index and search hide it so
- * a superseded decision cannot be mistaken for the live one.
+ * A file whose name, description or first line contains one of these markers is
+ * history rather than current fact. It stays readable by name, but the index and
+ * search hide it so a superseded decision cannot be mistaken for the live one.
  */
 const MEMORY_STALE_MARKERS = ['[superseded]', '[archived]']
 const MAX_TASKS = 200
@@ -149,9 +151,9 @@ const SESSION_DELETE_SPELLINGS = ['1', 'true', 'delete', 'remove', 'yes']
 const controllers = new Map()
 /**
  * Projects whose memory is being compacted right now. Compaction is
- * single-flight per project: a second append that lands mid-run must not start a
- * second pass over the same file (two passes would archive the same sections
- * twice and could interleave their writes). The entry is cleared in a `finally`,
+ * single-flight per project: a second write that lands mid-run must not start a
+ * second pass over the same directory (two passes could archive the same file
+ * twice and could interleave their moves). The entry is cleared in a `finally`,
  * so a failed run never wedges the project.
  */
 const compacting = new Set()
@@ -175,20 +177,39 @@ function projectFile(id) {
   return join(projectDir(id), 'project.json')
 }
 
+/**
+ * The memory directory: one markdown file per topic plus the generated
+ * `MEMORY.md` index. `archive/` holds whole files moved out by compaction.
+ */
+function memoryDir(id) {
+  return join(projectDir(id), 'memory')
+}
+
+/** The generated index: one line per topic file. Rewritten on every mutation. */
+function memoryIndexFile(id) {
+  return join(memoryDir(id), MEMORY_INDEX_FILE)
+}
+
+/** Whole topic files moved out of the live memory by auto-compaction. */
+function memoryArchiveDir(id) {
+  return join(memoryDir(id), 'archive')
+}
+
+/**
+ * The pre-per-file memory: one append-only `memory.md` with `## ` sections. Read
+ * only by the migration, which renames it to `memory.bak.md` so the migration is
+ * idempotent (a second run finds no `memory.md`) and manually reversible.
+ */
 function memoryFile(id) {
   return join(projectDir(id), 'memory.md')
 }
 
-/**
- * Sections moved out of `memory.md` by auto-compaction. Append-only and never
- * injected anywhere: it is the "nothing is lost" half of compaction, so a human
- * can still read what was summarised away.
- */
+/** The legacy archive beside `memory.md`; migration moves it into `archive/`. */
 function memoryArchiveFile(id) {
   return join(projectDir(id), 'memory-archive.md')
 }
 
-/** The memory as it was just before the last compaction, for manual recovery. */
+/** The legacy memory as it was just before migration, for manual recovery. */
 function memoryBackupFile(id) {
   return join(projectDir(id), 'memory.bak.md')
 }
@@ -396,20 +417,118 @@ async function listProjects() {
   return projects
 }
 
-async function readMemory(id) {
+// ---------------------------------------------------------------------------
+// Shared memory: one markdown file per topic
+//
+// The memory used to be a single append-only `memory.md` split into `## `
+// sections. It is now a directory of one file per topic, each with frontmatter:
+//
+//   $DSH_HOME/projects/<id>/memory/MEMORY.md          generated index
+//   $DSH_HOME/projects/<id>/memory/<name>.md          one topic
+//   $DSH_HOME/projects/<id>/memory/archive/<name>.md  whole files moved out
+//
+// Why: one file only ever grows, so every append rewrote all of it and
+// compaction had to cut it at a section boundary. One file per topic makes
+// "archive the oldest knowledge" a whole-file move (nothing is ever split) and
+// lets a reader fetch exactly the topic it needs. The index is generated, never
+// hand-edited: every mutation rewrites `MEMORY.md`, and the dispatch prompt
+// injects the same index (bounded by `MEMORY_INDEX_LIMIT`, with the same
+// degradation ladder).
+
+/** The generated index file inside the memory directory. Never a topic file. */
+const MEMORY_INDEX_FILE = 'MEMORY.md'
+/**
+ * Longest slug used as a file name. A 60-character Chinese slug is 180 UTF-8
+ * bytes, so the file name stays under the 255-byte limit; it is also short
+ * enough that a full index of ~20 files still fits the prompt cap.
+ */
+const MEMORY_NAME_MAX = 60
+/** Longest `type:` value accepted in frontmatter. */
+const MEMORY_TYPE_MAX = 40
+
+async function pathExists(path) {
   try {
-    return await readFile(memoryFile(id), 'utf8')
+    await stat(path)
+    return true
   } catch {
-    return ''
+    return false
   }
 }
 
-async function writeMemory(id, contents) {
-  await mkdir(projectDir(id), { recursive: true })
-  const text = String(contents ?? '')
-  const next = text.length > MAX_MEMORY ? text.slice(0, MAX_MEMORY) : text
-  await writeFileAtomic(memoryFile(id), next)
-  return { length: next.length, truncated: next.length < text.length }
+async function statOrNull(path) {
+  try {
+    return await stat(path)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Move a file, falling back to copy+unlink when source and destination are on
+ * different filesystems (rename is atomic and the only lossless option
+ * otherwise).
+ */
+async function moveFile(from, to) {
+  try {
+    await rename(from, to)
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error
+    await writeFile(to, await readFile(from))
+    await rm(from, { force: true })
+  }
+}
+
+/**
+ * A memory file name: lower-case, hyphen-separated, with Unicode letters and
+ * digits kept so a Chinese title survives into the file name. Capped at
+ * `MEMORY_NAME_MAX` characters.
+ */
+function memorySlug(value) {
+  const slug = String(value ?? '')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+  return Array.from(slug).slice(0, MEMORY_NAME_MAX).join('').replace(/-+$/g, '')
+}
+
+/**
+ * A name with a `-2`, `-3` suffix when the slug is already taken. Never returns
+ * the reserved index name (`memory`), so a section titled "Memory" — or a title
+ * that slugifies to nothing — still becomes a real topic file.
+ */
+function uniqueMemoryName(used, base) {
+  let name = String(base ?? '').trim() || 'memory-topic'
+  if (name === 'memory') name = 'memory-topic'
+  if (!used.has(name)) return name
+  for (let index = 2; index < 1_000; index += 1) {
+    const suffix = `-${index}`
+    const candidate = `${name.slice(0, MEMORY_NAME_MAX - suffix.length)}${suffix}`
+    if (!used.has(candidate)) return candidate
+  }
+  return `${name.slice(0, 40)}-${randomBytes(3).toString('hex')}`
+}
+
+/** The name a caller asked for, or '' when none was given. */
+function memoryNameOf(value) {
+  const raw = text(value, 300).trim().replace(/\.md$/i, '')
+  if (!raw) return ''
+  return memorySlug(raw)
+}
+
+/** The name a write/delete caller asked for; throws when it is unusable. */
+function memoryNameOrThrow(value) {
+  const raw = text(value, 300).trim()
+  if (!raw) {
+    throw httpError(400, 'name is required for this action (a memory file name such as "deployment-notes")')
+  }
+  const name = memorySlug(raw.replace(/\.md$/i, ''))
+  if (!name) throw httpError(400, `"${raw}" is not a valid memory file name`)
+  if (name === 'memory') {
+    throw httpError(400, 'MEMORY.md is the generated index, not a topic file; pick another name')
+  }
+  return name
 }
 
 /**
@@ -428,131 +547,261 @@ function plainMemoryLine(line) {
     .trim()
 }
 
-/**
- * The index's one-line description: the first non-empty body line, markdown
- * stripped and capped at `MEMORY_DESCRIPTION_MAX` characters. `''` when the
- * section has no body, so the index can fall back to a title-only line.
- */
-function memoryDescription(body) {
-  const first = String(body ?? '')
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0)
-  if (!first) return ''
-  const plain = plainMemoryLine(first)
+/** One frontmatter description: markdown stripped, one line, capped. */
+function memoryDescriptionLine(value) {
+  const plain = plainMemoryLine(value)
   if (!plain) return ''
   return plain.length > MEMORY_DESCRIPTION_MAX
     ? `${plain.slice(0, MEMORY_DESCRIPTION_MAX).trimEnd()}…`
     : plain
 }
 
-/** The `YYYY-MM-DD` date a section title carries, or '' when it carries none. */
+/** The index's one-line description: the first non-empty body line. */
+function memoryDescription(body) {
+  const first = String(body ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0)
+  if (!first) return ''
+  return memoryDescriptionLine(first)
+}
+
+/** A `type:` value: one line, bounded, defaulting to "reference". */
+function memoryTypeOf(value) {
+  const plain = String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, MEMORY_TYPE_MAX)
+  return plain || 'reference'
+}
+
+/** The `YYYY-MM-DD` date a `modified` timestamp carries, or ''. */
+function memoryDateOf(modified) {
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(modified ?? ''))
+  return match ? match[1] : ''
+}
+
+/** The `YYYY-MM-DD` date a legacy section title carries, or ''. */
 function memoryDate(title) {
   const match = /\b(\d{4}-\d{2}-\d{2})\b/.exec(String(title ?? ''))
   return match ? match[1] : ''
 }
 
-/** True for a section whose title marks it as history rather than current fact. */
-function isStaleMemorySection(title) {
-  const lower = String(title ?? '').toLowerCase()
-  return MEMORY_STALE_MARKERS.some((marker) => lower.includes(marker))
+/**
+ * True for a file whose name, description or first body line marks it as
+ * history rather than current fact. Titles carried the `[superseded]` marker
+ * before the migration; a slug cannot hold brackets, so a whole hyphen-delimited
+ * `superseded`/`archived` token in the name means the same thing.
+ */
+function isStaleMemoryFile(file) {
+  const first = String(file.body ?? '').split('\n').find((line) => line.trim()) || ''
+  const haystack = `${file.name}\n${file.description}\n${first}`.toLowerCase()
+  if (MEMORY_STALE_MARKERS.some((marker) => haystack.includes(marker))) return true
+  return /(^|-)(superseded|archived)(-|$)/.test(String(file.name ?? '').toLowerCase())
+}
+
+/** Split frontmatter from the body. Returns null when the file has none. */
+function readMemoryFrontmatter(raw) {
+  const source = String(raw ?? '')
+  if (!source.startsWith('---\n')) return null
+  const end = source.indexOf('\n---', 4)
+  if (end === -1) return null
+  const fields = {}
+  for (const line of source.slice(4, end).split('\n')) {
+    const match = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(line)
+    if (!match) continue
+    let value = match[2].trim()
+    if (value.length >= 2) {
+      const first = value[0]
+      const last = value[value.length - 1]
+      if ((first === '"' && last === '"') || (first === "'" && last === "'")) value = value.slice(1, -1)
+    }
+    fields[match[1].toLowerCase()] = value
+  }
+  const body = source.slice(end + 4).replace(/^\n+/, '').replace(/\n+$/, '')
+  return { fields, body }
 }
 
 /**
- * Split the memory into its `## ` sections. Everything before the first heading
- * is the preamble and is reported separately, so a section lookup never has to
- * guess what to do with loose text.
- *
- * Each section also carries what the index needs to describe it without
- * injecting its body: a one-line `description`, the `date` in its title, and
- * whether the title marks it `stale`.
+ * Parse one memory file. A file without frontmatter is still a topic file: the
+ * name comes from the file name, the description from the first line and
+ * `modified` from its mtime (filled in by `listMemoryFiles`), so a hand-written
+ * file is never invisible.
  */
-function memorySections(memory) {
-  const sections = []
-  let current = null
-  for (const line of String(memory ?? '').split('\n')) {
-    if (line.startsWith('## ')) {
-      current = { title: line.slice(3).trim(), lines: [] }
-      sections.push(current)
-      continue
-    }
-    if (current) current.lines.push(line)
+function parseMemoryFile(raw, fallback = {}) {
+  const source = String(raw ?? '')
+  const fileName = String(fallback.name ?? '')
+  // A hand-written file has no frontmatter to delimit the body, so its body is
+  // the whole file minus the trailing newlines (the same shape a serialized file
+  // parses back to).
+  const body = source.replace(/\n+$/, '')
+  const file = {
+    name: fileName,
+    fileName,
+    description: '',
+    type: 'reference',
+    modified: '',
+    body,
+    chars: body.length,
+    path: String(fallback.path ?? ''),
   }
-  return sections.map((section) => {
-    const body = section.lines.join('\n').trim()
-    return {
-      title: section.title,
-      body,
-      chars: body.length,
-      description: memoryDescription(body),
-      date: memoryDate(section.title),
-      stale: isStaleMemorySection(section.title),
+  const frontmatter = readMemoryFrontmatter(source)
+  if (frontmatter) {
+    const fields = frontmatter.fields
+    if (fields.name) file.name = memorySlug(fields.name) || fileName
+    if (fields.description) file.description = memoryDescriptionLine(fields.description)
+    if (fields.type) file.type = memoryTypeOf(fields.type)
+    if (fields.modified && !Number.isNaN(Date.parse(fields.modified))) {
+      file.modified = new Date(fields.modified).toISOString()
     }
-  })
+    file.body = frontmatter.body
+    file.chars = file.body.length
+  }
+  if (!file.description) file.description = memoryDescription(file.body) || file.name
+  file.stale = isStaleMemoryFile(file)
+  return file
 }
 
-function memoryPreamble(memory) {
-  const text = String(memory ?? '')
-  if (text.startsWith('## ')) return ''
-  const at = text.indexOf('\n## ')
-  return (at === -1 ? text : text.slice(0, at)).trim()
+/** Serialize one memory file: frontmatter, a blank line, then the body. */
+function serializeMemoryFile(file) {
+  const body = String(file.body ?? '').replace(/\n+$/, '')
+  return [
+    '---',
+    `name: ${file.name}`,
+    `description: ${file.description}`,
+    `type: ${file.type || 'reference'}`,
+    `modified: ${file.modified}`,
+    '---',
+    '',
+    body,
+    '',
+  ].join('\n')
+}
+
+/**
+ * The timestamp a write stamps on its file. Kept monotonic per project so two
+ * writes in the same millisecond still have a deterministic order (the index,
+ * and therefore compaction, is ordered by `modified`).
+ */
+function nextMemoryModified(files) {
+  const now = Date.now()
+  let newest = 0
+  for (const file of files) {
+    const parsed = Date.parse(file.modified)
+    if (Number.isFinite(parsed) && parsed > newest) newest = parsed
+  }
+  return new Date(Math.max(now, newest + 1)).toISOString()
+}
+
+/** Code-unit order, so the index and compaction order never depend on a locale. */
+function compareText(left, right) {
+  const a = String(left ?? '')
+  const b = String(right ?? '')
+  if (a === b) return 0
+  return a < b ? -1 : 1
+}
+
+/** Oldest first, then by name: the order compaction archives in. */
+function compareMemoryFiles(left, right) {
+  return compareText(left.modified, right.modified) || compareText(left.name, right.name)
+}
+
+/** The characters one project's memory holds: body text, not frontmatter. */
+function memoryTotal(files) {
+  return files.reduce((total, file) => total + file.chars, 0)
+}
+
+/**
+ * List the topic files in one memory directory. `MEMORY.md` is the generated
+ * index, not a topic, so it is never listed; a directory (the archive) is not a
+ * file. Files are parsed and sorted oldest first.
+ */
+async function listMemoryFiles(id, dir = memoryDir(id)) {
+  let entries
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const candidates = entries.filter(
+    (entry) =>
+      entry.isFile()
+      && /\.md$/i.test(entry.name)
+      && entry.name.toLowerCase() !== MEMORY_INDEX_FILE.toLowerCase(),
+  )
+  const files = await Promise.all(
+    candidates.map(async (entry) => {
+      const path = join(dir, entry.name)
+      const fileName = entry.name.replace(/\.md$/i, '')
+      let raw
+      try {
+        raw = await readFile(path, 'utf8')
+      } catch {
+        return null
+      }
+      const file = parseMemoryFile(raw, { name: fileName, path })
+      if (!file.modified) {
+        const info = await statOrNull(path)
+        file.modified = new Date(info ? info.mtimeMs : Date.now()).toISOString()
+      }
+      return file
+    }),
+  )
+  return files.filter(Boolean).sort(compareMemoryFiles)
+}
+
+/** The archived topic files: whole files moved out by compaction. */
+async function listArchiveFiles(id) {
+  return listMemoryFiles(id, memoryArchiveDir(id))
 }
 
 /** One index line at the requested level of detail. */
-function memoryIndexEntry(section, mode) {
-  if (mode === 'titles') return `· ${section.title}`
-  const size = `${section.chars} chars`
-  const date = section.date ? `，${section.date}` : ''
-  if (mode === 'no-description' || !section.description) return `· ${section.title}（${size}${date}）`
-  return `· ${section.title} — ${section.description}（${size}${date}）`
+function memoryIndexEntry(file, mode) {
+  if (mode === 'titles') return `· ${file.name}`
+  const size = `${file.chars} chars`
+  const date = memoryDateOf(file.modified)
+  const suffix = date ? `，${date}` : ''
+  if (mode === 'no-description' || !file.description) return `· ${file.name}（${size}${suffix}）`
+  return `· ${file.name} — ${file.description}（${size}${suffix}）`
 }
 
 /**
- * The "marked stale" footnote: titles only, never descriptions, because these
- * sections are history. Bounded so a project with dozens of them cannot blow
- * the index on its own.
+ * The "marked stale" footnote: names only, never descriptions, because these
+ * files are history. Bounded so a project with dozens of them cannot blow the
+ * index on its own.
  */
 function staleMemoryLine(stale) {
-  const titles = stale.map((section) => section.title).join(' | ')
-  let line = `- ${stale.length} section(s) marked stale (superseded/archived; still readable by name): ${titles}`
+  const names = stale.map((file) => file.name).join(' | ')
+  let line = `- ${stale.length} file(s) marked stale (superseded/archived; still readable by name): ${names}`
   if (line.length > 500) line = `${line.slice(0, 500).trimEnd()}…`
   return line
 }
 
 /**
- * The memory as an index: one line per section with a one-line description, its
- * size and the date in its title — never the body. This is what a worker prompt
+ * The memory as an index: one line per file with a one-line description, its
+ * size and its modification date — never the body. This is what a worker prompt
  * gets, so the prompt stays bounded no matter how much history accumulates.
  *
- * A described index is longer than a bare title list, so the format degrades in
+ * A described index is longer than a bare name list, so the format degrades in
  * a fixed order until it fits `limit`:
  *
- *   1. title + description + size + date      (full)
- *   2. title + size + date                    (descriptions dropped)
- *   3. title only                             (sizes and dates dropped)
- *   4. title only, truncated                  (whole sections dropped + counted)
+ *   1. name + description + size + date      (full)
+ *   2. name + size + date                    (descriptions dropped)
+ *   3. name only                             (sizes and dates dropped)
+ *   4. name only, truncated                  (whole files dropped + counted)
  *
  * The first level whose text fits wins, and the header names the level in use.
- * Sections whose title is marked `[superseded]`/`[archived]` are left out of the
- * list. `listStale` adds the "marked stale" footnote (titles only) — the tool's
- * index action asks for it so a coordinator can still find history by name; the
- * worker prompt does not, because workers act on current knowledge.
+ * Files whose name/description marks them `[superseded]`/`[archived]` are left
+ * out of the list. `listStale` adds the "marked stale" footnote (names only) —
+ * the tool's index action asks for it so a coordinator can still find history by
+ * name; the worker prompt does not, because workers act on current knowledge.
  */
-function memoryIndex(memory, limit = MEMORY_INDEX_LIMIT, { listStale = false } = {}) {
-  const text = String(memory ?? '').trim()
-  if (!text) return '(empty)'
-  const sections = memorySections(text)
-  if (sections.length === 0) {
-    return `${text.length} characters, no "## " headings. Read it with projects_memory {action:"read"}.`
-  }
-  const live = sections.filter((section) => !section.stale)
-  const stale = sections.filter((section) => section.stale)
+function memoryIndex(files, limit = MEMORY_INDEX_LIMIT, { listStale = false } = {}) {
+  const all = Array.isArray(files) ? files : []
+  if (all.length === 0) return '(empty)'
+  const live = all.filter((file) => !file.stale)
+  const stale = all.filter((file) => file.stale)
   const header =
-    `${live.length} section(s), ${text.length} characters. ` +
-    'Read one with projects_memory {action:"read", section:"<title>"} — do not assume you know what a section says. ' +
+    `${live.length} file(s), ${memoryTotal(all)} characters. ` +
+    'Read one with projects_memory {action:"read", name:"<name>"} — do not assume you know what a file says. ' +
     'Find one with projects_memory {action:"search", query:"<keyword>"}.'
-  const preamble = memoryPreamble(text)
-  const preambleLine = preamble ? `- (preamble before the first heading) (${preamble.length} chars)` : ''
   const staleLine = listStale && stale.length ? staleMemoryLine(stale) : ''
   const levels = [
     { mode: 'full', note: '' },
@@ -564,103 +813,334 @@ function memoryIndex(memory, limit = MEMORY_INDEX_LIMIT, { listStale = false } =
   ]
   for (const level of levels) {
     const lines = [`${header}${level.note}`]
-    if (preambleLine) lines.push(preambleLine)
-    for (const section of live) lines.push(memoryIndexEntry(section, level.mode))
+    for (const file of live) lines.push(memoryIndexEntry(file, level.mode))
     if (staleLine) lines.push(staleLine)
     const candidate = lines.join('\n')
     if (candidate.length <= limit) return candidate
   }
   // Level 4. Reserve room for the "…and N more" note so the note itself cannot
   // push the result past the cap; the truncated header is longer than level 3's,
-  // so this branch always drops at least one section.
+  // so this branch always drops at least one file.
   const truncatedHeader = `${header} Titles only (descriptions and sizes omitted), truncated to fit the ${limit}-character index cap.`
-  const fixedLength =
-    truncatedHeader.length +
-    (preambleLine ? preambleLine.length + 1 : 0) +
-    (staleLine ? staleLine.length + 1 : 0)
+  const fixedLength = truncatedHeader.length + (staleLine ? staleLine.length + 1 : 0)
   const room = Math.max(0, limit - fixedLength - 2 - 200)
   const shown = []
   let used = 0
-  for (const section of live) {
-    const entry = memoryIndexEntry(section, 'titles')
+  for (const file of live) {
+    const entry = memoryIndexEntry(file, 'titles')
     if (used + entry.length + 1 > room) break
     shown.push(entry)
     used += entry.length + 1
   }
   const omitted = live.length - shown.length
   const lines = [truncatedHeader]
-  if (preambleLine) lines.push(preambleLine)
   lines.push(...shown)
-  if (omitted > 0) lines.push(`- …and ${omitted} more section(s) not listed (index capped at ${limit} characters).`)
+  if (omitted > 0) lines.push(`- …and ${omitted} more file(s) not listed (index capped at ${limit} characters).`)
   if (staleLine) lines.push(staleLine)
   return lines.join('\n')
 }
 
 /**
- * Find sections by keyword: case-insensitive substring match over the title and
- * the body, stale sections excluded. Returns titles, one-line descriptions and
- * sizes — never bodies — so a search costs a fraction of a full read.
+ * Find files by keyword: case-insensitive substring match over the name, the
+ * description and the body, stale files excluded. Returns names, one-line
+ * descriptions and sizes — never bodies — so a search costs a fraction of a read.
  */
-function searchMemory(memory, query, limit = MEMORY_SEARCH_LIMIT) {
+function searchMemory(files, query, limit = MEMORY_SEARCH_LIMIT) {
   const needle = String(query ?? '').trim()
   if (!needle) throw new Error('query is required for action "search"')
-  const text = String(memory ?? '').trim()
-  if (!text) return `No memory section matches "${needle}". The shared memory is empty.`
-  const sections = memorySections(text)
-  const live = sections.filter((section) => !section.stale)
+  const all = Array.isArray(files) ? files : []
+  if (all.length === 0) return `No memory file matches "${needle}". The shared memory is empty.`
+  const live = all.filter((file) => !file.stale)
   const wanted = needle.toLowerCase()
   const matches = live.filter(
-    (section) => section.title.toLowerCase().includes(wanted) || section.body.toLowerCase().includes(wanted),
+    (file) =>
+      file.name.toLowerCase().includes(wanted)
+      || file.description.toLowerCase().includes(wanted)
+      || file.body.toLowerCase().includes(wanted),
   )
   if (matches.length === 0) {
-    const stale = sections.length - live.length
+    const stale = all.length - live.length
     return (
-      `No memory section matches "${needle}". ${live.length} live section(s) in memory` +
-      `${stale ? `, ${stale} stale section(s) excluded` : ''} — ` +
+      `No memory file matches "${needle}". ${live.length} live file(s) in memory` +
+      `${stale ? `, ${stale} stale file(s) excluded` : ''} — ` +
       'use projects_memory {action:"index"} to see them all.'
     )
   }
   const shown = matches.slice(0, limit)
   const header =
-    `${matches.length} section(s) match "${needle}"` +
+    `${matches.length} file(s) match "${needle}"` +
     (shown.length < matches.length ? `, showing the first ${shown.length}` : '') +
-    '. Read one with projects_memory {action:"read", section:"<title>"}.'
-  const lines = [header, ...shown.map((section) => memoryIndexEntry(section, 'full'))]
+    '. Read one with projects_memory {action:"read", name:"<name>"}.'
+  const lines = [header, ...shown.map((file) => memoryIndexEntry(file, 'full'))]
   if (shown.length < matches.length) {
-    lines.push(`- …and ${matches.length - shown.length} more section(s) match; narrow the query or use action:"index".`)
+    lines.push(`- …and ${matches.length - shown.length} more file(s) match; narrow the query or use action:"index".`)
   }
   return lines.join('\n')
 }
 
 /**
- * Find one section by title. Deliberately forgiving: exact match first, then
- * prefix, then "contains", all case-insensitive, because callers copy titles by
- * hand and often shorten them.
+ * Find one file by name. Deliberately forgiving: exact match first, then
+ * prefix, then "contains", all case-insensitive, because callers copy names by
+ * hand and often shorten them. Both the frontmatter name and the file name are
+ * matched, so a hand-edited frontmatter cannot hide a file.
  */
-function findMemorySection(memory, needle) {
-  const wanted = String(needle ?? '').trim().toLowerCase()
+function findMemoryFile(files, needle) {
+  const wanted = memoryNameOf(needle)
   if (!wanted) return null
-  const sections = memorySections(memory)
+  const names = (file) =>
+    [file.name, file.fileName].filter(Boolean).map((value) => String(value).toLowerCase())
   return (
-    sections.find((section) => section.title.toLowerCase() === wanted) ||
-    sections.find((section) => section.title.toLowerCase().startsWith(wanted)) ||
-    sections.find((section) => section.title.toLowerCase().includes(wanted)) ||
-    null
+    files.find((file) => names(file).includes(wanted))
+    || files.find((file) => names(file).some((value) => value.startsWith(wanted)))
+    || files.find((file) => names(file).some((value) => value.includes(wanted)))
+    || null
   )
 }
 
+/** The generated index file's text: the full index, never truncated. */
+function renderMemoryIndexFile(files) {
+  return `# Shared memory index\n\n${memoryIndex(files, Number.POSITIVE_INFINITY, { listStale: true })}\n`
+}
+
+/** Rewrite `MEMORY.md` from the files on disk. Every mutation calls this. */
+async function writeMemoryIndex(id, files) {
+  const ordered = [...files].sort(compareMemoryFiles)
+  await mkdir(memoryDir(id), { recursive: true })
+  await writeFileAtomic(memoryIndexFile(id), renderMemoryIndexFile(ordered))
+}
+
+/**
+ * Split a legacy `memory.md` into preamble + `## ` sections, keeping each
+ * section's title and body text verbatim.
+ */
+function splitLegacyMemory(raw) {
+  const blocks = []
+  const preamble = []
+  let current = null
+  for (const line of String(raw ?? '').split('\n')) {
+    if (line.startsWith('## ')) {
+      if (current) blocks.push(current)
+      current = { title: line.slice(3).trim(), lines: [] }
+      continue
+    }
+    if (current) current.lines.push(line)
+    else preamble.push(line)
+  }
+  if (current) blocks.push(current)
+  const result = []
+  const pre = preamble.join('\n').trim()
+  if (pre) result.push({ title: null, body: pre })
+  for (const block of blocks) {
+    result.push({ title: block.title, body: block.lines.join('\n').trim() })
+  }
+  return result
+}
+
+/**
+ * Migrate the pre-per-file `memory.md` into one file per `## ` section.
+ *
+ * Rules:
+ *  - the title becomes the name (slug), the first body line the description,
+ *    and the date in the title the initial `modified`, plus one second per
+ *    document position so the append order survives as modified order;
+ *  - the title itself is kept as the body's first line (`# <title>`), so no
+ *    text is lost to slugging;
+ *  - a preamble before the first heading becomes `preamble.md`;
+ *  - the legacy `memory-archive.md` moves into `memory/archive/` verbatim;
+ *  - `memory.md` is renamed to `memory.bak.md`, which makes the migration
+ *    idempotent (a second run finds no `memory.md`) and manually reversible
+ *    (`mv memory.bak.md memory.md` and remove `memory/`).
+ */
+async function migrateLegacyMemory(id, raw) {
+  await mkdir(memoryDir(id), { recursive: true })
+  await mkdir(memoryArchiveDir(id), { recursive: true })
+  const blocks = splitLegacyMemory(raw)
+  const info = await statOrNull(memoryFile(id))
+  const fallback = info ? info.mtimeMs : Date.now()
+  const used = new Set()
+  const files = []
+  blocks.forEach((block, index) => {
+    const title = block.title || ''
+    const name = uniqueMemoryName(used, title ? memorySlug(title) : 'preamble')
+    used.add(name)
+    const date = memoryDate(title)
+    const base = date ? Date.parse(`${date}T00:00:00.000Z`) : fallback
+    const modified = new Date(base + index * 1_000).toISOString()
+    const body = title ? `# ${title}\n\n${block.body}`.trimEnd() : block.body
+    files.push({
+      name,
+      fileName: name,
+      description: memoryDescription(block.body) || memoryDescription(title) || name,
+      type: 'reference',
+      modified,
+      body,
+      chars: body.length,
+      path: join(memoryDir(id), `${name}.md`),
+    })
+  })
+  for (const file of files) await writeFileAtomic(file.path, serializeMemoryFile(file))
+  if (await pathExists(memoryArchiveFile(id))) {
+    await moveFile(memoryArchiveFile(id), await uniqueArchivePath(id, 'legacy-memory-archive'))
+  }
+  try {
+    await rename(memoryFile(id), memoryBackupFile(id))
+  } catch (error) {
+    // Two readers can migrate the same project at once: the first rename wins,
+    // the second finds no `memory.md` and the backup the first wrote is the one
+    // to keep.
+    if (error?.code !== 'ENOENT') throw error
+  }
+  await writeMemoryIndex(id, files)
+  return { files: files.length, chars: memoryTotal(files) }
+}
+
+/** Migrate on first touch: a legacy `memory.md` is converted, then backed up. */
+async function ensureMemoryMigrated(id) {
+  let raw
+  try {
+    raw = await readFile(memoryFile(id), 'utf8')
+  } catch {
+    return false
+  }
+  await migrateLegacyMemory(id, raw)
+  return true
+}
+
+/** The live memory files, migrating a legacy `memory.md` first. */
+async function readMemoryFiles(id) {
+  await ensureMemoryMigrated(id)
+  const files = await listMemoryFiles(id)
+  // Self-healing: the index is generated, so a deleted MEMORY.md comes back on
+  // the next read instead of silently disappearing.
+  if (files.length > 0 && !(await pathExists(memoryIndexFile(id)))) {
+    try {
+      await writeMemoryIndex(id, files)
+    } catch {
+      // The index file is a convenience for humans and external readers; a read
+      // must still work when it cannot be regenerated.
+    }
+  }
+  return files
+}
+
+/** One file by name, live first and then the archive. */
+async function readMemoryFile(id, name) {
+  const live = findMemoryFile(await readMemoryFiles(id), name)
+  if (live) return { file: live, archived: false }
+  const archived = findMemoryFile(await listArchiveFiles(id), name)
+  return archived ? { file: archived, archived: true } : null
+}
+
+/** Write one topic file (create or replace) and regenerate the index. */
+async function writeMemoryFile(id, input, knownFiles) {
+  const files = knownFiles || (await readMemoryFiles(id))
+  const existing = files.find((file) => file.name === input.name)
+  const raw = String(input.text ?? '')
+  const truncated = raw.length > MAX_MEMORY
+  const body = (truncated ? raw.slice(0, MAX_MEMORY) : raw).replace(/\n+$/, '')
+  const description =
+    memoryDescriptionLine(input.description)
+    || existing?.description
+    || memoryDescription(body)
+    || input.name
+  const file = {
+    name: input.name,
+    fileName: input.name,
+    description,
+    type: memoryTypeOf(input.type || existing?.type),
+    modified: nextMemoryModified(files),
+    body,
+    chars: body.length,
+    path: join(memoryDir(id), `${input.name}.md`),
+  }
+  await mkdir(memoryDir(id), { recursive: true })
+  await writeFileAtomic(file.path, serializeMemoryFile(file))
+  const next = [...files.filter((candidate) => candidate.name !== file.name), file]
+  await writeMemoryIndex(id, next)
+  return { file, total: memoryTotal(next), count: next.length, truncated }
+}
+
+/** Append text to one topic file, creating it when it does not exist yet. */
+async function appendMemoryFile(id, input) {
+  const files = await readMemoryFiles(id)
+  const existing = files.find((file) => file.name === input.name)
+  const addition = String(input.text ?? '').trim()
+  const body = existing && existing.body ? `${existing.body}\n\n${addition}` : addition
+  return writeMemoryFile(id, { ...input, text: body }, files)
+}
+
+/** Delete one topic file and regenerate the index. Exact name only. */
+async function deleteMemoryFile(id, name) {
+  const files = await readMemoryFiles(id)
+  const wanted = memoryNameOf(name)
+  const file = files.find(
+    (candidate) => candidate.name === wanted || candidate.fileName === wanted,
+  )
+  if (!file) {
+    throw httpError(
+      404,
+      `No memory file matches "${name}". Files: ${files.map((candidate) => candidate.name).join(' | ') || '(none)'}.`,
+    )
+  }
+  await rm(file.path, { force: true })
+  const next = files.filter((candidate) => candidate.name !== file.name)
+  await writeMemoryIndex(id, next)
+  return { file, total: memoryTotal(next), count: next.length }
+}
+
+/** A unique path inside `memory/archive/` for a file being moved out. */
+async function uniqueArchivePath(id, name) {
+  const dir = memoryArchiveDir(id)
+  const base = memorySlug(name) || 'memory'
+  let candidate = join(dir, `${base}.md`)
+  if (!(await pathExists(candidate))) return candidate
+  const stamp = Date.now().toString(36)
+  candidate = join(dir, `${base}-${stamp}.md`)
+  let index = 2
+  while (await pathExists(candidate)) {
+    candidate = join(dir, `${base}-${stamp}-${index}.md`)
+    index += 1
+  }
+  return candidate
+}
+
+/**
+ * A bounded list of what compaction moved out, appended to the tool's index so
+ * an archived file stays discoverable. Deliberately *not* part of the worker
+ * prompt's index: workers act on current knowledge, and archived history is
+ * something the coordinator looks up on purpose.
+ */
+function archiveSummary(files, limit = 2_000) {
+  if (!files || files.length === 0) return ''
+  const header =
+    `${files.length} archived file(s) in memory/archive/ — moved out by compaction, not injected into prompts. ` +
+    'Read one with action "read", name:"<name>".'
+  const lines = [header]
+  let used = header.length
+  for (const file of files) {
+    const entry = `- ${file.fileName || file.name} (${file.chars} chars)`
+    if (used + entry.length + 1 > limit) {
+      lines.push(`- …and ${files.length - (lines.length - 1)} more archived file(s) not listed.`)
+      break
+    }
+    lines.push(entry)
+    used += entry.length + 1
+  }
+  return lines.join('\n')
+}
+
 /** A warning suffix for memory writes, or '' when everything is fine. */
-function memoryWarning({ length, truncated }, budget = MEMORY_BUDGET) {
+function memoryWarning({ length, truncated, name }, budget = MEMORY_BUDGET) {
   const notes = []
   if (truncated) {
     notes.push(
-      `WARNING: the memory hit the ${MAX_MEMORY}-character write ceiling and the tail was cut (only the tail: nothing before it was dropped).`,
+      `WARNING: memory file "${name}" hit the ${MAX_MEMORY}-character write ceiling and the tail was cut (only the tail: nothing before it was dropped).`,
     )
   }
   if (length > budget) {
     notes.push(
       `WARNING: the shared memory is now ${length} characters, ${length - budget} over the ${budget}-character budget. ` +
-        'Workers only receive an index, but the file should be compressed: read it with action "index", then replace it with a condensed version using action "write".',
+        'Workers only receive an index, but it should be compressed: read it with action "index", then rewrite or delete whole files, or let auto-compaction archive the oldest ones.',
     )
   }
   return notes.length ? ` ${notes.join(' ')}` : ''
@@ -669,11 +1149,11 @@ function memoryWarning({ length, truncated }, budget = MEMORY_BUDGET) {
 // ---------------------------------------------------------------------------
 // Automatic memory compaction
 //
-// The memory is an append-only log, so it only ever grows. Workers get an index
-// (never the text) and the coordinator reads sections, so a fat file is not
-// fatal — but it does mean the project's durable knowledge is buried in a
-// changelog, and every "read the whole memory" eventually costs a context
-// window. So the host compacts on its own once the file crosses the budget.
+// The memory only ever grows. Workers get an index (never the text) and the
+// coordinator reads one file at a time, so a fat memory is not fatal — but it
+// does mean the project's durable knowledge is buried in a changelog, and every
+// "read the whole memory" eventually costs a context window. So the host
+// compacts on its own once the memory crosses the budget.
 //
 // This is deliberately *deterministic archiving*, not an LLM summarisation pass:
 //
@@ -686,11 +1166,11 @@ function memoryWarning({ length, truncated }, budget = MEMORY_BUDGET) {
 //  - `delivery: 'parent'` is fire-and-forget: the compacted text would only come
 //    back on `subagent/end`, i.e. after the write path returned, so it could not
 //    be validated or rolled back inline and appends landing meanwhile would race.
-//  - Archiving whole sections cannot lose a fact: the moved text is kept verbatim
-//    in `memory-archive.md`. A model rewrite can, and silently.
+//  - Moving whole files cannot lose a fact: the moved file is kept verbatim in
+//    `memory/archive/`. A model rewrite can, and silently.
 //
-// So: whole oldest sections move to `memory-archive.md` until the remaining file
-// fits the target. Nothing is summarised, split or dropped.
+// So: whole oldest files move to `memory/archive/` until the live memory fits
+// the target. Nothing is summarised, split or dropped.
 
 /** The per-project budget, clamped so a hand-edited project.json cannot disable it. */
 function memoryBudgetOf(project) {
@@ -698,118 +1178,32 @@ function memoryBudgetOf(project) {
 }
 
 /**
- * Split the memory into preamble + `## ` sections, keeping each section's text
- * verbatim (the index/read paths only need titles and sizes, but archiving has to
- * move the original bytes). A `## ` line inside a body splits it, exactly like
- * `memorySections`, so the two views never disagree about what a section is.
+ * Decide what to move. Keeps the newest files that fit `target` and archives the
+ * older ones; the newest file is always kept even when it alone exceeds the
+ * target, because a file is never split. Returns null when there is nothing safe
+ * to move (no files, or only one).
  */
-function memoryBlocks(memory) {
-  const source = String(memory ?? '')
-  if (!source.trim()) return []
-  const starts = []
-  const heading = /^## /gm
-  let match
-  while ((match = heading.exec(source)) !== null) starts.push(match.index)
-  if (starts.length === 0) return [{ title: null, body: source }]
-  const blocks = []
-  const preamble = source.slice(0, starts[0])
-  if (preamble.trim()) blocks.push({ title: null, body: preamble })
-  for (let index = 0; index < starts.length; index += 1) {
-    const end = index + 1 < starts.length ? starts[index + 1] : source.length
-    const chunk = source.slice(starts[index], end)
-    const newline = chunk.indexOf('\n')
-    const title = (newline === -1 ? chunk.slice(3) : chunk.slice(3, newline)).trim()
-    blocks.push({ title, body: chunk })
-  }
-  return blocks
-}
-
-/**
- * Decide what to move. Keeps the newest sections that fit `target` and archives
- * the older ones; the newest section is always kept even when it alone exceeds
- * the target, because splitting a section would corrupt it. Returns null when
- * there is nothing safe to move (no sections, or only one).
- */
-function planArchive(memory, target) {
-  const blocks = memoryBlocks(memory)
-  const preamble = blocks.length > 0 && blocks[0].title === null ? blocks[0] : null
-  const sections = preamble ? blocks.slice(1) : blocks
-  if (sections.length <= 1) return null
+function planFileArchive(files, target) {
+  if (!files || files.length <= 1) return null
   const kept = []
-  let used = preamble ? preamble.body.length : 0
-  for (let index = sections.length - 1; index >= 0; index -= 1) {
-    const section = sections[index]
-    if (kept.length > 0 && used + section.body.length > target) break
-    kept.unshift(section)
-    used += section.body.length
+  let used = 0
+  for (let index = files.length - 1; index >= 0; index -= 1) {
+    const file = files[index]
+    if (kept.length > 0 && used + file.chars > target) break
+    kept.unshift(file)
+    used += file.chars
   }
-  const moved = sections.slice(0, sections.length - kept.length)
+  const moved = files.slice(0, files.length - kept.length)
   if (moved.length === 0) return null
-  const remaining = [preamble ? preamble.body.trimEnd() : '', ...kept.map((section) => section.body.trimEnd())]
-    .filter((part) => part)
-    .join('\n\n')
-  return {
-    remaining: `${remaining}\n`,
-    moved,
-    archivedChars: moved.reduce((total, section) => total + section.body.length, 0),
-  }
-}
-
-/** The archive's run header plus the moved sections, verbatim. */
-function archiveRunBlock(plan, before, budget) {
-  const stamp = new Date().toISOString()
-  const titles = plan.moved.map((section) => section.title || '(preamble)').join(' | ')
-  return [
-    `## Compaction ${stamp} — ${before.length} → ${plan.remaining.length} characters, budget ${budget}`,
-    `Moved ${plan.moved.length} section(s): ${titles}`,
-    '',
-    ...plan.moved.map((section) => section.body.trimEnd()),
-    '',
-  ].join('\n')
-}
-
-async function readMemoryArchive(id) {
-  try {
-    return await readFile(memoryArchiveFile(id), 'utf8')
-  } catch {
-    return ''
-  }
-}
-
-/**
- * A bounded list of what compaction moved out, appended to the tool's index so
- * an archived section stays discoverable. Deliberately *not* part of the worker
- * prompt's index: workers act on current knowledge, and archived history is
- * something the coordinator looks up on purpose.
- */
-function archiveSummary(archive, limit = 2_000) {
-  const sections = memorySections(archive).filter((section) => !section.title.startsWith('Compaction '))
-  if (sections.length === 0) return ''
-  const header =
-    `${sections.length} archived section(s) in memory-archive.md — moved out by compaction, not injected into prompts. ` +
-    'Read one with action "read", section:"<title>".'
-  const lines = [header]
-  let used = header.length
-  for (const section of sections) {
-    const entry = `- ${section.title} (${section.chars} chars)`
-    if (used + entry.length + 1 > limit) {
-      lines.push(`- …and ${sections.length - (lines.length - 1)} more archived section(s) not listed.`)
-      break
-    }
-    lines.push(entry)
-    used += entry.length + 1
-  }
-  return lines.join('\n')
+  return { kept, moved }
 }
 
 /**
  * Compact one project's memory down to `MEMORY_TARGET_RATIO` of its budget.
  *
- * Order matters: back up → append the archive → write the shorter memory →
- * verify the write. The memory is only replaced after the archive holds the
- * moved text, and a rewrite that does not actually shrink the file (or that
- * comes back empty) is discarded rather than applied. Any failure after the
- * memory write restores the pre-compaction text, so a compaction can never be
+ * Whole files move into `memory/archive/`; nothing is split, summarised or
+ * dropped. Order matters: plan → move → regenerate the index → verify. Any
+ * failure after a move puts the moved files back, so a compaction can never be
  * the thing that loses memory.
  *
  * @returns a result object; `skipped` is null on success.
@@ -818,52 +1212,36 @@ async function compactMemory(projectId) {
   const id = String(projectId)
   if (compacting.has(id)) return { skipped: 'in_flight' }
   compacting.add(id)
-  let before = ''
+  const moved = []
+  let before = 0
   let budget = MEMORY_BUDGET
-  let wrote = false
   try {
     const project = await readProject(id)
     budget = memoryBudgetOf(project)
-    before = await readMemory(id)
-    if (before.length <= budget) {
-      return { skipped: 'under_budget', before: before.length, after: before.length, budget }
-    }
+    const files = await readMemoryFiles(id)
+    before = memoryTotal(files)
+    if (before <= budget) return { skipped: 'under_budget', before, after: before, budget }
     const target = Math.max(1, Math.floor(budget * MEMORY_TARGET_RATIO))
-    const plan = planArchive(before, target)
-    if (!plan) {
-      return { skipped: 'nothing_to_archive', before: before.length, after: before.length, budget }
+    const plan = planFileArchive(files, target)
+    if (!plan) return { skipped: 'nothing_to_archive', before, after: before, budget }
+    await mkdir(memoryArchiveDir(id), { recursive: true })
+    for (const file of plan.moved) {
+      const destination = await uniqueArchivePath(id, file.name)
+      await moveFile(file.path, destination)
+      moved.push({ file, target: destination })
     }
-    if (!plan.remaining.trim() || plan.remaining.length >= before.length) {
-      return {
-        skipped: 'rolled_back',
-        before: before.length,
-        after: before.length,
-        budget,
-        reason: 'the archived result was empty or not shorter than the original',
-      }
+    await writeMemoryIndex(id, plan.kept)
+    const after = memoryTotal(plan.kept)
+    const check = await listMemoryFiles(id)
+    const stillLive = plan.moved.filter((file) =>
+      check.some((candidate) => candidate.fileName === file.fileName),
+    )
+    if (stillLive.length > 0) {
+      throw new Error(
+        `the moved file(s) are still in the live memory: ${stillLive.map((file) => file.name).join(', ')}`,
+      )
     }
-    await writeFileAtomic(memoryBackupFile(id), before)
-    await writeFileAtomic(memoryArchiveFile(id), `${await readMemoryArchive(id)}${archiveRunBlock(plan, before, budget)}`)
-    await writeFileAtomic(memoryFile(id), plan.remaining)
-    wrote = true
-    const check = await readMemory(id)
-    if (check !== plan.remaining) {
-      await writeFileAtomic(memoryFile(id), before)
-      wrote = false
-      return {
-        skipped: 'rolled_back',
-        before: before.length,
-        after: before.length,
-        budget,
-        reason: 'the rewritten memory did not read back identically',
-      }
-    }
-    const record = {
-      at: Date.now(),
-      before: before.length,
-      after: plan.remaining.length,
-      archived: plan.moved.length,
-    }
+    const record = { at: Date.now(), before, after, archived: plan.moved.length }
     // Re-read before saving: compaction can run while a task settles, and a stale
     // copy would undo that write.
     const latest = await readProject(id)
@@ -872,14 +1250,21 @@ async function compactMemory(projectId) {
     await writeProject(latest)
     return { skipped: null, ...record, budget }
   } catch (error) {
-    if (wrote) {
+    for (const { file, target } of [...moved].reverse()) {
       try {
-        await writeFileAtomic(memoryFile(id), before)
+        await moveFile(target, file.path)
       } catch {
-        // The backup on disk is still the pre-compaction text.
+        // The archive still holds the file; nothing is lost either way.
       }
     }
-    return { skipped: 'error', before: before.length, after: before.length, budget, reason: messageOf(error) }
+    if (moved.length > 0) {
+      try {
+        await writeMemoryIndex(id, await listMemoryFiles(id))
+      } catch {
+        // The next mutation regenerates it.
+      }
+    }
+    return { skipped: 'error', before, after: before, budget, reason: messageOf(error) }
   } finally {
     compacting.delete(id)
   }
@@ -890,40 +1275,71 @@ function compactionNote(result) {
   if (!result) return ''
   if (!result.skipped) {
     const still = result.after > result.budget
-      ? ` It is still over the ${result.budget}-character budget: the remaining sections are each too large to split.`
+      ? ` It is still over the ${result.budget}-character budget: the remaining files are each too large to archive.`
       : ''
-    return ` Auto-compacted the shared memory: ${result.before} → ${result.after} characters (${result.archived} section(s) moved to memory-archive.md).${still}`
+    return ` Auto-compacted the shared memory: ${result.before} → ${result.after} characters (${result.archived} file(s) moved to memory/archive/).${still}`
   }
   if (result.skipped === 'in_flight') {
     return ' A compaction is already running for this project; it will finish on its own.'
   }
   if (result.skipped === 'under_budget') return ''
   if (result.skipped === 'nothing_to_archive') {
-    return ` The memory is ${result.before} characters, over its ${result.budget}-character budget, but there is nothing safe to archive: a single section is never split.`
-  }
-  if (result.skipped === 'rolled_back') {
-    return ` Auto-compaction was rolled back (${result.reason}); the memory is unchanged at ${result.before} characters.`
+    return ` The memory is ${result.before} characters, over its ${result.budget}-character budget, but there is nothing safe to archive: a single file is never split.`
   }
   return ` Auto-compaction failed (${result.reason}); the memory is unchanged at ${result.before} characters.`
 }
 
 /**
- * The one hook every memory write goes through: warn, then compact if the file
+ * The one hook every memory write goes through: warn, then compact if the memory
  * is over budget and the project allows it. Never throws — a write that already
  * landed must not be reported as failed because housekeeping could not run.
  */
 async function afterMemoryWrite(project, written) {
   const budget = memoryBudgetOf(project)
-  const warning = memoryWarning(written, budget)
-  if (written.length <= budget) return warning
+  const warning = memoryWarning(
+    { length: written.total, truncated: written.truncated, name: written.file.name },
+    budget,
+  )
+  if (written.total <= budget) return warning
   if (project.autoCompact === false) {
-    return `${warning} Auto-compaction is off for this project, so the file stays over budget.`
+    return `${warning} Auto-compaction is off for this project, so the memory stays over budget.`
   }
   try {
     return `${warning}${compactionNote(await compactMemory(project.id))}`
   } catch (error) {
     return `${warning} Auto-compaction failed (${messageOf(error)}); the memory is unchanged.`
   }
+}
+
+/** The page's view of the memory: file metadata, never bodies. */
+function memoryPayload(project, files) {
+  return {
+    files: files.map((file) => ({
+      name: file.name,
+      description: file.description,
+      type: file.type,
+      modified: file.modified,
+      size: file.chars,
+      stale: file.stale === true,
+    })),
+    total: memoryTotal(files),
+    budget: memoryBudgetOf(project),
+  }
+}
+
+/** The tool's index: the live index plus the bounded archive summary. */
+async function memoryIndexForTool(project) {
+  const files = await readMemoryFiles(project.id)
+  const live = memoryIndex(files, MEMORY_INDEX_TOOL_LIMIT, { listStale: true })
+  const archived = archiveSummary(await listArchiveFiles(project.id))
+  return archived ? `${live}\n\n${archived}` : live
+}
+
+/** The file a tool call names: `name`, or the deprecated `section` alias. */
+function memoryNameArg(args) {
+  const name = typeof args?.name === 'string' ? args.name.trim() : ''
+  if (name) return name
+  return typeof args?.section === 'string' ? args.section.trim() : ''
 }
 
 /**
@@ -1253,7 +1669,7 @@ function languageRule(language) {
   return lines
 }
 
-function workerPrompt(project, task, memory) {
+function workerPrompt(project, task, memoryFiles) {
   const lines = [
     `You are the worker for one task in the DSH project "${project.name}" (project_id: ${project.id}).`,
     'Do only this task, then report back. The coordinator keeps working while you run.',
@@ -1266,12 +1682,12 @@ function workerPrompt(project, task, memory) {
     project.goal.trim() || '(none)',
     '',
     '## Shared project memory',
-    // An index, not the text. The memory is a long append-only log; injecting it
-    // whole made every worker pay for history it does not need. The worker can
-    // pull the one section it needs with projects_memory.
-    memoryIndex(memory),
+    // An index, not the text. The memory is one file per topic; injecting every
+    // file made each worker pay for history it does not need. The worker can pull
+    // the one file it needs with projects_memory.
+    memoryIndex(memoryFiles),
     '',
-    `The list above is an index of the shared memory, not its contents. Read a section before relying on it: projects_memory {project_id:"${project.id}", action:"read", section:"<title>"}.`,
+    `The list above is an index of the shared memory, not its contents. Read a file before relying on it: projects_memory {project_id:"${project.id}", action:"read", name:"<name>"}.`,
     '',
     '## Your task',
     `Title: ${task.title}`,
@@ -1282,7 +1698,7 @@ function workerPrompt(project, task, memory) {
     '## How to work',
     project.workspace ? `- Work inside ${project.workspace}.` : '- Work in the current directory.',
     '- Keep changes scoped to this task; do not rewrite unrelated code.',
-    `- Before finishing, append what later tasks must know (findings, decisions, gotchas) to the shared memory with the projects_memory tool: project_id "${project.id}", action "append".`,
+    `- Before finishing, append what later tasks must know (findings, decisions, gotchas) to the shared memory with the projects_memory tool: project_id "${project.id}", action "append", name "<topic-slug>", description "<one line>".`,
     '- Do not change the task status; the runner records your final message as the task output.',
     '- If the task cannot be completed, say what blocked it and what a human must decide.',
     '- Finish with a short report: what you changed, where, and how you verified it.',
@@ -1330,7 +1746,7 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
   if (running >= project.concurrency) {
     return `Concurrency limit reached (${running}/${project.concurrency} workers running). Wait for one to settle before dispatching ${task.id}.`
   }
-  const memory = await readMemory(project.id)
+  const memoryFiles = await readMemoryFiles(project.id)
   const controller = new AbortController()
   const cwd = project.workspace && (await isDirectory(project.workspace)) ? project.workspace : undefined
   // Route precedence: the task override wins over the project default, and an
@@ -1360,7 +1776,7 @@ async function dispatchTask(ctx, exec, projectId, taskId) {
     started = await subagents.startActivation({
       provider: 'spawn',
       label: `${project.name} · ${task.title}`.slice(0, 120),
-      prompt: [{ type: 'text', text: workerPrompt(project, task, memory) }],
+      prompt: [{ type: 'text', text: workerPrompt(project, task, memoryFiles) }],
       parent: exec.agent,
       ...(cwd === undefined ? {} : { cwd }),
       ...(agentPreset ? { agentPreset } : {}),
@@ -1649,8 +2065,10 @@ async function routeRequest(ctx, method, path, req, searchParams) {
   if (parts.length === 2) {
     if (method === 'GET') {
       const project = await readProject(projectId)
-      const memory = await readMemory(project.id)
-      return { status: 200, body: { project, memory } }
+      // The page gets the file list, not the memory text: the memory is one file
+      // per topic, and a single body is fetched from /projects/:id/memory/:name.
+      const files = await readMemoryFiles(project.id)
+      return { status: 200, body: { project, memory: memoryPayload(project, files) } }
     }
     if (method === 'PATCH') {
       const body = await readJson(req)
@@ -1660,11 +2078,15 @@ async function routeRequest(ctx, method, path, req, searchParams) {
     throw httpError(405, 'method_not_allowed')
   }
 
-  // /projects/:id/memory
+  // /projects/:id/memory — the whole memory as an index plus the file list.
   if (parts.length === 3 && parts[2] === 'memory') {
     if (method === 'GET') {
       const project = await readProject(projectId)
-      return { status: 200, body: { memory: await readMemory(project.id) } }
+      const files = await readMemoryFiles(project.id)
+      return {
+        status: 200,
+        body: { memory: memoryPayload(project, files), index: renderMemoryIndexFile(files) },
+      }
     }
     if (method === 'POST') {
       // Read the body before touching the store: `readJson` attaches its
@@ -1672,12 +2094,54 @@ async function routeRequest(ctx, method, path, req, searchParams) {
       // arrives while the project file is still being read.
       const body = await readJson(req)
       if (typeof body?.text !== 'string') throw httpError(400, 'text_required')
+      const name = memoryNameOrThrow(body?.name)
       const project = await readProject(projectId)
-      const written = await writeMemory(project.id, body.text)
+      const written = await writeMemoryFile(project.id, {
+        name,
+        description: body?.description,
+        type: body?.type,
+        text: body.text,
+      })
       // The page's memory editor is a write path like any other, so it compacts
-      // too. `saved` stays first so the existing page keeps working unchanged.
+      // too.
       const compaction = await afterMemoryWrite(project, written)
-      return { status: 200, body: { saved: true, length: written.length, compaction } }
+      return {
+        status: 200,
+        body: { saved: true, name: written.file.name, size: written.file.chars, compaction },
+      }
+    }
+    throw httpError(405, 'method_not_allowed')
+  }
+
+  // /projects/:id/memory/:name — one file's body, for the page's preview/editor.
+  if (parts.length === 4 && parts[2] === 'memory') {
+    let name
+    try {
+      name = decodeURIComponent(parts[3])
+    } catch {
+      throw httpError(400, 'bad_memory_name')
+    }
+    if (method === 'GET') {
+      const project = await readProject(projectId)
+      const found = await readMemoryFile(project.id, name)
+      if (!found) throw httpError(404, 'memory_file_not_found')
+      return {
+        status: 200,
+        body: {
+          name: found.file.name,
+          description: found.file.description,
+          type: found.file.type,
+          modified: found.file.modified,
+          size: found.file.chars,
+          text: found.file.body,
+          archived: found.archived,
+        },
+      }
+    }
+    if (method === 'DELETE') {
+      const project = await readProject(projectId)
+      const deleted = await deleteMemoryFile(project.id, name)
+      return { status: 200, body: { deleted: true, name: deleted.file.name } }
     }
     throw httpError(405, 'method_not_allowed')
   }
@@ -1762,7 +2226,7 @@ function formatCompaction(project) {
   return ` · last compaction ${last.before} → ${last.after} characters at ${new Date(last.at).toISOString()}`
 }
 
-function formatProject(project, memory) {
+function formatProject(project, memoryFiles) {
   const lines = [
     `Project ${project.id} — ${project.name}`,
     `workspace: ${project.workspace || '(inherited)'}`,
@@ -1787,7 +2251,11 @@ function formatProject(project, memory) {
     )
     if (task.output) lines.push(`    output: ${task.output.replace(/\n+/g, ' ').slice(0, 300)}`)
   }
-  lines.push('', '## Shared memory', memory.trim() ? memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT) : '(empty)')
+  lines.push(
+    '',
+    '## Shared memory',
+    memoryFiles.length > 0 ? memoryIndex(memoryFiles, MEMORY_INDEX_TOOL_LIMIT) : '(empty)',
+  )
   return lines.join('\n')
 }
 
@@ -1925,7 +2393,7 @@ function registerTools(ctx) {
   register({
     name: 'projects_get',
     description:
-      'Read one project: instructions, workspace, autonomy, every task with its status and output, and an index of the shared memory. Use it before planning or reporting; read a memory section with projects_memory when you need its text.',
+      'Read one project: instructions, workspace, autonomy, every task with its status and output, and an index of the shared memory. Use it before planning or reporting; read a memory file with projects_memory when you need its text.',
     parameters: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project id from projects_list.' } },
@@ -1935,7 +2403,7 @@ function registerTools(ctx) {
     output: TEXT_OUTPUT,
     execute: async (args) => {
       const project = await readProject(String(args?.project_id || ''))
-      return formatProject(project, await readMemory(project.id))
+      return formatProject(project, await readMemoryFiles(project.id))
     },
   })
 
@@ -2038,25 +2506,42 @@ function registerTools(ctx) {
   register({
     name: 'projects_memory',
     description:
-      'Read, search or write the shared memory of a project. The memory is a long append-only log, so read it by section: action "index" lists each section\'s title, one-line description and size; action "search" with a "query" finds sections by keyword without returning bodies; action "read" with a "section" returns just that section; action "read" alone returns the whole file. Record durable findings, codebase knowledge and decisions here instead of repeating them in each task brief.',
+      'Read, search, write or delete the shared memory of a project. The memory is one markdown file per topic under memory/, with a generated index: action "index" lists every file (name, one-line description, size, modified date); action "search" with a "query" finds files by keyword without returning bodies; action "read" with a "name" returns that file\'s text, and "read" alone returns the index; action "append" adds text to a file (creating it when it does not exist); action "write" replaces one file; action "delete" removes one. Record durable findings, codebase knowledge and decisions here, one file per topic, instead of repeating them in each task brief.',
     parameters: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project id.' },
         action: {
           type: 'string',
-          enum: ['index', 'read', 'search', 'append', 'write'],
-          description: 'index (titles + one-line descriptions), search (keyword match over titles and bodies), read (default; whole file, or one section with `section`), append a section, or replace all.',
+          enum: ['index', 'read', 'search', 'append', 'write', 'delete'],
+          description:
+            'index (file list), search (keyword match over names, descriptions and bodies), read (default; one file with `name`, or the index without it), append to a file, replace one file, or delete one file.',
         },
-        section: {
+        name: {
           type: 'string',
-          description: 'For action "read": a section title, or a distinctive part of one. Case-insensitive; exact, prefix and substring matches all work.',
+          description:
+            'Memory file name, a slug such as "deployment-notes" (".md" optional). Required for append, write and delete; for read it selects one file.',
+        },
+        description: {
+          type: 'string',
+          description:
+            'For append/write: one line saying what this file covers. Defaults to the first body line when the file is new, and keeps the existing description when omitted.',
+        },
+        type: {
+          type: 'string',
+          description: 'For append/write: the frontmatter `type` value; defaults to "reference".',
         },
         query: {
           type: 'string',
-          description: 'For action "search": a keyword matched case-insensitively against section titles and bodies. Returns matching titles, one-line descriptions and sizes — never the bodies.',
+          description:
+            'For action "search": a keyword matched case-insensitively against file names, descriptions and bodies. Returns matching names, one-line descriptions and sizes — never the bodies.',
         },
         text: { type: 'string', description: 'Text for append or write.' },
+        section: {
+          type: 'string',
+          description:
+            'Deprecated alias for "name", kept for prompts written before the per-file memory. Use "name".',
+        },
       },
       required: ['project_id'],
       additionalProperties: false,
@@ -2065,45 +2550,43 @@ function registerTools(ctx) {
     execute: async (args) => {
       const project = await readProject(String(args?.project_id || ''))
       const action = args?.action || 'read'
-      const memory = await readMemory(project.id)
-      if (action === 'index') {
-        const live = memoryIndex(memory, MEMORY_INDEX_TOOL_LIMIT, { listStale: true })
-        const archived = archiveSummary(await readMemoryArchive(project.id))
-        return archived ? `${live}\n\n${archived}` : live
-      }
-      if (action === 'search') {
-        return searchMemory(memory, args?.query)
-      }
+      const nameArg = memoryNameArg(args)
+      if (action === 'index') return memoryIndexForTool(project)
+      if (action === 'search') return searchMemory(await readMemoryFiles(project.id), args?.query)
       if (action === 'read') {
-        const wanted = typeof args?.section === 'string' ? args.section.trim() : ''
-        if (wanted) {
-          const section = findMemorySection(memory, wanted)
-          if (section) {
-            return section.body ? `## ${section.title}\n\n${section.body}` : `## ${section.title}\n\n(empty section)`
-          }
-          // Compaction moves sections out of memory.md, not out of reach: the
-          // archive is still searchable, and the answer says where it came from
-          // so nobody mistakes archived history for live memory.
-          const archived = findMemorySection(await readMemoryArchive(project.id), wanted)
-          if (archived) {
-            return `## ${archived.title}\n\n${archived.body}\n\n(Archived: compaction moved this section out of memory.md. It is no longer part of the memory workers see.)`
-          }
-          const titles = memorySections(memory).map((candidate) => candidate.title)
+        // No name: the index. This is the backward-compatible read: a caller that
+        // only knows `action: "read"` still gets a bounded overview, never a body.
+        if (!nameArg) return memoryIndexForTool(project)
+        const found = await readMemoryFile(project.id, nameArg)
+        if (!found) {
+          const files = await readMemoryFiles(project.id)
           throw new Error(
-            `No memory section matches "${wanted}". ${titles.length ? `Sections: ${titles.join(' | ')}` : 'The memory has no "## " sections.'} Archived sections are searchable too (memory-archive.md).`,
+            `No memory file matches "${nameArg}". Files: ${files.map((file) => file.name).join(' | ') || '(none)'}. ` +
+              'Archived files are searchable too (memory/archive/).',
           )
         }
-        return memory.trim() ? memory.trim() : 'Shared memory is empty.'
+        // Compaction moves files out of the live memory, not out of reach: the
+        // answer says where it came from so nobody mistakes history for fact.
+        const note = found.archived
+          ? '\n\n(Archived: compaction moved this file into memory/archive/. It is no longer part of the memory workers see.)'
+          : ''
+        return `${found.file.body || '(empty file)'}${note}`
       }
+      if (action === 'delete') {
+        const name = memoryNameOrThrow(nameArg)
+        const deleted = await deleteMemoryFile(project.id, name)
+        return `Deleted memory file "${deleted.file.name}" (${deleted.file.chars} characters). The memory now has ${deleted.count} file(s), ${deleted.total} characters.`
+      }
+      const name = memoryNameOrThrow(nameArg)
       const value = typeof args?.text === 'string' ? args.text.trim() : ''
       if (!value) throw new Error('text is required for append or write')
+      const input = { name, description: args?.description, type: args?.type, text: value }
       if (action === 'write') {
-        const written = await writeMemory(project.id, value)
-        return `Replaced the shared memory of ${project.id} (${written.length} characters).${await afterMemoryWrite(project, written)}`
+        const written = await writeMemoryFile(project.id, input)
+        return `Replaced memory file "${written.file.name}" (${written.file.chars} characters).${await afterMemoryWrite(project, written)}`
       }
-      const next = memory.trim() ? `${memory.trimEnd()}\n\n${value}\n` : `${value}\n`
-      const written = await writeMemory(project.id, next)
-      return `Appended ${value.length} characters to the shared memory of ${project.id}.${await afterMemoryWrite(project, written)}`
+      const written = await appendMemoryFile(project.id, input)
+      return `Appended ${value.length} characters to memory file "${written.file.name}" (${written.file.chars} characters).${await afterMemoryWrite(project, written)}`
     },
   })
 

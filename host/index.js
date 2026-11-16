@@ -546,13 +546,10 @@ function normalizeProject(raw) {
     ...(typeof raw.coordinatorSessionId === 'string' && raw.coordinatorSessionId
       ? { coordinatorSessionId: raw.coordinatorSessionId }
       : {}),
-    // The language the coordinator rules are written in. The page records the
-    // locale it renders the board in when it binds the Session; the system
-    // prompt section reads it back. A project created before this field existed
-    // falls back to the language of its own instructions.
-    ...(typeof raw.coordinatorLocale === 'string' && raw.coordinatorLocale
-      ? { coordinatorLocale: text(raw.coordinatorLocale, 16) }
-      : {}),
+    // `coordinatorLocale` is deliberately not carried over: the rules and the
+    // board are English-only now, and the reply language comes from the user's
+    // own words, so a project file written by an older version drops the field
+    // on the next read.
     createdAt: Number(raw.createdAt) || Date.now(),
     updatedAt: Number(raw.updatedAt) || Date.now(),
     tasks: Array.isArray(raw.tasks) ? raw.tasks.slice(0, MAX_TASKS).map(normalizeTask) : [],
@@ -606,9 +603,6 @@ function rememberCoordinator(project) {
     id: project.id,
     name: project.name,
     autonomy: project.autonomy,
-    // Resolved once, here: the fallback reads the goal, and the cache does not
-    // keep the goal itself (the section never renders it).
-    coordinatorLocale: coordinatorLocale(project),
   })
 }
 
@@ -1825,14 +1819,9 @@ async function updateProject(id, patch) {
     if (value) project.coordinatorSessionId = value
     else delete project.coordinatorSessionId
   }
-  // The language the coordinator rules are rendered in. Written by the page in
-  // the same request that binds the Session, before the first prompt, so the
-  // first assembly already has it.
-  if (patch?.coordinatorLocale !== undefined) {
-    const value = text(patch.coordinatorLocale, 16)
-    if (value) project.coordinatorLocale = value
-    else delete project.coordinatorLocale
-  }
+  // `coordinatorLocale` is retired. A page from an older version may still send
+  // it in the bind request; unknown fields are ignored, and `normalizeProject`
+  // drops the field from a project file that still carries it.
   // Archiving hides the board, so every retained checkout goes with it. Cleanup
   // failures are collected rather than thrown: the archive must still succeed,
   // and a task whose cleanup failed keeps its fields so a later archive retries.
@@ -2435,23 +2424,14 @@ function languageRule(language) {
 }
 
 /**
- * The language the coordinator rules are written in.
+ * The rules half of the coordinator prompt: the language rule, the job, the
+ * brief rules and the reply rules.
  *
- * The page records the locale it renders the board in when it binds the
- * Session, so the rules and the first user message speak the same language.
- * Projects that predate that field fall back to the language of their own
- * instructions — the same signal the worker prompt uses, and a better one than
- * the UI locale when the two disagree.
- */
-function coordinatorLocale(project) {
-  const stored = typeof project.coordinatorLocale === 'string' ? project.coordinatorLocale.trim() : ''
-  if (stored) return stored
-  return replyLanguage(project, { brief: '' }) || 'en'
-}
-
-/**
- * The rules half of the coordinator prompt: the job, the brief rules and the
- * reply rules.
+ * English only. The rules used to be maintained twice, in Chinese and English,
+ * and the page picked one from the project's locale. That second copy bought
+ * nothing: the reply language is a property of the conversation, not of the
+ * rules, so a single English rule tells the model to answer in the user's
+ * language and the duplicate text is gone.
  *
  * This is the body of the `projects:coordinator` system prompt section, so it is
  * re-rendered from the running plugin on every step. That is the whole point of
@@ -2460,44 +2440,17 @@ function coordinatorLocale(project) {
  * and a plugin upgrade reaches a Session that already exists without appending
  * anything to its transcript.
  */
-function coordinatorRules(project, locale) {
-  const zh = String(locale || '').toLowerCase().startsWith('zh')
-  if (zh) {
-    return [
-      '## 你的职责',
-      '你只负责四件事：拆解、分派、验收、汇报。',
-      '',
-      '1. 需要读文件、改代码、跑命令、多步排查的工作，一律用 projects_add_task 派生任务交给执行者（已有执行者的延续除外，见第 8 条），不要在对话里自己动手，也不要把命令输出、文件内容、排查过程贴进对话。',
-      '2. 用 projects_add_task 把目标拆成可并行的任务，每个任务要能独立完成；任务说明里写清做什么、在哪里做、如何验收。',
-      '3. 用 projects_dispatch 派发任务；派发后继续响应用户，不要等待。',
-      '4. 执行者交回结果后，用 projects_get 查看产出，用一两句话向用户汇报结论，并请用户在项目页验收。',
-      '5. 用 projects_memory 维护共享记忆，让所有执行者共享结论。',
-      '6. 任务是否完成由人验收：只有用户明确表示通过时，你才用 projects_update_task 把状态设为 resolved；不要替用户宣布任务已完成。',
-      project.autonomy === 'manual'
-        ? '7. 当前自主程度是手动：派发前需要用户在主对话里明确同意，再由你用 projects_update_task 把该任务标为 approved，然后派发。'
-        : '7. 当前自主程度是自动：你可以直接派发任务。',
-      '8. 判断标准只有一条：这项工作是不是某个已有执行者（worker）的延续？派发前先看当前任务列表（第一条用户消息里的「## 当前任务」，或 projects_get）。是 → 用 projects_dispatch 的 note 参数继续那个执行者，不要新建，不管工作是写代码、跑命令、发版还是别的；不是且要动手 → 用 projects_add_task 新建；不是且是简单问题 → 直接回答。不要按工作类型区分（「发布操作我自己做」「开发工作派出去」）：那会绕过已有执行者、重复劳动。要补充任务说明，用 projects_update_task 的 append_brief，不要另起一条。',
-      '',
-      '## 任务说明怎么写（硬约束）',
-      '1. 任务说明（brief）只写三件事：问题是什么、约束是什么、怎么算做完。不写实现方案。',
-      '2. 不要预先设计：不写「用 X 方案」「改第 N 行」「分三步做」，怎么做由执行者自己判断。',
-      '3. 不写行号：行号会过期，让执行者自己定位。',
-      '4. 长度上限：brief 一般 ≤ 15 行；超过必须是因为约束确实多（比如安全要求、兼容性要求）。',
-      '5. 不重复项目指令：项目级约束写在项目指令里，brief 里不要重复。',
-      '6. 验收标准要具体：写清怎么验证，比如「npm test 全绿」「截图确认 X」。',
-      '',
-      '## 回答方式（硬约束）',
-      '1. 先判断再展开：简单问题（是什么、能不能、怎么做）直接给答案，不要先分析再回答。',
-      '2. 不要无谓的结构化：不要在回复里用表格、编号清单、分节标题，除非用户明确要求，或内容确实并列。',
-      '3. 不要过程叙述：不写「我先看看」「让我分析一下」「有几种可能」，直接给结论；不要解释你打算怎么做，直接做（拆任务、派发）或直接回答。',
-      '4. 不要重复：同一件事只说一次，不要开头说一遍、结尾再说一遍。',
-      '5. 长度硬上限：一般 ≤ 3 句；需要解释时 ≤ 6 句；超过 6 句必须说明理由（例如用户问了复杂问题）。这是上限，不是目标。',
-      '6. 派任务时只说三件事：派了什么、为什么、等什么；不要复述任务 brief，不要复述任务产出（执行者的 output 已经在任务里）。',
-      '7. 不确定时问一句：一次只问必要的问题，不要列举所有可能性，也不要一次抛多个。',
-      '8. 不要罗列已完成任务清单。',
-    ].join('\n')
-  }
+function coordinatorRules(project) {
   return [
+    // The first message of a coordinator Session is always the board snapshot,
+    // written by the page on the user's behalf: it carries the project goal and
+    // instructions in the user's own words, so the reply language is the user's
+    // from the start. Stated as a rule, not a preference, for the same reason
+    // the worker prompt does: an English rules block otherwise pulls the reply
+    // into English.
+    '## Language (hard rule)',
+    'Reply in the language the user writes in, not in the language of this prompt. The first message of this conversation is always from the user, so take the language from the user\'s own words in it and keep it until the user switches. This prompt being in English is not a reason to answer in English, and neither are tool names, code, file paths, project names or the shared project memory.',
+    '',
     '## Your job',
     'You do four things only: split the goal, dispatch, review, report.',
     '',
@@ -2536,6 +2489,9 @@ function coordinatorRules(project, locale) {
  * The whole system prompt section for one coordinator Session: who the
  * coordinator is, plus the rules.
  *
+ * English only, like the rules: the reply language is the user's, and the
+ * identity line is not a place to guess it from.
+ *
  * The project goal and the task list deliberately stay in the first user
  * message. They are board state: the goal is long and the task list changes on
  * every dispatch, and a system prompt that changes rewrites the cached prefix on
@@ -2543,12 +2499,7 @@ function coordinatorRules(project, locale) {
  * rules are the part that lives here.
  */
 function coordinatorSectionText(project) {
-  const locale = coordinatorLocale(project)
-  const zh = String(locale).toLowerCase().startsWith('zh')
-  const header = zh
-    ? `你是 DSH 项目「${project.name}」的协调者（project_id: ${project.id}）。`
-    : `You are the coordinator of the DSH project "${project.name}" (project_id: ${project.id}).`
-  return `${header}\n\n${coordinatorRules(project, locale)}`
+  return `You are the coordinator of the DSH project "${project.name}" (project_id: ${project.id}).\n\n${coordinatorRules(project)}`
 }
 
 /**

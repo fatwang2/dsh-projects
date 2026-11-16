@@ -1124,8 +1124,8 @@ test('the coordinator board message carries the goal and the open tasks, not the
   const start = source.indexOf('function coordinatorBoard')
   const end = source.indexOf('function ProjectsIcon', start)
   assert.ok(start > 0 && end > start, 'coordinatorBoard is followed by the icon')
-  // The function closes over nothing but its two arguments, so the test can run
-  // the real source instead of only matching it.
+  // The function closes over nothing but its argument, so the test can run the
+  // real source instead of only matching it.
   const coordinatorBoard = new Function(`${source.slice(start, end)}; return coordinatorBoard;`)()
 
   const tasks = [
@@ -1140,47 +1140,36 @@ test('the coordinator board message carries the goal and the open tasks, not the
 
   // The message carries the control plane: the goal, one open task, and a counts
   // line that still says how much accepted work exists. Not one resolved title
-  // leaks in.
-  const zh = coordinatorBoard(project, 'zh')
-  assert.match(zh, /^DSH 项目「示例项目」的看板（project_id: p1）。/)
-  assert.match(zh, /## 项目目标与指令\n把项目页做成看板/)
-  assert.match(zh, /## 当前任务\ncounts: 1 running, 20 resolved\n/)
-  assert.match(zh, /- t-open \[running\] 正在跑的活/)
-  assert.doesNotMatch(zh, /\[resolved\]/)
-  assert.doesNotMatch(zh, /已验收的活/)
+  // leaks in. English only — the reply language comes from the user's words, not
+  // from a translated board.
+  const board = coordinatorBoard(project)
+  assert.match(board, /^The board of the DSH project "示例项目" \(project_id: p1\)\./)
+  assert.match(board, /## Project instructions\n把项目页做成看板/)
+  assert.match(board, /## Current tasks\ncounts: 1 running, 20 resolved\n/)
+  assert.match(board, /- t-open \[running\] 正在跑的活/)
+  assert.doesNotMatch(board, /\[resolved\]/)
+  assert.doesNotMatch(board, /已验收的活/)
   assert.match(
-    zh,
-    /已 resolved 的 20 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。/,
+    board,
+    /20 resolved task\(s\) are not listed here; read their output with projects_get and include_resolved: true\./,
   )
 
   // The rules are the system prompt's job now: the Host renders them from the
   // running plugin on every step, so the message must not carry a copy that
   // could drift from them or be diluted by the conversation.
-  assert.doesNotMatch(zh, /## 你的职责/)
-  assert.doesNotMatch(zh, /## 任务说明怎么写/)
-  assert.doesNotMatch(zh, /## 回答方式/)
-
-  const en = coordinatorBoard(project, 'en')
-  assert.match(en, /^The board of the DSH project "示例项目" \(project_id: p1\)\./)
-  assert.match(en, /## Project instructions\n把项目页做成看板/)
-  assert.match(en, /## Current tasks\ncounts: 1 running, 20 resolved\n/)
-  assert.match(en, /- t-open \[running\] 正在跑的活/)
-  assert.doesNotMatch(en, /\[resolved\]/)
-  assert.doesNotMatch(en, /已验收的活/)
-  assert.match(
-    en,
-    /20 resolved task\(s\) are not listed here; read their output with projects_get and include_resolved: true\./,
-  )
-  assert.doesNotMatch(en, /## Your job/)
+  assert.doesNotMatch(board, /## Your job/)
+  assert.doesNotMatch(board, /## Language/)
+  // The Chinese board text is gone with the locale switch.
+  assert.doesNotMatch(board, /看板（project_id|## 项目目标与指令|## 当前任务|## 你的职责|## 回答方式/)
 
   // A board where everything is accepted still reports its size, and a brand new
   // project keeps its original empty-state line.
-  const allDone = coordinatorBoard({ ...project, tasks: tasks.slice(1) }, 'zh')
+  const allDone = coordinatorBoard({ ...project, tasks: tasks.slice(1) })
   assert.match(allDone, /counts: 20 resolved/)
-  assert.match(allDone, /\(没有未完成的任务\)/)
-  const empty = coordinatorBoard({ ...project, tasks: [] }, 'zh')
-  assert.match(empty, /counts: 无/)
-  assert.match(empty, /\(还没有任务\)/)
+  assert.match(allDone, /\(no open tasks\)/)
+  const empty = coordinatorBoard({ ...project, tasks: [] })
+  assert.match(empty, /counts: none/)
+  assert.match(empty, /\(none yet\)/)
   assert.doesNotMatch(empty, /include_resolved/)
 })
 
@@ -4103,11 +4092,12 @@ test('starting the coordinator binds the Session before the board message and se
 
   // The message is the board snapshot, not the rules: the Host's system prompt
   // section owns the rules, and a second copy here would be a second source of
-  // truth that the conversation can dilute.
+  // truth that the conversation can dilute. English only, like the rules.
   const text = prompts[0].parts[0].text
-  assert.match(text, /^DSH 项目「示例项目」的看板（project_id: p1）。/)
-  assert.match(text, /## 项目目标与指令/)
-  assert.match(text, /## 当前任务/)
+  assert.match(text, /^The board of the DSH project "示例项目" \(project_id: p1\)\./)
+  assert.match(text, /## Project instructions/)
+  assert.match(text, /## Current tasks/)
+  assert.doesNotMatch(text, /## Your job/)
   assert.doesNotMatch(text, /## 你的职责/)
   assert.doesNotMatch(text, /## 回答方式/)
 
@@ -4115,7 +4105,7 @@ test('starting the coordinator binds the Session before the board message and se
   // before the first model step can assemble a prompt.
   assert.ok(seenBeforePrompt, 'the prompt ran after the bind')
   assert.deepEqual(seenBeforePrompt.map((request) => request.body), [
-    { coordinatorSessionId: 'sess-new', coordinatorLocale: 'zh' },
+    { coordinatorSessionId: 'sess-new' },
   ])
 
   // Nothing records a rules fingerprint any more: the system prompt is rendered
@@ -4132,16 +4122,15 @@ test('opening an existing coordinator sends nothing and rewrites nothing', async
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: {
-      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorLocale: 'zh' },
+      project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1' },
       memory: SAMPLE_MEMORY,
     },
     services: { sessions },
   })
   t.after(() => page.unmount())
 
-  // The Session is already bound and already speaks this locale, so the page
-  // neither creates nor prompts nor writes: the rules are the Host's job and
-  // they are already in every assembly.
+  // The Session is already bound, so the page neither creates nor prompts nor
+  // writes: the rules are the Host's job and they are already in every assembly.
   assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
   const retain = sessions.calls.find((call) => call.kind === 'retain')
   assert.ok(retain, 'the existing Session is retained')
@@ -4151,12 +4140,12 @@ test('opening an existing coordinator sends nothing and rewrites nothing', async
   assert.equal(page.byText('启动协调者').length, 0, 'the conversation is open, not the start button')
 })
 
-test('a locale change re-binds the existing coordinator without a message', async (t) => {
+test('a retired coordinator locale is ignored instead of rewritten', async (t) => {
   const sessions = createSessions()
   const page = await mountPage({
     projects: [{ ...SAMPLE_PROJECT }],
     detail: {
-      // Bound by a page that rendered English rules.
+      // A project file written by an older version still carries the field.
       project: { ...SAMPLE_PROJECT, coordinatorSessionId: 'sess-1', coordinatorLocale: 'en' },
       memory: SAMPLE_MEMORY,
     },
@@ -4164,11 +4153,10 @@ test('a locale change re-binds the existing coordinator without a message', asyn
   })
   t.after(() => page.unmount())
 
-  // The rules themselves are re-rendered by the Host on every step, so a locale
-  // change is one field on the project — never a message in the transcript.
-  const patch = page.requests.find((request) => request.method === 'PATCH' && request.path === '/projects/p1')
-  assert.ok(patch, 'the page recorded the new locale')
-  assert.deepEqual(patch.body, { coordinatorLocale: 'zh' })
+  // The rules are English only and re-rendered by the Host on every step, so
+  // the page has no locale to record: opening the Session writes nothing and
+  // sends no message. The stale field is the Host's to drop on read.
+  assert.equal(page.requests.filter((request) => request.method === 'PATCH').length, 0)
   assert.deepEqual(sessions.calls.filter((call) => call.kind === 'prompt'), [])
   assert.equal(sessions.calls.some((call) => call.kind === 'create'), false)
 })

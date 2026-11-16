@@ -1263,9 +1263,13 @@ ${SHARED_CSS}${DISPATCH_RULES}
      * first turn: the project instructions and the current board. The goal and
      * the task list are not in the system prompt on purpose — they change, and a
      * changing system prompt rewrites the cached prefix on every step.
+     *
+     * English only, like the rules. The reply language does not come from this
+     * message: it comes from the user's own words, which the system prompt's
+     * language rule points at. Keeping a second, translated copy here would be
+     * the same duplication the rules just dropped.
      */
-    function coordinatorBoard(project, locale) {
-      const zh = String(locale || '').toLowerCase().startsWith('zh')
+    function coordinatorBoard(project) {
       const tasks = project.tasks || []
       // The message carries the control plane only. A project that has run for a
       // week has dozens of accepted tasks; listing them here would make the
@@ -1281,34 +1285,26 @@ ${SHARED_CSS}${DISPATCH_RULES}
         ['running', 'review', 'queued', 'failed', 'blocked', 'resolved']
           .filter((status) => (tally[status] || 0) > 0)
           .map((status) => `${tally[status]} ${status}`)
-          .join(', ') || (zh ? '无' : 'none')
+          .join(', ') || 'none'
       const taskLines = open.length
         ? open.map((task) => `- ${task.id} [${task.status}] ${task.title}`).join('\n')
         : tasks.length === 0
-          ? zh
-            ? '(还没有任务)'
-            : '(none yet)'
-          : zh
-            ? '(没有未完成的任务)'
-            : '(no open tasks)'
+          ? '(none yet)'
+          : '(no open tasks)'
       const resolvedNote =
         tally.resolved > 0
-          ? zh
-            ? `已 resolved 的 ${tally.resolved} 条任务不在此列出；需要产出时用 projects_get 并传 include_resolved: true。`
-            : `${tally.resolved} resolved task(s) are not listed here; read their output with projects_get and include_resolved: true.`
+          ? `${tally.resolved} resolved task(s) are not listed here; read their output with projects_get and include_resolved: true.`
           : ''
       // The identity line stays in the message as well as in the system prompt:
       // it is what the Session title is generated from, and it keeps the first
       // turn intelligible if a profile ever runs without the prompt service.
       return [
-        zh
-          ? `DSH 项目「${project.name}」的看板（project_id: ${project.id}）。`
-          : `The board of the DSH project "${project.name}" (project_id: ${project.id}).`,
+        `The board of the DSH project "${project.name}" (project_id: ${project.id}).`,
         '',
-        zh ? '## 项目目标与指令' : '## Project instructions',
-        project.goal?.trim() || (zh ? '（未填写）' : '(none)'),
+        '## Project instructions',
+        project.goal?.trim() || '(none)',
         '',
-        zh ? '## 当前任务' : '## Current tasks',
+        '## Current tasks',
         `counts: ${countsText}`,
         taskLines,
         ...(resolvedNote ? [resolvedNote] : []),
@@ -2583,11 +2579,10 @@ ${SHARED_CSS}${DISPATCH_RULES}
 
       // A project that already has a coordinator Session reopens its
       // conversation when the project is selected. `ensure` binds the Session to
-      // the project (id and locale) before anything else; the rules themselves
-      // need no message at all, because the Host renders them into the system
-      // prompt on every step. `create: false` keeps a page load from creating a
-      // Session: a stale id stays closed, and the start button creates a fresh
-      // coordinator.
+      // the project before anything else; the rules themselves need no message
+      // at all, because the Host renders them into the system prompt on every
+      // step. `create: false` keeps a page load from creating a Session: a stale
+      // id stays closed, and the start button creates a fresh coordinator.
       useEffect(() => {
         const coordinatorId = detail?.project?.coordinatorSessionId
         if (!coordinatorId) {
@@ -2601,17 +2596,8 @@ ${SHARED_CSS}${DISPATCH_RULES}
           try {
             const archived = Array.isArray(archivedSessionIds) && archivedSessionIds.includes(coordinatorId)
             if (archived) await threadApi.restoreSession(coordinatorId)
-            let locale = 'zh'
-            try {
-              locale = typeof getLocale === 'function' ? getLocale() : 'zh'
-            } catch {
-              locale = 'zh'
-            }
             const current = detail?.project
-            const result = await threadApi.ensure(current, coordinatorBoard(current, locale), {
-              locale,
-              create: false,
-            })
+            const result = await threadApi.ensure(current, coordinatorBoard(current), { create: false })
             if (!result) return
             if (cancelled) {
               try {
@@ -3224,15 +3210,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
           if (!threadApi || typeof threadApi.ensure !== 'function') {
             throw new Error(t('sessionUnavailable'))
           }
-          let locale = 'zh'
-          try {
-            locale = typeof getLocale === 'function' ? getLocale() : 'zh'
-          } catch {
-            locale = 'zh'
-          }
           const restored = coordinatorArchived && Boolean(project.coordinatorSessionId)
           if (restored) await threadApi.restoreSession(project.coordinatorSessionId)
-          const result = await threadApi.ensure(project, coordinatorBoard(project, locale), { locale })
+          const result = await threadApi.ensure(project, coordinatorBoard(project))
           setThread({ sessionId: result.sessionId, reference: result.reference })
           // `ensure` already bound the Session to the project before the first
           // prompt, so there is nothing left to record. A fresh read is still
@@ -4985,14 +4965,9 @@ ${SHARED_CSS}${DISPATCH_RULES}
             // Bind the Session to the project *before* the first prompt. The
             // Host's `projects:coordinator` system prompt section finds the
             // project by this id, so the first assembly has to see it; a Session
-            // that is already bound and already carries this locale needs no
-            // write. The locale is the language the board below is rendered in,
-            // and the Host renders the rules in the same one.
+            // that is already bound needs no write.
             const bind = {}
             if (existing !== sessionId) bind.coordinatorSessionId = sessionId
-            if (options.locale && project.coordinatorLocale !== options.locale) {
-              bind.coordinatorLocale = options.locale
-            }
             if (Object.keys(bind).length > 0) {
               await api(`/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify(bind) })
             }

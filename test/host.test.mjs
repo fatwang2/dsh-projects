@@ -2976,7 +2976,6 @@ test('the coordinator system prompt section renders only for the coordinator ses
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
   const patched = await request('PATCH', `/projects-api/projects/${projectId}`, {
     coordinatorSessionId: 'sess-coordinator',
-    coordinatorLocale: 'zh',
   })
   assert.equal(patched.status, 200)
 
@@ -2984,12 +2983,16 @@ test('the coordinator system prompt section renders only for the coordinator ses
   assert.ok(section, 'the section is registered at load')
   assert.equal(section.order, 700)
 
-  // The coordinator's Session gets the identity line and all three rule blocks.
+  // The coordinator's Session gets the identity line, the language rule and all
+  // three rule blocks — in English only.
   const text = section.text({ agent: { session: { id: 'sess-coordinator' } } })
-  assert.match(text, /^你是 DSH 项目「Prompt section」的协调者（project_id: p-[0-9a-f]{8}）。/)
-  assert.match(text, /## 你的职责/)
-  assert.match(text, /## 任务说明怎么写（硬约束）/)
-  assert.match(text, /## 回答方式（硬约束）/)
+  assert.match(text, /^You are the coordinator of the DSH project "Prompt section" \(project_id: p-[0-9a-f]{8}\)\./)
+  assert.match(text, /## Language \(hard rule\)/)
+  assert.match(text, /## Your job/)
+  assert.match(text, /## How to write a task brief \(hard rules\)/)
+  assert.match(text, /## Reply style \(hard rules\)/)
+  // The Chinese copy is gone: one rules text, one maintenance point.
+  assert.doesNotMatch(text, /你的职责|任务说明怎么写|回答方式/)
   // The goal stays in the first user message: it is board state, and repeating
   // it here would rewrite the cached prefix whenever the human edits it.
   assert.doesNotMatch(text, /把协调者规则放进 system prompt/)
@@ -3005,104 +3008,85 @@ test('the coordinator system prompt section renders only for the coordinator ses
   assert.equal(section.text(null), '')
 })
 
-test('the coordinator section follows the project name, autonomy and locale', async () => {
+test('the coordinator section follows the project name and autonomy', async () => {
   const created = await call('projects_create', { name: 'Live rules', goal: 'Ship it.', autonomy: 'manual' })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
   await request('PATCH', `/projects-api/projects/${projectId}`, {
     coordinatorSessionId: 'sess-live',
-    coordinatorLocale: 'zh',
   })
   const section = fakeSystemPrompt.sections.get('projects:coordinator')
   const render = () => section.text({ agent: { session: { id: 'sess-live' } } })
 
-  assert.match(render(), /当前自主程度是手动/)
+  assert.match(render(), /Autonomy is manual/)
   // A settings write is visible on the next step without any message: the
   // provider reads the index `writeProject` keeps current.
   await request('PATCH', `/projects-api/projects/${projectId}`, { autonomy: 'auto', name: 'Renamed' })
-  assert.match(render(), /^你是 DSH 项目「Renamed」的协调者/)
-  assert.match(render(), /当前自主程度是自动/)
-
-  // The locale is a project field, so the same Session can switch languages.
-  await request('PATCH', `/projects-api/projects/${projectId}`, { coordinatorLocale: 'en' })
   assert.match(render(), /^You are the coordinator of the DSH project "Renamed"/)
-  assert.match(render(), /## Your job/)
   assert.match(render(), /Autonomy is auto/)
+  // One rules text, English, whatever language the project was written in.
+  assert.match(render(), /## Your job/)
+  assert.doesNotMatch(render(), /## 你的职责/)
 })
 
-test('the coordinator Session and locale are project fields the page records', async () => {
+test('the coordinator Session is a project field the page records', async () => {
   const created = await call('projects_create', { name: 'Binding', autonomy: 'manual' })
   const projectId = created.match(/p-[0-9a-f]{8}/)[0]
 
   // The page binds the Session before the first prompt, in one write.
   const patched = await request('PATCH', `/projects-api/projects/${projectId}`, {
     coordinatorSessionId: 'sess-bound',
-    coordinatorLocale: 'zh',
   })
   assert.equal(patched.status, 200)
   assert.equal(patched.body.project.coordinatorSessionId, 'sess-bound')
-  assert.equal(patched.body.project.coordinatorLocale, 'zh')
+
+  // The locale field is retired: a page from an older version that still sends
+  // it changes nothing.
+  const withLocale = await request('PATCH', `/projects-api/projects/${projectId}`, {
+    coordinatorLocale: 'zh',
+  })
+  assert.equal(withLocale.status, 200)
+  assert.equal('coordinatorLocale' in withLocale.body.project, false)
 
   const detail = await request('GET', `/projects-api/projects/${projectId}`)
   assert.equal(detail.body.project.coordinatorSessionId, 'sess-bound')
-  assert.equal(detail.body.project.coordinatorLocale, 'zh')
+  assert.equal('coordinatorLocale' in detail.body.project, false)
 
   // An empty value clears the binding: the next start creates a fresh
   // coordinator instead of opening the one that failed.
   const cleared = await request('PATCH', `/projects-api/projects/${projectId}`, {
     coordinatorSessionId: '',
-    coordinatorLocale: '',
   })
   assert.equal('coordinatorSessionId' in cleared.body.project, false)
-  assert.equal('coordinatorLocale' in cleared.body.project, false)
   const after = await request('GET', `/projects-api/projects/${projectId}`)
   assert.equal('coordinatorSessionId' in after.body.project, false)
-  assert.equal('coordinatorLocale' in after.body.project, false)
 
-  // The retired rules fingerprint is dropped on read, so an old project file
-  // cannot resurrect the mechanism the system prompt replaced.
+  // Retired fields are dropped on read, so an old project file cannot resurrect
+  // the locale switch or the rules fingerprint the system prompt replaced.
   const file = join(home, 'projects', projectId, 'project.json')
   const raw = JSON.parse(await readFile(file, 'utf8'))
+  raw.coordinatorLocale = 'zh'
   raw.coordinatorPromptHash = 'deadbeef'
   await writeFile(file, JSON.stringify(raw))
   const legacy = await request('GET', `/projects-api/projects/${projectId}`)
+  assert.equal('coordinatorLocale' in legacy.body.project, false)
   assert.equal('coordinatorPromptHash' in legacy.body.project, false)
 })
 
-test('the coordinator rules state the job, brief and reply rules as hard rules in both languages', () => {
-  const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', autonomy: 'manual' }
-  const zh = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'zh' })
-  const en = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'en' })
+test('the coordinator rules are English only and tell it to answer in the user language', () => {
+  const project = { id: 'p1', name: 'Sample', goal: 'Turn the project page into a board', autonomy: 'manual' }
+  const en = plugin.coordinatorSectionText(project)
+
+  // One rules text, English. The Chinese copy went away with the locale switch:
+  // the reply language is a rule, not a second translation to maintain.
+  assert.match(en, /## Language \(hard rule\)/)
+  assert.match(en, /Reply in the language the user writes in, not in the language of this prompt/)
+  assert.match(en, /The first message of this conversation is always from the user/)
+  assert.match(en, /take the language from the user's own words in it and keep it until the user switches/)
+  assert.doesNotMatch(en, /[\u4e00-\u9fff]/, 'the whole section carries no Chinese text')
 
   // The rules moved here from the client when the section moved into the system
   // prompt; the assertions moved with them. Each rule is checked by its operative
-  // clause rather than a paraphrase, in the language the human reads.
-  for (const line of [
-    '先判断再展开',
-    '简单问题（是什么、能不能、怎么做）直接给答案',
-    '不要无谓的结构化',
-    '不要在回复里用表格、编号清单、分节标题',
-    '不要过程叙述',
-    '我先看看',
-    '让我分析一下',
-    '有几种可能',
-    '不要重复',
-    '同一件事只说一次',
-    '长度硬上限',
-    '一般 ≤ 3 句',
-    '需要解释时 ≤ 6 句',
-    '超过 6 句必须说明理由',
-    '派任务时只说三件事',
-    '派了什么、为什么、等什么',
-    '不确定时问一句',
-    '不要列举所有可能性',
-    // The brevity rules that predate this change survive.
-    '不要复述任务产出',
-    '不要罗列已完成任务清单',
-    '不要解释你打算怎么做',
-    '一次只问必要的问题',
-  ]) {
-    assert.ok(zh.includes(line), `the zh rules are missing: ${line}`)
-  }
+  // clause rather than a paraphrase.
   for (const line of [
     'Decide first, then expand',
     'for a simple question (what / can it / how), answer directly',
@@ -3131,32 +3115,8 @@ test('the coordinator rules state the job, brief and reply rules as hard rules i
   }
 
   // The brief rules are the counterpart of the reply rules: the coordinator must
-  // not pre-design the work it hands out. Checked by operative clause in both
-  // languages, including the numeric length cap.
-  for (const line of [
-    '## 任务说明怎么写（硬约束）',
-    '任务说明（brief）只写三件事',
-    '问题是什么、约束是什么、怎么算做完',
-    '不写实现方案',
-    '不要预先设计',
-    '用 X 方案',
-    '改第 N 行',
-    '分三步做',
-    '怎么做由执行者自己判断',
-    '不写行号',
-    '行号会过期',
-    '让执行者自己定位',
-    'brief 一般 ≤ 15 行',
-    '超过必须是因为约束确实多',
-    '不重复项目指令',
-    '项目级约束写在项目指令里',
-    '验收标准要具体',
-    '写清怎么验证',
-    'npm test 全绿',
-    '截图确认 X',
-  ]) {
-    assert.ok(zh.includes(line), `the zh rules are missing: ${line}`)
-  }
+  // not pre-design the work it hands out. Checked by operative clause, including
+  // the numeric length cap.
   for (const line of [
     '## How to write a task brief (hard rules)',
     'A brief says three things only',
@@ -3183,69 +3143,46 @@ test('the coordinator rules state the job, brief and reply rules as hard rules i
   }
 
   // The eight job rules and the tools they name are untouched by the style block.
-  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 任务说明'))
   const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## How to write a task brief'))
-  for (const job of [zhJob, enJob]) {
-    assert.equal([...job.matchAll(/^\d+\. /gm)].length, 8, 'the eight job rules are all present')
-    for (const tool of [
-      'projects_add_task',
-      'projects_dispatch',
-      'projects_get',
-      'projects_update_task',
-      'projects_memory',
-    ]) {
-      assert.ok(job.includes(tool), `the job rules still name ${tool}`)
-    }
+  assert.equal([...enJob.matchAll(/^\d+\. /gm)].length, 8, 'the eight job rules are all present')
+  for (const tool of [
+    'projects_add_task',
+    'projects_dispatch',
+    'projects_get',
+    'projects_update_task',
+    'projects_memory',
+  ]) {
+    assert.ok(enJob.includes(tool), `the job rules still name ${tool}`)
   }
 
-  // The brief block sits between the job rules and the reply rules, so it reads
-  // as part of "how you work" rather than as a reply-style afterthought.
-  assert.ok(zh.indexOf('## 你的职责') < zh.indexOf('## 任务说明'))
-  assert.ok(zh.indexOf('## 任务说明') < zh.indexOf('## 回答方式'))
+  // The language rule sits above the job rules, and the brief block sits between
+  // the job rules and the reply rules, so it reads as part of "how you work"
+  // rather than as a reply-style afterthought.
+  assert.ok(en.indexOf('## Language (hard rule)') < en.indexOf('## Your job'))
   assert.ok(en.indexOf('## Your job') < en.indexOf('## How to write a task brief'))
   assert.ok(en.indexOf('## How to write a task brief') < en.indexOf('## Reply style'))
 
-  // Both languages carry the same number of hard rules, so a rule added to one
-  // branch cannot silently go missing from the other.
-  const zhReply = zh.slice(zh.indexOf('## 回答方式'))
+  // The three blocks keep their rule counts — 8 job, 6 brief, 8 reply — so
+  // deleting the Chinese copy cannot silently drop a rule.
   const enReply = en.slice(en.indexOf('## Reply style'))
-  assert.equal([...zhReply.matchAll(/^\d+\. /gm)].length, 8)
   assert.equal([...enReply.matchAll(/^\d+\. /gm)].length, 8)
-  const zhBrief = zh.slice(zh.indexOf('## 任务说明'), zh.indexOf('## 回答方式'))
   const enBrief = en.slice(en.indexOf('## How to write a task brief'), en.indexOf('## Reply style'))
-  assert.equal([...zhBrief.matchAll(/^\d+\. /gm)].length, 6)
   assert.equal([...enBrief.matchAll(/^\d+\. /gm)].length, 6)
 
   // The rule that points at the task list has to name where the list now lives
   // (the first user message) instead of the old "above" the rules.
-  assert.match(zh, /派发前先看当前任务列表/)
   assert.match(en, /read the current task list/)
 })
 
 test('the coordinator decides continuation by existing worker, not by kind of work', () => {
   const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', autonomy: 'manual' }
-  const zh = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'zh' })
-  const en = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'en' })
+  const en = plugin.coordinatorSectionText(project)
 
   // The dispatch decision used to be framed as "a later stage of the same
   // unfinished task", which let a coordinator split by kind of work instead:
   // releases done in the conversation, development handed to a worker. The one
   // criterion is now whether the work continues an existing worker, and the
-  // three outcomes are spelled out in both languages.
-  for (const line of [
-    '判断标准只有一条',
-    '这项工作是不是某个已有执行者（worker）的延续',
-    '是 → 用 projects_dispatch 的 note 参数继续那个执行者',
-    '不要新建',
-    '不管工作是写代码、跑命令、发版还是别的',
-    '不是且要动手 → 用 projects_add_task 新建',
-    '不是且是简单问题 → 直接回答',
-    '不要按工作类型区分',
-    '「发布操作我自己做」「开发工作派出去」',
-    '绕过已有执行者、重复劳动',
-  ]) {
-    assert.ok(zh.includes(line), `the zh continuation rule is missing: ${line}`)
-  }
+  // three outcomes are spelled out.
   for (const line of [
     'There is one criterion',
     'is this work a continuation of an existing worker',
@@ -3260,34 +3197,31 @@ test('the coordinator decides continuation by existing worker, not by kind of wo
   ]) {
     assert.ok(en.includes(line), `the en continuation rule is missing: ${line}`)
   }
+  // The Chinese continuation text is gone with the rest of the translation.
+  assert.doesNotMatch(en, /判断标准只有一条|已有执行者的延续除外/)
 
   // The criterion lives in rule 8, so the job block still has exactly eight
   // rules and the dispatch rule keeps its pointer to the task list.
-  const zhJob = zh.slice(zh.indexOf('## 你的职责'), zh.indexOf('## 任务说明'))
   const enJob = en.slice(en.indexOf('## Your job'), en.indexOf('## How to write a task brief'))
-  assert.equal([...zhJob.matchAll(/^\d+\. /gm)].length, 8)
   assert.equal([...enJob.matchAll(/^\d+\. /gm)].length, 8)
-  assert.ok(zhJob.includes('判断标准只有一条'))
   assert.ok(enJob.includes('There is one criterion'))
-  assert.ok(zhJob.includes('projects_dispatch 的 note 参数'))
   assert.ok(enJob.includes('projects_dispatch note parameter'))
 
   // Rule 1 sends hands-on work to a task, but it must not send a continuation
   // to a brand-new task: it points at rule 8 for that exception.
-  assert.ok(zhJob.includes('已有执行者的延续除外，见第 8 条'))
   assert.ok(enJob.includes('except a continuation of an existing worker, see rule 8'))
 })
 
 test('the coordinator rules stay within their per-step length budget', () => {
   const project = { id: 'p1', name: '示例项目', goal: '把项目页做成看板', autonomy: 'manual' }
-  const zh = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'zh' })
-  const en = plugin.coordinatorSectionText({ ...project, coordinatorLocale: 'en' })
+  const en = plugin.coordinatorSectionText(project)
 
   // The section is repeated on every model step, so its size is a per-step
-  // cost, not a one-off. The caps leave ~5% headroom over the measured text
-  // (zh 1512, en 3881), so adding another rule stays a deliberate decision.
-  assert.ok(zh.length < 1600, `the zh rules ballooned to ${zh.length} chars`)
-  assert.ok(en.length < 4000, `the en rules ballooned to ${en.length} chars`)
+  // cost, not a one-off. One English copy replaced two translated copies, so
+  // the cap is a single number now. The cap leaves ~5% headroom over the
+  // measured text (4295 with the language rule), so adding another rule stays a
+  // deliberate decision.
+  assert.ok(en.length < 4500, `the en rules ballooned to ${en.length} chars`)
 })
 
 test('the coordinator index is primed from disk at load', async () => {
@@ -3305,7 +3239,9 @@ test('the coordinator index is primed from disk at load', async () => {
       goal: 'Restart me.',
       autonomy: 'auto',
       coordinatorSessionId: 'sess-primed',
-      coordinatorLocale: 'en',
+      // A retired field, still on disk: the read has to ignore it rather than
+      // fail, and the rules are English regardless.
+      coordinatorLocale: 'zh',
       tasks: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -3316,6 +3252,8 @@ test('the coordinator index is primed from disk at load', async () => {
   const text = section.text({ agent: { session: { id: 'sess-primed' } } })
   assert.match(text, /^You are the coordinator of the DSH project "Primed"/)
   assert.match(text, /Autonomy is auto/)
+  // A legacy `coordinatorLocale: 'zh'` cannot bring the Chinese rules back.
+  assert.doesNotMatch(text, /你的职责|任务说明怎么写|回答方式/)
 })
 
 test('a failed archive keeps the task on the board', async () => {

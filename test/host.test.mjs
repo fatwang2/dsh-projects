@@ -3182,10 +3182,23 @@ test('the coordinator decides continuation by existing worker, not by kind of wo
   // unfinished task", which let a coordinator split by kind of work instead:
   // releases done in the conversation, development handed to a worker. The one
   // criterion is now whether the work continues an existing worker, and the
-  // three outcomes are spelled out.
+  // three outcomes are spelled out. In real use it was still too abstract: a
+  // coordinator answered a query task, then created a new task to land the
+  // answer as a deliverable, though the whole job needed the context of the
+  // resolved one. The criterion now judges adjacency of context, and says that
+  // an answered question does not close a worker.
   for (const line of [
     'There is one criterion',
     'is this work a continuation of an existing worker',
+    'Judge by adjacency of work, not by novelty of the question',
+    'needs the context that worker already built',
+    'the same files, data, investigation or conclusion',
+    'a step that cannot be explained without its findings',
+    'An answered question does not close a worker',
+    'a different decision point does not make the next step new work',
+    'a conclusion that has to be landed as a fix, a release, a document or a next stage of the same thread belongs to the worker that reached it',
+    'When both readings are defensible, continue',
+    'a note keeps the context, a new task throws it away',
     'Yes → continue that worker with the projects_dispatch note parameter',
     'rather than creating one',
     'whether it is code, commands, a release, or anything else',
@@ -3218,10 +3231,13 @@ test('the coordinator rules stay within their per-step length budget', () => {
 
   // The section is repeated on every model step, so its size is a per-step
   // cost, not a one-off. One English copy replaced two translated copies, so
-  // the cap is a single number now. The cap leaves ~5% headroom over the
-  // measured text (4295 with the language rule), so adding another rule stays a
-  // deliberate decision.
-  assert.ok(en.length < 4500, `the en rules ballooned to ${en.length} chars`)
+  // the cap is a single number now. The adjacency rule deliberately raised the
+  // text to 4905 chars: a coordinator had been treating the landing stage of a
+  // resolved query task as new work, and the criterion needed enough wording to
+  // say that an answered question does not close a worker. The cap keeps ~5%
+  // headroom over that measured text (5150), so the next addition is another
+  // deliberate decision rather than a silent drift.
+  assert.ok(en.length < 5150, `the en rules ballooned to ${en.length} chars`)
 })
 
 test('the coordinator index is primed from disk at load', async () => {
